@@ -22,6 +22,14 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
         if (!string.IsNullOrWhiteSpace(status))
             throw new InvalidOperationException("The source clone is not clean. Preparation expects a clean checkout.");
 
+        var normalizedEngFiles = await SolutionPathUpdater.NormalizeRepositoryEngineeringReferencesAsync(context.SourceRoot).ConfigureAwait(false);
+        if (normalizedEngFiles > 0)
+        {
+            await CommitPreparationStepAsync(
+                context.SourceRoot,
+                "Normalize eng path references to $(RepositoryEngineeringDir)").ConfigureAwait(false);
+        }
+
         var topLevelEntries = Directory.GetFileSystemEntries(context.SourceRoot)
             .Select(static path => Path.GetFileName(path))
             .Where(static name => !string.IsNullOrEmpty(name) && !string.Equals(name, ".git", StringComparison.OrdinalIgnoreCase))
@@ -42,11 +50,8 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
 
         foreach (var entry in entriesToMove)
         {
-            if (string.Equals(entry, "src", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(entry, "eng", StringComparison.OrdinalIgnoreCase))
-            {
+            if (string.Equals(entry, "src", StringComparison.OrdinalIgnoreCase))
                 continue;
-            }
 
             await GitRunner.RunGitAsync(context.SourceRoot, "mv", "--", entry, Path.Combine(targetRelativePath, entry)).ConfigureAwait(false);
         }
@@ -61,21 +66,36 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
                 Path.Combine(targetRelativePath, "src")).ConfigureAwait(false);
         }
 
-        var engMoveCount = await MoveEngContentsAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
         var updatedPathFiles = await SolutionPathUpdater.UpdateMovedPathsAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
         var rootMoveCount = entriesToMove.Count(static entry =>
-            !string.Equals(entry, "src", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(entry, "eng", StringComparison.OrdinalIgnoreCase));
+            !string.Equals(entry, "src", StringComparison.OrdinalIgnoreCase));
 
-        if (srcTreeAlreadyNested && rootMoveCount == 0 && engMoveCount == 0 && updatedPathFiles == 0)
+        if (rootMoveCount > 0 || updatedPathFiles > 0)
+        {
+            await CommitPreparationStepAsync(
+                context.SourceRoot,
+                $"Move Razor repo contents under '{targetRelativePath}'").ConfigureAwait(false);
+        }
+
+        var rewrittenRepoRootFiles = await SolutionPathUpdater.RewriteRepoRootReferencesAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
+        if (rewrittenRepoRootFiles > 0)
+        {
+            await CommitPreparationStepAsync(
+                context.SourceRoot,
+                $"Rewrite $(RepoRoot) references for '{targetRelativePath}' nesting").ConfigureAwait(false);
+        }
+
+        var updatedFileCount = normalizedEngFiles + updatedPathFiles + rewrittenRepoRootFiles;
+
+        if (srcTreeAlreadyNested && rootMoveCount == 0 && updatedFileCount == 0)
         {
             Console.WriteLine($"Razor repo is already prepared under '{targetRoot}'.");
             return;
         }
 
-        Console.WriteLine($@"Moved {rootMoveCount} root entr{(rootMoveCount == 1 ? "y" : "ies")} and {engMoveCount} eng entr{(engMoveCount == 1 ? "y" : "ies")} under '{targetRelativePath}'.");
-        if (updatedPathFiles > 0)
-            Console.WriteLine($"Updated {updatedPathFiles} project/solution file(s).");
+        Console.WriteLine($"Moved {rootMoveCount} root entr{(rootMoveCount == 1 ? "y" : "ies")} under '{targetRelativePath}'.");
+        if (updatedFileCount > 0)
+            Console.WriteLine($"Updated {updatedFileCount} solution/build file(s).");
     }
 
     public async Task ValidateAsync(RepositoryHandlerContext context)
@@ -137,6 +157,9 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
         if (name is ".editorconfig" or ".globalconfig" or ".vsconfig" or "global.json" or "NuGet.config")
             return true;
 
+        if (string.Equals(name, "NOTICE.txt", StringComparison.OrdinalIgnoreCase))
+            return false;
+
         if (name.StartsWith("build.", StringComparison.OrdinalIgnoreCase)
             || name.StartsWith("restore.", StringComparison.OrdinalIgnoreCase)
             || name.StartsWith("clean.", StringComparison.OrdinalIgnoreCase)
@@ -160,29 +183,9 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
         return false;
     }
 
-    private static async Task<int> MoveEngContentsAsync(string sourceRoot, string targetRelativePath)
+    private static async Task CommitPreparationStepAsync(string sourceRoot, string message)
     {
-        var engDirectory = Path.Combine(sourceRoot, "eng");
-        if (!Directory.Exists(engDirectory))
-            return 0;
-
-        var entriesToMove = Directory.GetFileSystemEntries(engDirectory)
-            .Select(static path => Path.GetFileName(path))
-            .Where(static name => !string.IsNullOrEmpty(name) && !ShouldStayInRootEng(name!))
-            .Select(static name => name!)
-            .ToArray();
-
-        if (entriesToMove.Length == 0)
-            return 0;
-
-        Directory.CreateDirectory(Path.Combine(sourceRoot, targetRelativePath, "eng"));
-
-        foreach (var entry in entriesToMove)
-            await GitRunner.RunGitAsync(sourceRoot, "mv", "--", Path.Combine("eng", entry), Path.Combine(targetRelativePath, "eng", entry)).ConfigureAwait(false);
-
-        return entriesToMove.Length;
+        if (await GitRunner.CommitTrackedChangesAsync(sourceRoot, message).ConfigureAwait(false))
+            Console.WriteLine($"Committed source repo changes: {message}");
     }
-
-    private static bool ShouldStayInRootEng(string name)
-        => string.Equals(name, "common", StringComparison.OrdinalIgnoreCase);
 }

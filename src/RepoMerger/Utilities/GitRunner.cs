@@ -2,6 +2,8 @@ namespace RepoMerger;
 
 public static class GitRunner
 {
+    private const string RepoMergerAttribution = "Prepared with RepoMerger, which was co-authored by Copilot.";
+
     public static bool IsRepository(string directory)
         => Directory.Exists(Path.Combine(directory, ".git")) || File.Exists(Path.Combine(directory, ".git"));
 
@@ -17,6 +19,23 @@ public static class GitRunner
 
     public static async Task<string> GetShortStatusAsync(string repositoryDirectory)
         => (await RunGitAsync(repositoryDirectory, "status", "--short", "--untracked-files=no").ConfigureAwait(false)).Trim();
+
+    public static async Task<bool> CommitTrackedChangesAsync(string repositoryDirectory, string message)
+    {
+        var status = await GetShortStatusAsync(repositoryDirectory).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(status))
+            return false;
+
+        await RunGitAsync(repositoryDirectory, "add", "--update", "--", ".").ConfigureAwait(false);
+        await RunGitAsync(
+            repositoryDirectory,
+            "commit",
+            "-m",
+            message,
+            "-m",
+            RepoMergerAttribution).ConfigureAwait(false);
+        return true;
+    }
 
     public static async Task<string> GetPreferredRemoteNameAsync(string repositoryDirectory)
     {

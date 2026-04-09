@@ -5,6 +5,48 @@ namespace RepoMerger;
 public static class SolutionPathUpdater
 {
     private const string RepositoryEngineeringDirProperty = "$(RepositoryEngineeringDir)";
+    private const string MSBuildThisFileDirectoryProperty = "$(MSBuildThisFileDirectory)";
+    private const string RepoRootProperty = "$(RepoRoot)";
+
+    private static readonly Regex MsBuildThisFileDirectoryEngPathPattern = new(
+        Regex.Escape(MSBuildThisFileDirectoryProperty) + """eng(?<suffix>(?:[\\/][^"'<>;\r\n]*)?)(?=(?:["'<>\s;]|$))""",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex RepoRootEngPathPattern = new(
+        Regex.Escape(RepoRootProperty) + """eng(?<suffix>(?:[\\/][^"'<>;\r\n]*)?)(?=(?:["'<>\s;]|$))""",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex DirectEngPathPattern = new(
+        """(?<prefix>^|["'=;>\s])eng(?<suffix>(?:[\\/][^"'<>;\r\n]*)?)(?=(?:["'<>\s;]|$))""",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+    private static readonly Regex RepoRootReferencePattern = new(
+        Regex.Escape(RepoRootProperty) + """(?<suffix>[^"'<>;\r\n]*)""",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    public static async Task<int> NormalizeRepositoryEngineeringReferencesAsync(string repositoryRoot)
+    {
+        var updatedCount = 0;
+        foreach (var filePath in EnumerateProjectAndBuildFiles(repositoryRoot))
+        {
+            if (await NormalizeRepositoryEngineeringReferencesInFileAsync(filePath).ConfigureAwait(false))
+                updatedCount++;
+        }
+
+        return updatedCount;
+    }
+
+    public static async Task<int> RewriteRepoRootReferencesAsync(string repositoryRoot, string targetRelativePath)
+    {
+        var updatedCount = 0;
+        foreach (var filePath in EnumerateProjectAndBuildFiles(repositoryRoot))
+        {
+            if (await RewriteRepoRootReferencesInFileAsync(repositoryRoot, filePath, targetRelativePath).ConfigureAwait(false))
+                updatedCount++;
+        }
+
+        return updatedCount;
+    }
 
     public static async Task<int> UpdateMovedPathsAsync(string repositoryRoot, string targetRelativePath)
     {
@@ -26,19 +68,100 @@ public static class SolutionPathUpdater
         if (!Directory.Exists(targetRoot))
             return updatedCount;
 
-        var projectFiles = Directory.GetFiles(targetRoot, "*.*proj", SearchOption.AllDirectories)
-            .Concat(Directory.GetFiles(targetRoot, "*.props", SearchOption.AllDirectories))
-            .Concat(Directory.GetFiles(targetRoot, "*.targets", SearchOption.AllDirectories))
-            .Distinct(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var filePath in projectFiles)
-        {
-            if (await UpdateRepositoryEngineeringReferencesAsync(repositoryRoot, targetRelativePath, filePath).ConfigureAwait(false))
-                updatedCount++;
-        }
-
         return updatedCount;
     }
+
+    private static IEnumerable<string> EnumerateProjectAndBuildFiles(string repositoryRoot)
+        => Directory.GetFiles(repositoryRoot, "*.*proj", SearchOption.AllDirectories)
+            .Concat(Directory.GetFiles(repositoryRoot, "*.props", SearchOption.AllDirectories))
+            .Concat(Directory.GetFiles(repositoryRoot, "*.targets", SearchOption.AllDirectories))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+    private static async Task<bool> NormalizeRepositoryEngineeringReferencesInFileAsync(string filePath)
+    {
+        var originalText = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
+        var updatedText = MsBuildThisFileDirectoryEngPathPattern.Replace(
+            originalText,
+            match => RewriteRepositoryEngineeringReference(match.Groups["suffix"].Value));
+        updatedText = RepoRootEngPathPattern.Replace(
+            updatedText,
+            match => RewriteRepositoryEngineeringReference(match.Groups["suffix"].Value));
+        updatedText = DirectEngPathPattern.Replace(
+            updatedText,
+            match => $"{match.Groups["prefix"].Value}{RewriteRepositoryEngineeringReference(match.Groups["suffix"].Value)}");
+
+        if (string.Equals(originalText, updatedText, StringComparison.Ordinal))
+            return false;
+
+        await File.WriteAllTextAsync(filePath, updatedText).ConfigureAwait(false);
+        return true;
+    }
+
+    private static async Task<bool> RewriteRepoRootReferencesInFileAsync(string repositoryRoot, string filePath, string targetRelativePath)
+    {
+        var originalText = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
+        var updatedText = RepoRootReferencePattern.Replace(
+            originalText,
+            match => RewriteRepoRootReference(repositoryRoot, targetRelativePath, match.Groups["suffix"].Value));
+
+        if (string.Equals(originalText, updatedText, StringComparison.Ordinal))
+            return false;
+
+        await File.WriteAllTextAsync(filePath, updatedText).ConfigureAwait(false);
+        return true;
+    }
+
+    private static string RewriteRepositoryEngineeringReference(string suffix)
+    {
+        var normalizedSuffix = suffix.TrimStart('\\', '/');
+        return string.IsNullOrEmpty(normalizedSuffix)
+            ? RepositoryEngineeringDirProperty
+            : RepositoryEngineeringDirProperty + normalizedSuffix;
+    }
+
+    private static string RewriteRepoRootReference(string repositoryRoot, string targetRelativePath, string suffix)
+    {
+        if (string.IsNullOrEmpty(suffix))
+            return RepoRootProperty;
+
+        var normalizedSuffix = suffix.TrimStart('\\', '/');
+        if (normalizedSuffix.Length == 0)
+            return RepoRootProperty + suffix;
+
+        if (StartsWithPathSegment(normalizedSuffix, "eng"))
+        {
+            var engSuffix = normalizedSuffix.Length == "eng".Length
+                ? string.Empty
+                : normalizedSuffix["eng".Length..];
+            return RewriteRepositoryEngineeringReference(engSuffix);
+        }
+
+        var normalizedRelativePath = NormalizeRelativePath(normalizedSuffix, Path.DirectorySeparatorChar);
+        var originalLocation = Path.Combine(repositoryRoot, normalizedRelativePath);
+        if (File.Exists(originalLocation) || Directory.Exists(originalLocation))
+            return RepoRootProperty + suffix;
+
+        var movedLocation = Path.Combine(repositoryRoot, targetRelativePath, normalizedRelativePath);
+        if (!File.Exists(movedLocation) && !Directory.Exists(movedLocation))
+            return RepoRootProperty + suffix;
+
+        var separator = suffix.Contains('/') && !suffix.Contains('\\') ? '/' : '\\';
+        var rewrittenPath = Path.Combine(targetRelativePath, normalizedRelativePath)
+            .Replace(Path.DirectorySeparatorChar, separator)
+            .Replace(Path.AltDirectorySeparatorChar, separator);
+
+        return RepoRootProperty + rewrittenPath;
+    }
+
+    private static string NormalizeRelativePath(string relativePath, char preferredSeparator)
+        => string.Join(
+            preferredSeparator,
+            relativePath.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
+    private static bool StartsWithPathSegment(string value, string segment)
+        => value.Length >= segment.Length
+            && value.StartsWith(segment, StringComparison.OrdinalIgnoreCase)
+            && (value.Length == segment.Length || value[segment.Length] is '\\' or '/');
 
     private static async Task<bool> UpdateSolutionFileAsync(string repositoryRoot, string targetRelativePath, string filePath, string pathSeparatorText)
     {
@@ -84,63 +207,5 @@ public static class SolutionPathUpdater
 
         var rewrittenPath = Path.Combine(targetRelativePath, normalizedPath);
         return rewrittenPath.Replace(Path.DirectorySeparatorChar.ToString(), pathSeparatorText);
-    }
-
-    private static async Task<bool> UpdateRepositoryEngineeringReferencesAsync(string repositoryRoot, string targetRelativePath, string filePath)
-    {
-        var originalText = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
-        var relativeMovedEngPath = Path.GetRelativePath(
-            Path.Combine(repositoryRoot, "eng"),
-            Path.Combine(repositoryRoot, targetRelativePath, "eng"));
-
-        var updatedText = Regex.Replace(
-            originalText,
-            Regex.Escape(RepositoryEngineeringDirProperty) + "(?<suffix>[^\"'<>\\r\\n;]+)",
-            match => RewriteRepositoryEngineeringPathIfMoved(
-                repositoryRoot,
-                targetRelativePath,
-                relativeMovedEngPath,
-                match.Groups["suffix"].Value));
-
-        if (string.Equals(originalText, updatedText, StringComparison.Ordinal))
-            return false;
-
-        await File.WriteAllTextAsync(filePath, updatedText).ConfigureAwait(false);
-        return true;
-    }
-
-    private static string RewriteRepositoryEngineeringPathIfMoved(
-        string repositoryRoot,
-        string targetRelativePath,
-        string relativeMovedEngPath,
-        string suffix)
-    {
-        if (string.IsNullOrWhiteSpace(suffix))
-            return RepositoryEngineeringDirProperty;
-
-        var normalizedSuffix = suffix.TrimStart('\\', '/');
-        var suffixParts = normalizedSuffix
-            .Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (suffixParts.Length == 0)
-            return RepositoryEngineeringDirProperty + suffix;
-
-        var originalLocation = Path.Combine(repositoryRoot, "eng", Path.Combine(suffixParts));
-        if (File.Exists(originalLocation) || Directory.Exists(originalLocation))
-            return RepositoryEngineeringDirProperty + suffix;
-
-        var movedLocation = Path.Combine(repositoryRoot, targetRelativePath, "eng", Path.Combine(suffixParts));
-        if (!File.Exists(movedLocation) && !Directory.Exists(movedLocation))
-            return RepositoryEngineeringDirProperty + suffix;
-
-        var separator = suffix.Contains('/') && !suffix.Contains('\\') ? "/" : "\\";
-        var normalizedRelativeMovedEngPath = relativeMovedEngPath
-            .Replace(Path.DirectorySeparatorChar.ToString(), separator)
-            .Replace(Path.AltDirectorySeparatorChar.ToString(), separator)
-            .TrimEnd(separator[0]);
-        var normalizedSuffixText = normalizedSuffix
-            .Replace("\\", separator, StringComparison.Ordinal)
-            .Replace("/", separator, StringComparison.Ordinal);
-
-        return $"{RepositoryEngineeringDirProperty}{normalizedRelativeMovedEngPath}{separator}{normalizedSuffixText}";
     }
 }
