@@ -88,10 +88,10 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
             throw new InvalidOperationException($"Expected '{buildScript}' to exist.");
 
         Console.WriteLine($"Validating Razor source repo at '{context.SourceRoot}'.");
-        Console.WriteLine("> build.cmd -restore");
+        Console.WriteLine("> build.cmd");
 
-        var result = await ProcessRunner.RunProcessAsync("cmd.exe", ["/c", "build.cmd", "-restore"], context.SourceRoot).ConfigureAwait(false);
-        ProcessRunner.EnsureCommandSucceeded(result, "build.cmd -restore");
+        var result = await ProcessRunner.RunProcessAsync("cmd.exe", ["/c", "build.cmd"], context.SourceRoot).ConfigureAwait(false);
+        ProcessRunner.EnsureCommandSucceeded(result, "build.cmd");
 
         Console.WriteLine("Razor source repo validation completed successfully.");
     }
