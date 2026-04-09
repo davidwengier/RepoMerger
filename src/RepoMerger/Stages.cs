@@ -247,8 +247,6 @@ internal static class Stages
                     "Use --reset or a different --run-name to create a fresh working copy.");
             }
 
-            Console.WriteLine($"Refreshing existing clone in '{cloneDirectory}' from remote '{actualRemoteName}'.");
-
             await GitRunner.FetchAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
 
             var effectiveBranchName = branchName;
@@ -260,7 +258,11 @@ internal static class Stages
             if (string.IsNullOrWhiteSpace(effectiveBranchName))
                 throw new InvalidOperationException($"Could not determine which branch to check out for '{repositoryDisplayName}'.");
 
+            Console.WriteLine(
+                $"Refreshing existing clone in '{cloneDirectory}' from remote '{actualRemoteName}' and resetting to '{actualRemoteName}/{effectiveBranchName}'.");
+
             await GitRunner.CheckoutTrackingBranchAsync(cloneDirectory, actualRemoteName, effectiveBranchName).ConfigureAwait(false);
+            await GitRunner.ResetHardAsync(cloneDirectory, $"{actualRemoteName}/{effectiveBranchName}").ConfigureAwait(false);
         }
 
         var headCommit = await GitRunner.GetHeadCommitAsync(cloneDirectory).ConfigureAwait(false);

@@ -92,6 +92,9 @@ public static class GitRunner
             branchName,
             $"{remoteName}/{branchName}").ConfigureAwait(false);
 
+    public static async Task ResetHardAsync(string repositoryDirectory, string target)
+        => _ = await RunGitAsync(repositoryDirectory, "reset", "--hard", target).ConfigureAwait(false);
+
     public static async Task<string> GetHeadCommitAsync(string repositoryDirectory)
         => (await RunGitAsync(repositoryDirectory, "rev-parse", "HEAD").ConfigureAwait(false)).Trim();
 }
