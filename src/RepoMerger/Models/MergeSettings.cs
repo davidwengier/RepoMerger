@@ -15,5 +15,4 @@ internal readonly record struct MergeSettings(
     bool DryRun,
     bool Resume,
     bool Rerun,
-    bool Reset,
-    bool ShowHelp);
+    bool Reset);
