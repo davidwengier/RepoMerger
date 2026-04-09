@@ -2,6 +2,6 @@
 
 internal static class Constants
 {
-    public const int StateSchemaVersion = 1;
-    public const string WorkflowVersion = "prepare-stage-v1";
+    public const int StateSchemaVersion = 2;
+    public const string WorkflowVersion = "work-root-target-clone-v1";
 }

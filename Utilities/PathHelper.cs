@@ -36,8 +36,8 @@ internal static class PathHelper
         throw new InvalidOperationException("Could not locate the RepoMerger repository root.");
     }
 
-    public static string GetDefaultRunName(string sourceRepo, string targetPath)
-        => SanitizePathSegment($"{sourceRepo}-to-{targetPath}");
+    public static string GetDefaultRunName(string sourceRepo, string targetRepo, string targetPath)
+        => SanitizePathSegment($"{sourceRepo}-to-{targetRepo}-{targetPath}");
 
     public static string GetScriptSetName(MergeSettings settings)
     {
@@ -78,8 +78,8 @@ internal static class PathHelper
         if (IsPathWithinRoot(repoRoot, candidatePath))
         {
             throw new InvalidOperationException(
-                $"{optionName} resolved to '{candidatePath}', which is inside the target repo. " +
-                "Choose a path outside the checkout so folder structure and repo-local configuration cannot interfere.");
+                $"{optionName} resolved to '{candidatePath}', which is inside '{repoRoot}'. " +
+                "Choose a path outside that checkout so folder structure and repo-local configuration cannot interfere.");
         }
     }
 
@@ -99,10 +99,10 @@ internal static class PathHelper
             || value.Contains(':')
             || value.StartsWith(".", StringComparison.Ordinal);
 
-    public static string ResolveSourceRepositoryUri(string sourceRepo, string toolRoot)
-        => LooksLikeLocalPath(sourceRepo)
-            ? GetAbsolutePath(toolRoot, sourceRepo)
-            : $"https://github.com/{sourceRepo}.git";
+    public static string ResolveRepositoryUri(string repository, string toolRoot)
+        => LooksLikeLocalPath(repository)
+            ? GetAbsolutePath(toolRoot, repository)
+            : $"https://github.com/{repository}.git";
 
     public static bool RepositoryLocationsMatch(string left, string right)
         => string.Equals(NormalizeRepositoryLocation(left), NormalizeRepositoryLocation(right), StringComparison.OrdinalIgnoreCase);

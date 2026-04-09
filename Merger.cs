@@ -6,17 +6,17 @@ internal static class Merger
     {
         var toolRoot = PathHelper.GetToolRoot();
         var runName = string.IsNullOrWhiteSpace(settings.RunName)
-            ? PathHelper.GetDefaultRunName(settings.SourceRepo, settings.TargetPath)
+            ? PathHelper.GetDefaultRunName(settings.SourceRepo, settings.TargetRepo, settings.TargetPath)
             : PathHelper.SanitizePathSegment(settings.RunName);
-        var targetRepoRoot = PathHelper.GetAbsolutePath(toolRoot, settings.TargetRepo);
         var stateRoot = PathHelper.GetAbsolutePath(toolRoot, settings.StateRoot);
         var workRoot = PathHelper.GetAbsolutePath(toolRoot, settings.WorkRoot);
-        PathHelper.EnsurePathIsOutsideRepo(targetRepoRoot, workRoot, "--work-root");
+        PathHelper.EnsurePathIsOutsideRepo(toolRoot, workRoot, "--work-root");
         var scriptRoot = PathHelper.GetAbsolutePath(toolRoot, settings.ScriptRoot);
         var scriptSet = PathHelper.GetScriptSetName(settings);
         var scriptDirectory = Path.Combine(scriptRoot, scriptSet);
         var runDirectory = Path.Combine(stateRoot, runName);
         var workDirectory = Path.Combine(workRoot, runName);
+        var targetRepoRoot = Path.Combine(workDirectory, "target");
 
         if (settings.Reset && Directory.Exists(runDirectory))
             Directory.Delete(runDirectory, recursive: true);
@@ -43,12 +43,13 @@ internal static class Merger
             ? await RunStateStore.LoadAsync(statePath).ConfigureAwait(false)
             : CreateState(settings, targetRepoRoot, runName, runDirectory, executionPlan);
 
-        EnsureCompatibleState(state, settings, targetRepoRoot);
+        EnsureCompatibleState(state, settings);
         SyncStageMetadata(state);
         RecoverCompletedStagesFromSentinels(state, runDirectory);
 
         state.SourceRepo = settings.SourceRepo;
         state.SourceBranch = settings.SourceBranch;
+        state.TargetRepo = settings.TargetRepo;
         state.TargetRepoRoot = targetRepoRoot;
         state.TargetPath = settings.TargetPath;
         state.StateRoot = stateRoot;
@@ -59,7 +60,8 @@ internal static class Merger
         state.RunName = runName;
         state.RunDirectory = runDirectory;
         state.WorkDirectory = workDirectory;
-        state.SourceRemoteUri = PathHelper.ResolveSourceRepositoryUri(settings.SourceRepo, toolRoot);
+        state.SourceRemoteUri = PathHelper.ResolveRepositoryUri(settings.SourceRepo, toolRoot);
+        state.TargetRemoteUri = PathHelper.ResolveRepositoryUri(settings.TargetRepo, toolRoot);
         state.SourceCloneDirectory = Path.Combine(workDirectory, "source");
         state.ImportPreviewDirectory = Path.Combine(workDirectory, "import-preview");
         state.WorkflowVersion = Constants.WorkflowVersion;
@@ -161,6 +163,7 @@ internal static class Merger
             RunName = runName,
             SourceRepo = settings.SourceRepo,
             SourceBranch = settings.SourceBranch,
+            TargetRepo = settings.TargetRepo,
             TargetRepoRoot = targetRepoRoot,
             TargetPath = settings.TargetPath,
             StateRoot = string.Empty,
@@ -171,8 +174,10 @@ internal static class Merger
             RunDirectory = runDirectory,
             WorkDirectory = string.Empty,
             SourceRemoteUri = string.Empty,
+            TargetRemoteUri = string.Empty,
             SourceCloneDirectory = string.Empty,
             ImportPreviewDirectory = string.Empty,
+            TargetHeadCommit = string.Empty,
             DryRun = settings.DryRun,
             SelectedStartStage = executionPlan.StartStageName,
             SelectedStopStage = executionPlan.StopStageName,
@@ -213,7 +218,7 @@ internal static class Merger
         }
     }
 
-    private static void EnsureCompatibleState(MergeRunState state, MergeSettings settings, string targetRepoRoot)
+    private static void EnsureCompatibleState(MergeRunState state, MergeSettings settings)
     {
         if (state.SchemaVersion != Constants.StateSchemaVersion
             || !string.Equals(state.WorkflowVersion, Constants.WorkflowVersion, StringComparison.Ordinal))
@@ -225,7 +230,7 @@ internal static class Merger
 
         ValidateMatchingSetting(state.SourceRepo, settings.SourceRepo, nameof(settings.SourceRepo));
         ValidateMatchingSetting(state.SourceBranch, settings.SourceBranch, nameof(settings.SourceBranch));
-        ValidateMatchingSetting(state.TargetRepoRoot, targetRepoRoot, nameof(settings.TargetRepo));
+        ValidateMatchingSetting(state.TargetRepo, settings.TargetRepo, nameof(settings.TargetRepo));
         ValidateMatchingSetting(state.TargetPath, settings.TargetPath, nameof(settings.TargetPath));
     }
 

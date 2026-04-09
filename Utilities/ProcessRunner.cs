@@ -19,11 +19,17 @@ internal static class ProcessRunner
         if (remotes.Contains("source"))
             return "source";
 
+        if (remotes.Contains("target"))
+            return "target";
+
         if (remotes.Contains("origin"))
             return "origin";
 
+        if (remotes.Count == 1)
+            return remotes.Single();
+
         throw new InvalidOperationException(
-            $"The repository at '{repositoryDirectory}' does not have a 'source' or 'origin' remote to refresh.");
+            $"The repository at '{repositoryDirectory}' does not have a recognizable remote to refresh.");
     }
 
     public static void EnsureCommandSucceeded(ProcessResult result, string commandName)

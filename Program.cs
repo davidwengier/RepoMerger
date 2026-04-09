@@ -4,10 +4,10 @@ internal static class Program
 {
     private const string DefaultSourceRepo = "dotnet/razor";
     private const string DefaultSourceBranch = "main";
-    private const string DefaultTargetRepo = @"D:\Code\roslyn";
+    private const string DefaultTargetRepo = "dotnet/roslyn";
     private const string DefaultTargetPath = @"src\Razor";
-    private const string DefaultStateRoot = @"artifacts\repo-merge";
     private const string DefaultWorkRoot = @"..\repo-merge-work";
+    private const string DefaultStateRoot = DefaultWorkRoot;
     private const string DefaultScriptRoot = @"scripts";
 
     public static async Task<int> Main(string[] args)
@@ -175,10 +175,10 @@ internal static class Program
         Console.WriteLine("Key options:");
         Console.WriteLine($"  --source-repo <value>     Source repository or local path. Default: {DefaultSourceRepo}");
         Console.WriteLine($"  --source-branch <value>   Source branch to use. Default: {DefaultSourceBranch}");
-        Console.WriteLine($"  --target-repo <path>      Target repository root. Default: {DefaultTargetRepo}");
+        Console.WriteLine($"  --target-repo <value>     Target repository in owner/repo format. Default: {DefaultTargetRepo}");
         Console.WriteLine($"  --target-path <path>      Destination path inside the target repo. Default: {DefaultTargetPath}");
         Console.WriteLine($"  --state-root <path>       Where run state is persisted. Default: {DefaultStateRoot}");
-        Console.WriteLine($"  --work-root <path>        Where external working repos live. Default: {DefaultWorkRoot}");
+        Console.WriteLine($"  --work-root <path>        Where the cloned working repos live. Default: {DefaultWorkRoot}");
         Console.WriteLine($"  --script-root <path>      Where repo-specific scripts live. Default: {DefaultScriptRoot}");
         Console.WriteLine("  --script-set <name>       Which repo-specific script folder to use.");
         Console.WriteLine("  --run-name <name>         Stable run name for resume/rerun.");
