@@ -150,7 +150,7 @@ internal static class Program
             return 0;
         }
 
-        var settings = new MergeSettings(
+        var settings = new Settings(
             SourceRepo: sourceRepo,
             SourceBranch: sourceBranch,
             TargetRepo: targetRepo,

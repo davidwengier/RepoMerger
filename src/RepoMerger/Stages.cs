@@ -5,7 +5,7 @@ namespace RepoMerger;
 
 internal static class Stages
 {
-    public static MergeStageDefinition[] Definitions { get; } =
+    public static StageDefinition[] Definitions { get; } =
     [
         new(
             "validate-environment",

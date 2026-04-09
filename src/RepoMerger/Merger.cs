@@ -2,7 +2,7 @@ namespace RepoMerger;
 
 internal static class Merger
 {
-    public static async Task<int> RunAsync(MergeSettings settings)
+    public static async Task<int> RunAsync(Settings settings)
     {
         var toolRoot = PathHelper.GetToolRoot();
         var runName = string.IsNullOrWhiteSpace(settings.RunName)
@@ -132,7 +132,7 @@ internal static class Merger
         return 0;
     }
 
-    private static ExecutionPlan CreateExecutionPlan(MergeSettings settings)
+    private static ExecutionPlan CreateExecutionPlan(Settings settings)
     {
         var stageDefinitions = Stages.Definitions;
         var startStageName = settings.Stage ?? settings.StartAt ?? stageDefinitions[0].Name;
@@ -149,7 +149,7 @@ internal static class Merger
         return new ExecutionPlan(startIndex, stopIndex, stageDefinitions[startIndex].Name, stageDefinitions[stopIndex].Name);
     }
 
-    private static MergeRunState CreateState(MergeSettings settings, string targetRepoRoot, string runName, string runDirectory, ExecutionPlan executionPlan)
+    private static RunState CreateState(Settings settings, string targetRepoRoot, string runName, string runDirectory, ExecutionPlan executionPlan)
         => new()
         {
             SchemaVersion = Constants.StateSchemaVersion,
@@ -177,7 +177,7 @@ internal static class Merger
             Stages = [.. Stages.Definitions.Select(static stage => new StageState { Name = stage.Name, Description = stage.Description, Status = StageStatus.Pending })],
         };
 
-    private static void SyncStageMetadata(MergeRunState state)
+    private static void SyncStageMetadata(RunState state)
     {
         foreach (var definition in Stages.Definitions)
         {
@@ -186,7 +186,7 @@ internal static class Merger
         }
     }
 
-    private static void RecoverCompletedStagesFromSentinels(MergeRunState state, string runDirectory)
+    private static void RecoverCompletedStagesFromSentinels(RunState state, string runDirectory)
     {
         var sentinelsDirectory = Path.Combine(runDirectory, "sentinels");
         if (!Directory.Exists(sentinelsDirectory))
@@ -209,7 +209,7 @@ internal static class Merger
         }
     }
 
-    private static void EnsureCompatibleState(MergeRunState state, MergeSettings settings)
+    private static void EnsureCompatibleState(RunState state, Settings settings)
     {
         if (state.SchemaVersion != Constants.StateSchemaVersion
             || !string.Equals(state.WorkflowVersion, Constants.WorkflowVersion, StringComparison.Ordinal))
@@ -225,7 +225,7 @@ internal static class Merger
         ValidateMatchingSetting(state.TargetPath, settings.TargetPath, nameof(settings.TargetPath));
     }
 
-    private static StageState GetStageState(MergeRunState state, string stageName)
+    private static StageState GetStageState(RunState state, string stageName)
     {
         foreach (var stage in state.Stages)
         {
@@ -243,7 +243,7 @@ internal static class Merger
         return newStage;
     }
 
-    private static int GetStageIndex(IReadOnlyList<MergeStageDefinition> stageDefinitions, string stageName)
+    private static int GetStageIndex(IReadOnlyList<StageDefinition> stageDefinitions, string stageName)
     {
         var normalizedName = NormalizeStageName(stageName);
         for (var i = 0; i < stageDefinitions.Count; i++)

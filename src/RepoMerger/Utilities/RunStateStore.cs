@@ -13,20 +13,20 @@ internal static class RunStateStore
         Converters = { new JsonStringEnumConverter() },
     };
 
-    public static async Task<MergeRunState> LoadAsync(string statePath)
+    public static async Task<RunState> LoadAsync(string statePath)
     {
         await using var stream = File.OpenRead(statePath);
-        return await JsonSerializer.DeserializeAsync<MergeRunState>(stream, JsonOptions).ConfigureAwait(false)
+        return await JsonSerializer.DeserializeAsync<RunState>(stream, JsonOptions).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Could not deserialize '{statePath}'.");
     }
 
-    public static async Task SaveAsync(string statePath, MergeRunState state)
+    public static async Task SaveAsync(string statePath, RunState state)
     {
         await using var stream = File.Create(statePath);
         await JsonSerializer.SerializeAsync(stream, state, JsonOptions).ConfigureAwait(false);
     }
 
-    public static async Task WriteSentinelAsync(string runDirectory, MergeStageDefinition definition, StageState record)
+    public static async Task WriteSentinelAsync(string runDirectory, StageDefinition definition, StageState record)
     {
         var sentinelsDirectory = Path.Combine(runDirectory, "sentinels");
         Directory.CreateDirectory(sentinelsDirectory);

@@ -1,9 +1,9 @@
 namespace RepoMerger;
 
 internal readonly record struct StageContext(
-    MergeSettings Settings,
+    Settings Settings,
     string ToolRoot,
     string TargetRepoRoot,
     string RunDirectory,
     string StatePath,
-    MergeRunState State);
+    RunState State);

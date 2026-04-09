@@ -1,6 +1,6 @@
 namespace RepoMerger;
 
-internal sealed class MergeRunState
+internal sealed class RunState
 {
     public int SchemaVersion { get; set; }
     public string WorkflowVersion { get; set; } = string.Empty;
