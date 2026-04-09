@@ -68,9 +68,7 @@ internal static class Stages
         if (PathHelper.LooksLikeLocalPath(context.Settings.TargetRepo) || context.Settings.TargetRepo.Count(static c => c == '/') != 1)
             throw new InvalidOperationException("--target-repo must be in owner/repo format.");
 
-        var gitVersion = await ProcessRunner.RunProcessAsync("git", ["--version"], context.ToolRoot).ConfigureAwait(false);
-        if (gitVersion.ExitCode != 0)
-            throw new InvalidOperationException("`git --version` failed.");
+        var gitVersion = await GitRunner.RunGitAsync(context.ToolRoot, "--version").ConfigureAwait(false);
 
         Console.WriteLine($"Resolved source repo: {context.Settings.SourceRepo}");
         Console.WriteLine($"Resolved target repo: {context.Settings.TargetRepo}");
@@ -79,7 +77,7 @@ internal static class Stages
         Console.WriteLine($"Resolved external work root: {fullWorkRoot}");
         Console.WriteLine($"Using script directory: {context.State.ScriptDirectory}");
 
-        return $"Validated target repo and inputs. Git: {gitVersion.Output.Trim()}";
+        return $"Validated target repo and inputs. Git: {gitVersion.Trim()}";
     }
 
     private static async Task<string> PrepareStateAsync(StageContext context)
@@ -262,33 +260,22 @@ internal static class Stages
 
         if (!Directory.Exists(cloneDirectory))
         {
-            var cloneArguments = new List<string> { "clone", "--origin", remoteName };
-
-            if (!string.IsNullOrWhiteSpace(branchName))
-            {
-                cloneArguments.Add("--branch");
-                cloneArguments.Add(branchName);
-            }
-
-            if (allowNoHardlinks)
-                cloneArguments.Add("--no-hardlinks");
-
-            cloneArguments.Add(remoteUri);
-            cloneArguments.Add(cloneDirectory);
-
             Console.WriteLine($"Cloning '{remoteUri}' into '{cloneDirectory}'.");
-            var cloneResult = await ProcessRunner.RunProcessAsync("git", cloneArguments, workDirectory).ConfigureAwait(false);
-            ProcessRunner.EnsureCommandSucceeded(cloneResult, "git clone");
+            await GitRunner.CloneAsync(
+                workingDirectory: workDirectory,
+                remoteName: remoteName,
+                remoteUri: remoteUri,
+                cloneDirectory: cloneDirectory,
+                branchName: branchName,
+                noHardlinks: allowNoHardlinks).ConfigureAwait(false);
         }
         else
         {
-            if (!ProcessRunner.IsGitRepository(cloneDirectory))
+            if (!GitRunner.IsRepository(cloneDirectory))
                 throw new InvalidOperationException($"The clone directory '{cloneDirectory}' already exists but is not a git repository.");
 
-            var actualRemoteName = await ProcessRunner.GetPreferredRemoteNameAsync(cloneDirectory).ConfigureAwait(false);
-            var remoteUrlResult = await ProcessRunner.RunProcessAsync("git", ["remote", "get-url", actualRemoteName], cloneDirectory).ConfigureAwait(false);
-            ProcessRunner.EnsureCommandSucceeded(remoteUrlResult, "git remote get-url");
-            var actualRemoteUri = remoteUrlResult.Output.Trim();
+            var actualRemoteName = await GitRunner.GetPreferredRemoteNameAsync(cloneDirectory).ConfigureAwait(false);
+            var actualRemoteUri = await GitRunner.GetRemoteUrlAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
             if (!PathHelper.RepositoryLocationsMatch(actualRemoteUri, remoteUri))
             {
                 throw new InvalidOperationException(
@@ -298,33 +285,21 @@ internal static class Stages
 
             Console.WriteLine($"Refreshing existing clone in '{cloneDirectory}' from remote '{actualRemoteName}'.");
 
-            var fetchResult = await ProcessRunner.RunProcessAsync("git", ["fetch", actualRemoteName, "--prune", "--tags"], cloneDirectory).ConfigureAwait(false);
-            ProcessRunner.EnsureCommandSucceeded(fetchResult, "git fetch");
+            await GitRunner.FetchAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
 
             var effectiveBranchName = branchName;
             if (string.IsNullOrWhiteSpace(effectiveBranchName))
             {
-                var remoteHead = await ProcessRunner.RunProcessAsync(
-                    "git",
-                    ["symbolic-ref", "--short", $"refs/remotes/{actualRemoteName}/HEAD"],
-                    cloneDirectory).ConfigureAwait(false);
-                ProcessRunner.EnsureCommandSucceeded(remoteHead, "git symbolic-ref");
-                effectiveBranchName = remoteHead.Output.Trim().Split('/', 2, StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+                effectiveBranchName = await GitRunner.GetRemoteHeadBranchAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
             }
 
             if (string.IsNullOrWhiteSpace(effectiveBranchName))
                 throw new InvalidOperationException($"Could not determine which branch to check out for '{repositoryDisplayName}'.");
 
-            var checkoutResult = await ProcessRunner.RunProcessAsync(
-                "git",
-                ["checkout", "-B", effectiveBranchName, $"{actualRemoteName}/{effectiveBranchName}"],
-                cloneDirectory).ConfigureAwait(false);
-            ProcessRunner.EnsureCommandSucceeded(checkoutResult, "git checkout");
+            await GitRunner.CheckoutTrackingBranchAsync(cloneDirectory, actualRemoteName, effectiveBranchName).ConfigureAwait(false);
         }
 
-        var headCommitResult = await ProcessRunner.RunProcessAsync("git", ["rev-parse", "HEAD"], cloneDirectory).ConfigureAwait(false);
-        ProcessRunner.EnsureCommandSucceeded(headCommitResult, "git rev-parse");
-        var headCommit = headCommitResult.Output.Trim();
+        var headCommit = await GitRunner.GetHeadCommitAsync(cloneDirectory).ConfigureAwait(false);
         onHeadResolved(headCommit);
 
         return $"Cloned/refreshed '{repositoryDisplayName}' into '{cloneDirectory}' at commit '{headCommit}'.";

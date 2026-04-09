@@ -1,37 +1,9 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 
 namespace RepoMerger;
 
 public static class ProcessRunner
 {
-    public static bool IsGitRepository(string directory)
-        => Directory.Exists(Path.Combine(directory, ".git")) || File.Exists(Path.Combine(directory, ".git"));
-
-    public static async Task<string> GetPreferredRemoteNameAsync(string repositoryDirectory)
-    {
-        var remoteList = await RunProcessAsync("git", ["remote"], repositoryDirectory).ConfigureAwait(false);
-        EnsureCommandSucceeded(remoteList, "git remote");
-
-        var remotes = remoteList.Output
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        if (remotes.Contains("source"))
-            return "source";
-
-        if (remotes.Contains("target"))
-            return "target";
-
-        if (remotes.Contains("origin"))
-            return "origin";
-
-        if (remotes.Count == 1)
-            return remotes.Single();
-
-        throw new InvalidOperationException(
-            $"The repository at '{repositoryDirectory}' does not have a recognizable remote to refresh.");
-    }
-
     public static void EnsureCommandSucceeded(ProcessResult result, string commandName)
     {
         if (result.ExitCode == 0)

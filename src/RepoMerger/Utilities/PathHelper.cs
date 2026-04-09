@@ -2,7 +2,7 @@
 
 namespace RepoMerger;
 
-internal static class PathHelper
+public static class PathHelper
 {
     public static string GetToolRoot()
     {
@@ -27,7 +27,7 @@ internal static class PathHelper
     public static string GetDefaultRunName(string sourceRepo, string targetRepo, string targetPath)
         => SanitizePathSegment($"{sourceRepo}-to-{targetRepo}-{targetPath}");
 
-    public static string GetScriptSetName(MergeSettings settings)
+    internal static string GetScriptSetName(MergeSettings settings)
     {
         if (!string.IsNullOrWhiteSpace(settings.ScriptSet))
             return SanitizePathSegment(settings.ScriptSet);
@@ -60,6 +60,18 @@ internal static class PathHelper
 
     public static string GetAbsolutePath(string rootPath, string path)
         => Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(rootPath, path));
+
+    public static string NormalizeRelativeTargetPath(string targetPath, string consumerName)
+    {
+        if (string.IsNullOrWhiteSpace(targetPath))
+            throw new InvalidOperationException($"{consumerName} requires a non-empty target path.");
+
+        var normalizedTargetPath = targetPath.Replace('/', Path.DirectorySeparatorChar).Trim();
+        if (Path.IsPathRooted(normalizedTargetPath))
+            throw new InvalidOperationException($"{consumerName} requires a relative target path.");
+
+        return normalizedTargetPath;
+    }
 
     public static void EnsurePathIsOutsideRepo(string repoRoot, string candidatePath, string optionName)
     {

@@ -1,5 +1,3 @@
-using System.Text.RegularExpressions;
-
 namespace RepoMerger;
 
 public sealed class RazorRepositoryHandler : IRepositoryHandler
@@ -11,16 +9,16 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
         if (!Directory.Exists(context.SourceRoot))
             throw new InvalidOperationException($"Source root '{context.SourceRoot}' does not exist.");
 
-        if (!ProcessRunner.IsGitRepository(context.SourceRoot))
+        if (!GitRunner.IsRepository(context.SourceRoot))
             throw new InvalidOperationException($"'{context.SourceRoot}' is not a git repository.");
 
-        var targetRelativePath = NormalizeTargetPath(context.TargetPath);
+        var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.TargetPath, "Razor preparation");
         var targetRoot = Path.Combine(context.SourceRoot, targetRelativePath);
         var srcTreeAlreadyNested = IsSourceTreeAlreadyNested(context.SourceRoot, targetRoot);
 
         Console.WriteLine($"Preparing Razor source repo at '{context.SourceRoot}'.");
 
-        var status = await RunGitAsync(context.SourceRoot, "status", "--short", "--untracked-files=no").ConfigureAwait(false);
+        var status = await GitRunner.GetShortStatusAsync(context.SourceRoot).ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(status))
             throw new InvalidOperationException("The source clone is not clean. Preparation expects a clean checkout.");
 
@@ -38,7 +36,7 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
             throw new InvalidOperationException($"The temporary folder '{temporarySourceDirectoryName}' already exists.");
 
         if (!srcTreeAlreadyNested && entriesToMove.Contains("src", StringComparer.OrdinalIgnoreCase))
-            await RunGitAsync(context.SourceRoot, "mv", "--", "src", temporarySourceDirectoryName).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(context.SourceRoot, "mv", "--", "src", temporarySourceDirectoryName).ConfigureAwait(false);
 
         Directory.CreateDirectory(targetRoot);
 
@@ -50,12 +48,12 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
                 continue;
             }
 
-            await RunGitAsync(context.SourceRoot, "mv", "--", entry, Path.Combine(targetRelativePath, entry)).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(context.SourceRoot, "mv", "--", entry, Path.Combine(targetRelativePath, entry)).ConfigureAwait(false);
         }
 
         if (!srcTreeAlreadyNested && Directory.Exists(Path.Combine(context.SourceRoot, temporarySourceDirectoryName)))
         {
-            await RunGitAsync(
+            await GitRunner.RunGitAsync(
                 context.SourceRoot,
                 "mv",
                 "--",
@@ -64,7 +62,7 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
         }
 
         var engMoveCount = await MoveEngContentsAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
-        var updatedSolutionFiles = await UpdateSolutionFilesAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
+        var updatedSolutionFiles = await SolutionPathUpdater.UpdateMovedPathsAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
         var rootMoveCount = entriesToMove.Count(static entry =>
             !string.Equals(entry, "src", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(entry, "eng", StringComparison.OrdinalIgnoreCase));
@@ -96,18 +94,6 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
         ProcessRunner.EnsureCommandSucceeded(result, "build.cmd -restore");
 
         Console.WriteLine("Razor source repo validation completed successfully.");
-    }
-
-    private static string NormalizeTargetPath(string targetPath)
-    {
-        if (string.IsNullOrWhiteSpace(targetPath))
-            throw new InvalidOperationException("Razor preparation requires a non-empty target path.");
-
-        var normalizedTargetPath = targetPath.Replace('/', Path.DirectorySeparatorChar).Trim();
-        if (Path.IsPathRooted(normalizedTargetPath))
-            throw new InvalidOperationException("Razor preparation requires a relative target path.");
-
-        return normalizedTargetPath;
     }
 
     private static bool IsSourceTreeAlreadyNested(string sourceRoot, string targetRoot)
@@ -192,83 +178,11 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
         Directory.CreateDirectory(Path.Combine(sourceRoot, targetRelativePath, "eng"));
 
         foreach (var entry in entriesToMove)
-            await RunGitAsync(sourceRoot, "mv", "--", Path.Combine("eng", entry), Path.Combine(targetRelativePath, "eng", entry)).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(sourceRoot, "mv", "--", Path.Combine("eng", entry), Path.Combine(targetRelativePath, "eng", entry)).ConfigureAwait(false);
 
         return entriesToMove.Length;
     }
 
     private static bool ShouldStayInRootEng(string name)
         => string.Equals(name, "common", StringComparison.OrdinalIgnoreCase);
-
-    private static async Task<int> UpdateSolutionFilesAsync(string sourceRoot, string targetRelativePath)
-    {
-        var updatedCount = 0;
-
-        foreach (var filePath in Directory.GetFiles(sourceRoot, "*.slnx", SearchOption.TopDirectoryOnly))
-        {
-            if (await UpdateSolutionFileAsync(sourceRoot, targetRelativePath, filePath, pathSeparatorText: "/").ConfigureAwait(false))
-                updatedCount++;
-        }
-
-        foreach (var filePath in Directory.GetFiles(sourceRoot, "*.slnf", SearchOption.TopDirectoryOnly))
-        {
-            if (await UpdateSolutionFileAsync(sourceRoot, targetRelativePath, filePath, pathSeparatorText: @"\\").ConfigureAwait(false))
-                updatedCount++;
-        }
-
-        return updatedCount;
-    }
-
-    private static async Task<bool> UpdateSolutionFileAsync(string sourceRoot, string targetRelativePath, string filePath, string pathSeparatorText)
-    {
-        var originalText = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
-        var pathPattern = Path.GetExtension(filePath).Equals(".slnx", StringComparison.OrdinalIgnoreCase)
-            ? """(Path=")([^"]+)(")"""
-            : """(")([^"\r\n]+\.(?:csproj|vbproj|fsproj|shproj))(")""";
-
-        var updatedText = Regex.Replace(
-            originalText,
-            pathPattern,
-            match =>
-            {
-                var rewrittenPath = RewritePathIfMoved(sourceRoot, targetRelativePath, match.Groups[2].Value, pathSeparatorText);
-                return $"{match.Groups[1].Value}{rewrittenPath}{match.Groups[3].Value}";
-            });
-
-        if (string.Equals(originalText, updatedText, StringComparison.Ordinal))
-            return false;
-
-        await File.WriteAllTextAsync(filePath, updatedText).ConfigureAwait(false);
-        return true;
-    }
-
-    private static string RewritePathIfMoved(string sourceRoot, string targetRelativePath, string relativePath, string pathSeparatorText)
-    {
-        if (Path.IsPathRooted(relativePath))
-            return relativePath;
-
-        var pathParts = relativePath
-            .Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (pathParts.Length == 0)
-            return relativePath;
-
-        var normalizedPath = Path.Combine(pathParts);
-        var originalLocation = Path.Combine(sourceRoot, normalizedPath);
-        if (File.Exists(originalLocation) || Directory.Exists(originalLocation))
-            return relativePath;
-
-        var movedLocation = Path.Combine(sourceRoot, targetRelativePath, normalizedPath);
-        if (!File.Exists(movedLocation) && !Directory.Exists(movedLocation))
-            return relativePath;
-
-        var rewrittenPath = Path.Combine(targetRelativePath, normalizedPath);
-        return rewrittenPath.Replace(Path.DirectorySeparatorChar.ToString(), pathSeparatorText);
-    }
-
-    private static async Task<string> RunGitAsync(string workingDirectory, params string[] arguments)
-    {
-        var result = await ProcessRunner.RunProcessAsync("git", arguments, workingDirectory).ConfigureAwait(false);
-        ProcessRunner.EnsureCommandSucceeded(result, $"git {string.Join(' ', arguments)}");
-        return result.Output;
-    }
 }
