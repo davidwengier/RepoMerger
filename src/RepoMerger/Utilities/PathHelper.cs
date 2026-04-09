@@ -11,20 +11,8 @@ internal static class PathHelper
             var directory = Path.GetFullPath(startPath);
             while (!string.IsNullOrEmpty(directory))
             {
-                if (File.Exists(Path.Combine(directory, "RepoMerger.csproj")))
-                    return directory;
-
-                directory = Path.GetDirectoryName(directory) ?? string.Empty;
-            }
-        }
-
-        foreach (var startPath in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
-        {
-            var directory = Path.GetFullPath(startPath);
-            while (!string.IsNullOrEmpty(directory))
-            {
-                if (Directory.Exists(Path.Combine(directory, ".git"))
-                    && Directory.Exists(Path.Combine(directory, "scripts")))
+                if (File.Exists(Path.Combine(directory, "RepoMerger.slnx"))
+                    || Directory.Exists(Path.Combine(directory, ".git")))
                 {
                     return directory;
                 }

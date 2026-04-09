@@ -1,4 +1,4 @@
-﻿namespace RepoMerger;
+namespace RepoMerger;
 
 internal enum StageStatus
 {

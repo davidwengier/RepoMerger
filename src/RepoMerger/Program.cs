@@ -1,4 +1,4 @@
-﻿namespace RepoMerger;
+namespace RepoMerger;
 
 internal static class Program
 {
@@ -170,7 +170,7 @@ internal static class Program
         Console.WriteLine("Repeatable, resumable merge orchestration for bringing a source repo into a target repo.");
         Console.WriteLine();
         Console.WriteLine("Usage:");
-        Console.WriteLine("  dotnet run --project . -- [options]");
+        Console.WriteLine(@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- [options]");
         Console.WriteLine();
         Console.WriteLine("Key options:");
         Console.WriteLine($"  --source-repo <value>     Source repository or local path. Default: {DefaultSourceRepo}");

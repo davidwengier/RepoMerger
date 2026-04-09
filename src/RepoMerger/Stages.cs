@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 
 namespace RepoMerger;
@@ -21,7 +21,7 @@ internal static class Stages
             CloneSourceAsync),
         new(
             "prepare-source",
-            "Run the repo-specific prepare.cs and validate.cs scripts against the external clone.",
+            "Run the repo-specific handler or fallback prepare/validate scripts against the external clone.",
             PrepareSourceAsync),
         new(
             "merge-into-target",
@@ -151,14 +151,6 @@ internal static class Stages
 
     private static async Task<string> PrepareSourceAsync(StageContext context)
     {
-        var scriptDirectory = context.State.ScriptDirectory;
-        if (!Directory.Exists(scriptDirectory))
-        {
-            throw new InvalidOperationException(
-                $"The script directory '{scriptDirectory}' does not exist. " +
-                "Add repo-specific scripts like prepare.cs and validate.cs or override it with --script-set/--script-root.");
-        }
-
         if (!Directory.Exists(context.State.SourceCloneDirectory))
         {
             throw new InvalidOperationException(
@@ -167,6 +159,19 @@ internal static class Stages
         }
 
         var summaries = new List<string>();
+        summaries.AddRange(await RepositoryHandlerLoader.TryRunAsync(context).ConfigureAwait(false));
+
+        if (summaries.Count > 0)
+            return string.Join(" ", summaries);
+
+        var scriptDirectory = context.State.ScriptDirectory;
+        if (!Directory.Exists(scriptDirectory))
+        {
+            throw new InvalidOperationException(
+                $"The script directory '{scriptDirectory}' does not exist. " +
+                "Add repo-specific scripts like prepare.cs and validate.cs, or build the matching handler assembly.");
+        }
+
         summaries.AddRange(await RunRepoScriptIfPresentAsync(context, "prepare.cs").ConfigureAwait(false));
         summaries.AddRange(await RunRepoScriptIfPresentAsync(context, "validate.cs").ConfigureAwait(false));
 
@@ -174,7 +179,7 @@ internal static class Stages
         {
             throw new InvalidOperationException(
                 $"No prepare.cs or validate.cs script was found in '{scriptDirectory}'. " +
-                "Add at least one repo-specific script for this stage.");
+                "Add at least one repo-specific script for this stage, or build the matching handler assembly.");
         }
 
         return string.Join(" ", summaries);
@@ -211,9 +216,9 @@ internal static class Stages
         summary.AppendLine($"State file       : {context.StatePath}");
         summary.AppendLine();
         summary.AppendLine("Available follow-up commands:");
-        summary.AppendLine($@"  dotnet run --project . -- --run-name {context.State.RunName} --resume");
-        summary.AppendLine($@"  dotnet run --project . -- --run-name {context.State.RunName} --stage clone-source --rerun");
-        summary.AppendLine($@"  dotnet run --project . -- --run-name {context.State.RunName} --stage prepare-source --rerun");
+        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --resume");
+        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage clone-source --rerun");
+        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage prepare-source --rerun");
         summary.AppendLine();
         summary.AppendLine("Current status: the external clone and repo-specific prepare/validate stages are implemented.");
 
