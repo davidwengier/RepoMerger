@@ -24,9 +24,9 @@ internal static class Stages
             "Run the repo-specific prepare.cs and validate.cs scripts against the external clone.",
             PrepareSourceAsync),
         new(
-            "merge-into-roslyn",
+            "merge-into-target",
             "Placeholder stage for importing the prepared repo into the target repo.",
-            MergeIntoRoslynAsync),
+            MergeIntoTargetAsync),
         new(
             "finalize-scaffold",
             "Write the current run summary and next-step commands.",
@@ -180,7 +180,7 @@ internal static class Stages
         return string.Join(" ", summaries);
     }
 
-    private static Task<string> MergeIntoRoslynAsync(StageContext context)
+    private static Task<string> MergeIntoTargetAsync(StageContext context)
     {
         var importDirectory = context.State.ImportPreviewDirectory;
         Directory.CreateDirectory(importDirectory);
