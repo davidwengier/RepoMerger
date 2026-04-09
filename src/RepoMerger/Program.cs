@@ -8,7 +8,6 @@ internal static class Program
     private const string DefaultTargetPath = @"src\Razor";
     private const string DefaultWorkRoot = @"..\repo-merge-work";
     private const string DefaultStateRoot = DefaultWorkRoot;
-    private const string DefaultScriptRoot = @"scripts";
 
     public static async Task<int> Main(string[] args)
     {
@@ -58,8 +57,6 @@ internal static class Program
             TargetPath: DefaultTargetPath,
             StateRoot: DefaultStateRoot,
             WorkRoot: DefaultWorkRoot,
-            ScriptRoot: DefaultScriptRoot,
-            ScriptSet: null,
             RunName: null,
             Stage: null,
             StartAt: null,
@@ -95,8 +92,6 @@ internal static class Program
                 "--target-path" => settings with { TargetPath = ReadRequiredValue(args, ref i, arg) },
                 "--state-root" => settings with { StateRoot = ReadRequiredValue(args, ref i, arg) },
                 "--work-root" => settings with { WorkRoot = ReadRequiredValue(args, ref i, arg) },
-                "--script-root" => settings with { ScriptRoot = ReadRequiredValue(args, ref i, arg) },
-                "--script-set" => settings with { ScriptSet = ReadRequiredValue(args, ref i, arg) },
                 "--run-name" => settings with { RunName = ReadRequiredValue(args, ref i, arg) },
                 "--stage" => settings with { Stage = ReadRequiredValue(args, ref i, arg) },
                 "--start-at" => settings with { StartAt = ReadRequiredValue(args, ref i, arg) },
@@ -142,8 +137,6 @@ internal static class Program
             "--target-path" => settings with { TargetPath = optionValue },
             "--state-root" => settings with { StateRoot = optionValue },
             "--work-root" => settings with { WorkRoot = optionValue },
-            "--script-root" => settings with { ScriptRoot = optionValue },
-            "--script-set" => settings with { ScriptSet = optionValue },
             "--run-name" => settings with { RunName = optionValue },
             "--stage" => settings with { Stage = optionValue },
             "--start-at" => settings with { StartAt = optionValue },
@@ -179,8 +172,6 @@ internal static class Program
         Console.WriteLine($"  --target-path <path>      Destination path inside the target repo. Default: {DefaultTargetPath}");
         Console.WriteLine($"  --state-root <path>       Where run state is persisted. Default: {DefaultStateRoot}");
         Console.WriteLine($"  --work-root <path>        Where the cloned working repos live. Default: {DefaultWorkRoot}");
-        Console.WriteLine($"  --script-root <path>      Where repo-specific scripts live. Default: {DefaultScriptRoot}");
-        Console.WriteLine("  --script-set <name>       Which repo-specific script folder to use.");
         Console.WriteLine("  --run-name <name>         Stable run name for resume/rerun.");
         Console.WriteLine("  --stage <name>            Run a single named stage.");
         Console.WriteLine("  --start-at <name>         Start execution at a specific stage.");

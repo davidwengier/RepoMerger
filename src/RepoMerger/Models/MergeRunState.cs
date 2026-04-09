@@ -12,9 +12,6 @@ internal sealed class MergeRunState
     public string TargetPath { get; set; } = string.Empty;
     public string StateRoot { get; set; } = string.Empty;
     public string WorkRoot { get; set; } = string.Empty;
-    public string ScriptRoot { get; set; } = string.Empty;
-    public string ScriptSet { get; set; } = string.Empty;
-    public string ScriptDirectory { get; set; } = string.Empty;
     public string RunDirectory { get; set; } = string.Empty;
     public string WorkDirectory { get; set; } = string.Empty;
     public string SourceRemoteUri { get; set; } = string.Empty;

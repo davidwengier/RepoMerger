@@ -9,8 +9,4 @@
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
   </PropertyGroup>
 
-  <ItemGroup>
-    <Compile Remove="..\..\scripts\**\*.cs" />
-  </ItemGroup>
-
 </Project>

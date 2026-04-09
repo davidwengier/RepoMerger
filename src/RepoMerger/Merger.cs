@@ -11,9 +11,6 @@ internal static class Merger
         var stateRoot = PathHelper.GetAbsolutePath(toolRoot, settings.StateRoot);
         var workRoot = PathHelper.GetAbsolutePath(toolRoot, settings.WorkRoot);
         PathHelper.EnsurePathIsOutsideRepo(toolRoot, workRoot, "--work-root");
-        var scriptRoot = PathHelper.GetAbsolutePath(toolRoot, settings.ScriptRoot);
-        var scriptSet = PathHelper.GetScriptSetName(settings);
-        var scriptDirectory = Path.Combine(scriptRoot, scriptSet);
         var runDirectory = Path.Combine(stateRoot, runName);
         var workDirectory = Path.Combine(workRoot, runName);
         var targetRepoRoot = Path.Combine(workDirectory, "target");
@@ -54,9 +51,6 @@ internal static class Merger
         state.TargetPath = settings.TargetPath;
         state.StateRoot = stateRoot;
         state.WorkRoot = workRoot;
-        state.ScriptRoot = scriptRoot;
-        state.ScriptSet = scriptSet;
-        state.ScriptDirectory = scriptDirectory;
         state.RunName = runName;
         state.RunDirectory = runDirectory;
         state.WorkDirectory = workDirectory;
@@ -168,9 +162,6 @@ internal static class Merger
             TargetPath = settings.TargetPath,
             StateRoot = string.Empty,
             WorkRoot = string.Empty,
-            ScriptRoot = string.Empty,
-            ScriptSet = string.Empty,
-            ScriptDirectory = string.Empty,
             RunDirectory = runDirectory,
             WorkDirectory = string.Empty,
             SourceRemoteUri = string.Empty,

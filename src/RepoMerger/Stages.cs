@@ -21,7 +21,7 @@ internal static class Stages
             CloneSourceAsync),
         new(
             "prepare-source",
-            "Run the repo-specific handler or fallback prepare/validate scripts against the external clone.",
+            "Run the repo-specific handler against the external clone.",
             PrepareSourceAsync),
         new(
             "merge-into-target",
@@ -75,7 +75,7 @@ internal static class Stages
         Console.WriteLine($"Resolved target clone directory: {context.TargetRepoRoot}");
         Console.WriteLine($"Resolved target path: {fullTargetPath}");
         Console.WriteLine($"Resolved external work root: {fullWorkRoot}");
-        Console.WriteLine($"Using script directory: {context.State.ScriptDirectory}");
+        Console.WriteLine($"Resolved repository handler key: {RepositoryHandlerLoader.GetRepositoryKey(context.Settings.SourceRepo)}");
 
         return $"Validated target repo and inputs. Git: {gitVersion.Trim()}";
     }
@@ -99,9 +99,6 @@ internal static class Stages
             context.State.WorkDirectory,
             context.State.SourceCloneDirectory,
             context.State.TargetRepoRoot,
-            context.State.ScriptRoot,
-            context.State.ScriptSet,
-            context.State.ScriptDirectory,
             context.Settings.DryRun,
             selectedStages = new
             {
@@ -156,31 +153,7 @@ internal static class Stages
                 "Run the clone-source stage first.");
         }
 
-        var summaries = new List<string>();
-        summaries.AddRange(await RepositoryHandlerLoader.TryRunAsync(context).ConfigureAwait(false));
-
-        if (summaries.Count > 0)
-            return string.Join(" ", summaries);
-
-        var scriptDirectory = context.State.ScriptDirectory;
-        if (!Directory.Exists(scriptDirectory))
-        {
-            throw new InvalidOperationException(
-                $"The script directory '{scriptDirectory}' does not exist. " +
-                "Add repo-specific scripts like prepare.cs and validate.cs, or build the matching handler assembly.");
-        }
-
-        summaries.AddRange(await RunRepoScriptIfPresentAsync(context, "prepare.cs").ConfigureAwait(false));
-        summaries.AddRange(await RunRepoScriptIfPresentAsync(context, "validate.cs").ConfigureAwait(false));
-
-        if (summaries.Count == 0)
-        {
-            throw new InvalidOperationException(
-                $"No prepare.cs or validate.cs script was found in '{scriptDirectory}'. " +
-                "Add at least one repo-specific script for this stage, or build the matching handler assembly.");
-        }
-
-        return string.Join(" ", summaries);
+        return await RepositoryHandlerLoader.RunAsync(context).ConfigureAwait(false);
     }
 
     private static Task<string> MergeIntoTargetAsync(StageContext context)
@@ -207,7 +180,7 @@ internal static class Stages
         summary.AppendLine($"Work root        : {context.State.WorkRoot}");
         summary.AppendLine($"Source clone dir : {context.State.SourceCloneDirectory}");
         summary.AppendLine($"Target clone dir : {context.TargetRepoRoot}");
-        summary.AppendLine($"Script directory : {context.State.ScriptDirectory}");
+        summary.AppendLine($"Handler key      : {RepositoryHandlerLoader.GetRepositoryKey(context.Settings.SourceRepo)}");
         summary.AppendLine($"Source HEAD      : {context.State.SourceHeadCommit}");
         summary.AppendLine($"Target HEAD      : {context.State.TargetHeadCommit}");
         summary.AppendLine($"Dry run          : {context.Settings.DryRun}");
@@ -224,22 +197,6 @@ internal static class Stages
         await File.WriteAllTextAsync(summaryPath, summary.ToString()).ConfigureAwait(false);
 
         return $"Wrote run summary to '{summaryPath}'.";
-    }
-
-    private static async Task<IReadOnlyList<string>> RunRepoScriptIfPresentAsync(StageContext context, string scriptFileName)
-    {
-        var scriptPath = Path.Combine(context.State.ScriptDirectory, scriptFileName);
-        if (!File.Exists(scriptPath))
-            return [];
-
-        Console.WriteLine($"Running repo-specific script '{scriptPath}' against '{context.State.SourceCloneDirectory}'.");
-        var result = await ProcessRunner.RunProcessAsync(
-            "dotnet",
-            ["run", "--file", scriptPath, "--", context.State.SourceCloneDirectory],
-            context.State.SourceCloneDirectory).ConfigureAwait(false);
-        ProcessRunner.EnsureCommandSucceeded(result, $"dotnet run --file {scriptPath}");
-
-        return [$"Ran {scriptFileName} successfully."];
     }
 
     private static async Task<string> CloneOrRefreshRepositoryAsync(

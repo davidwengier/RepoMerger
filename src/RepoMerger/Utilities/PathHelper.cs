@@ -27,15 +27,6 @@ public static class PathHelper
     public static string GetDefaultRunName(string sourceRepo, string targetRepo, string targetPath)
         => SanitizePathSegment($"{sourceRepo}-to-{targetRepo}-{targetPath}");
 
-    internal static string GetScriptSetName(MergeSettings settings)
-    {
-        if (!string.IsNullOrWhiteSpace(settings.ScriptSet))
-            return SanitizePathSegment(settings.ScriptSet);
-
-        var repoName = Path.GetFileName(settings.SourceRepo.Replace('/', Path.DirectorySeparatorChar));
-        return SanitizePathSegment(repoName);
-    }
-
     public static string SanitizePathSegment(string value)
     {
         var builder = new StringBuilder(value.Length);

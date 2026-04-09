@@ -5,42 +5,49 @@ namespace RepoMerger;
 
 internal static class RepositoryHandlerLoader
 {
-    public static async Task<IReadOnlyList<string>> TryRunAsync(StageContext context)
+    public static async Task<string> RunAsync(StageContext context)
     {
-        var repositoryKey = GetRepositoryKey(context);
+        var repositoryKey = GetRepositoryKey(context.Settings.SourceRepo);
         if (string.IsNullOrWhiteSpace(repositoryKey))
-            return [];
+        {
+            throw new InvalidOperationException(
+                $"Could not determine a repository handler key from source repo '{context.Settings.SourceRepo}'.");
+        }
 
-        var handler = TryCreateHandler(context.ToolRoot, repositoryKey);
-        if (handler is null)
-            return [];
+        var handler = CreateHandler(context.ToolRoot, repositoryKey, out var assemblyPath);
 
         var handlerContext = new RepositoryHandlerContext(
             SourceRepo: context.Settings.SourceRepo,
             SourceRoot: context.State.SourceCloneDirectory,
             TargetPath: context.Settings.TargetPath);
 
-        Console.WriteLine($"Loaded '{Path.GetFileName(handler.GetType().Assembly.Location)}' for '{repositoryKey}'.");
+        Console.WriteLine($"Loaded '{Path.GetFileName(assemblyPath)}' for '{repositoryKey}'.");
 
         await handler.PrepareAsync(handlerContext).ConfigureAwait(false);
         await handler.ValidateAsync(handlerContext).ConfigureAwait(false);
 
-        return [$"Ran {repositoryKey} handler successfully."];
+        return $"Ran {repositoryKey} handler successfully.";
     }
 
-    private static string GetRepositoryKey(StageContext context)
+    internal static string GetRepositoryKey(string sourceRepo)
     {
-        if (!string.IsNullOrWhiteSpace(context.Settings.ScriptSet))
-            return context.Settings.ScriptSet;
+        var normalizedRepo = sourceRepo.Trim()
+            .Replace('/', Path.DirectorySeparatorChar)
+            .TrimEnd(Path.DirectorySeparatorChar);
+        var repoName = Path.GetFileName(normalizedRepo);
 
-        return Path.GetFileName(context.Settings.SourceRepo.Replace('/', Path.DirectorySeparatorChar));
+        if (repoName.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+            repoName = repoName[..^4];
+
+        return string.IsNullOrWhiteSpace(repoName)
+            ? string.Empty
+            : PathHelper.SanitizePathSegment(repoName);
     }
 
-    private static IRepositoryHandler? TryCreateHandler(string toolRoot, string repositoryKey)
+    private static IRepositoryHandler CreateHandler(string toolRoot, string repositoryKey, out string assemblyPath)
     {
-        var assemblyPath = FindAssemblyPath(toolRoot, repositoryKey);
-        if (assemblyPath is null)
-            return null;
+        assemblyPath = FindAssemblyPath(toolRoot, repositoryKey)
+            ?? throw CreateMissingHandlerException(toolRoot, repositoryKey);
 
         var assemblyName = Path.GetFileNameWithoutExtension(assemblyPath);
         var assembly = AppDomain.CurrentDomain.GetAssemblies()
@@ -65,24 +72,39 @@ internal static class RepositoryHandlerLoader
             $"Loaded '{assemblyName}.dll' from '{assemblyPath}', but it did not contain an IRepositoryHandler for '{repositoryKey}'.");
     }
 
+    private static Exception CreateMissingHandlerException(string toolRoot, string repositoryKey)
+    {
+        var assemblyBaseName = ToAssemblyBaseName(repositoryKey);
+        var searchedPaths = string.Join(
+            Environment.NewLine,
+            GetAssemblyCandidates(toolRoot, assemblyBaseName).Select(static path => $"  - {path}"));
+
+        return new InvalidOperationException(
+            $"No compiled repository handler was found for '{repositoryKey}'. " +
+            $"Build the matching plugin project so '{assemblyBaseName}.dll' is available. Searched:{Environment.NewLine}{searchedPaths}");
+    }
+
     private static string? FindAssemblyPath(string toolRoot, string repositoryKey)
     {
         var assemblyBaseName = ToAssemblyBaseName(repositoryKey);
-        var assemblyFileName = $"{assemblyBaseName}.dll";
-        var candidates = new[]
-        {
-            Path.Combine(AppContext.BaseDirectory, assemblyFileName),
-            Path.Combine(toolRoot, "src", assemblyBaseName, "bin", "Debug", "net10.0", assemblyFileName),
-            Path.Combine(toolRoot, "src", assemblyBaseName, "bin", "Release", "net10.0", assemblyFileName),
-        };
-
-        foreach (var candidate in candidates)
+        foreach (var candidate in GetAssemblyCandidates(toolRoot, assemblyBaseName))
         {
             if (File.Exists(candidate))
                 return Path.GetFullPath(candidate);
         }
 
         return null;
+    }
+
+    private static string[] GetAssemblyCandidates(string toolRoot, string assemblyBaseName)
+    {
+        var assemblyFileName = $"{assemblyBaseName}.dll";
+        return
+        [
+            Path.Combine(AppContext.BaseDirectory, assemblyFileName),
+            Path.Combine(toolRoot, "src", assemblyBaseName, "bin", "Debug", "net10.0", assemblyFileName),
+            Path.Combine(toolRoot, "src", assemblyBaseName, "bin", "Release", "net10.0", assemblyFileName),
+        ];
     }
 
     private static string ToAssemblyBaseName(string repositoryKey)

@@ -7,8 +7,6 @@ internal readonly record struct MergeSettings(
     string TargetPath,
     string StateRoot,
     string WorkRoot,
-    string ScriptRoot,
-    string? ScriptSet,
     string? RunName,
     string? Stage,
     string? StartAt,
