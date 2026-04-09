@@ -1,6 +1,6 @@
 ﻿namespace RepoMerger;
 
-enum StageStatus
+internal enum StageStatus
 {
     Pending,
     InProgress,

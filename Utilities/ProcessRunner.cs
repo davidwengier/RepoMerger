@@ -2,7 +2,7 @@
 
 namespace RepoMerger;
 
-static class ProcessRunner
+internal static class ProcessRunner
 {
     public static bool IsGitRepository(string directory)
         => Directory.Exists(Path.Combine(directory, ".git")) || File.Exists(Path.Combine(directory, ".git"));

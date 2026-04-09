@@ -2,7 +2,7 @@
 
 namespace RepoMerger;
 
-static class PathHelper
+internal static class PathHelper
 {
     public static string GetToolRoot()
     {

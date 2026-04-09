@@ -4,7 +4,7 @@ using System.Text.Json.Serialization.Metadata;
 
 namespace RepoMerger;
 
-static class RunStateStore
+internal static class RunStateStore
 {
     public static JsonSerializerOptions JsonOptions { get; } = new()
     {

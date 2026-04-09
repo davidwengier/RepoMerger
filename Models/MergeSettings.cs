@@ -1,6 +1,6 @@
 ﻿namespace RepoMerger;
 
-readonly record struct MergeSettings(
+internal readonly record struct MergeSettings(
     string SourceRepo,
     string SourceBranch,
     string TargetRepo,

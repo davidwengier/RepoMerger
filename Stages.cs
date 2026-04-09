@@ -3,7 +3,7 @@ using System.Text.Json;
 
 namespace RepoMerger;
 
-static class Stages
+internal static class Stages
 {
     public static MergeStageDefinition[] Definitions { get; } =
     [

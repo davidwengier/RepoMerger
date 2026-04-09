@@ -1,6 +1,6 @@
 namespace RepoMerger;
 
-static class Merger
+internal static class Merger
 {
     public static async Task<int> RunAsync(MergeSettings settings)
     {

@@ -1,6 +1,6 @@
 ﻿namespace RepoMerger;
 
-sealed class StageState
+internal sealed class StageState
 {
     public string Name { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
