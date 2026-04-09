@@ -62,20 +62,20 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
         }
 
         var engMoveCount = await MoveEngContentsAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
-        var updatedSolutionFiles = await SolutionPathUpdater.UpdateMovedPathsAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
+        var updatedPathFiles = await SolutionPathUpdater.UpdateMovedPathsAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
         var rootMoveCount = entriesToMove.Count(static entry =>
             !string.Equals(entry, "src", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(entry, "eng", StringComparison.OrdinalIgnoreCase));
 
-        if (srcTreeAlreadyNested && rootMoveCount == 0 && engMoveCount == 0 && updatedSolutionFiles == 0)
+        if (srcTreeAlreadyNested && rootMoveCount == 0 && engMoveCount == 0 && updatedPathFiles == 0)
         {
             Console.WriteLine($"Razor repo is already prepared under '{targetRoot}'.");
             return;
         }
 
         Console.WriteLine($@"Moved {rootMoveCount} root entr{(rootMoveCount == 1 ? "y" : "ies")} and {engMoveCount} eng entr{(engMoveCount == 1 ? "y" : "ies")} under '{targetRelativePath}'.");
-        if (updatedSolutionFiles > 0)
-            Console.WriteLine($"Updated {updatedSolutionFiles} solution file(s).");
+        if (updatedPathFiles > 0)
+            Console.WriteLine($"Updated {updatedPathFiles} project/solution file(s).");
     }
 
     public async Task ValidateAsync(RepositoryHandlerContext context)
