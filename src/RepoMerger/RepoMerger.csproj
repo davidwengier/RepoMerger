@@ -13,4 +13,15 @@
     <PackageReference Include="System.CommandLine" Version="2.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <HandlerProjects Include="..\Razor\Razor.csproj" />
+  </ItemGroup>
+
+  <Target Name="BuildHandlerProjects" BeforeTargets="Build">
+    <MSBuild
+      Projects="@(HandlerProjects)"
+      Targets="Build"
+      Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework);BuildProjectReferences=false" />
+  </Target>
+
 </Project>
