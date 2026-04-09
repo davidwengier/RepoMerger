@@ -17,8 +17,12 @@ internal static class Stages
             PrepareStateAsync),
         new(
             "clone-source",
-            "Clone or refresh the source and target repositories in the external work area.",
+            "Clone or refresh the source repository in the external work area.",
             CloneSourceAsync),
+        new(
+            "clone-target",
+            "Clone or refresh the target repository in the external work area.",
+            CloneTargetAsync),
         new(
             "prepare-source",
             "Run the repo-specific handler against the external clone.",
@@ -115,34 +119,29 @@ internal static class Stages
         return $"Prepared persisted state under '{context.RunDirectory}' and external work area '{context.State.WorkDirectory}'.";
     }
 
-    private static async Task<string> CloneSourceAsync(StageContext context)
-    {
-        var summaries = new List<string>
-        {
-            await CloneOrRefreshRepositoryAsync(
-                remoteName: "source",
-                repositoryDisplayName: context.Settings.SourceRepo,
-                remoteUri: context.State.SourceRemoteUri,
-                branchName: context.Settings.SourceBranch,
-                cloneDirectory: context.State.SourceCloneDirectory,
-                workDirectory: context.State.WorkDirectory,
-                allowNoHardlinks: PathHelper.LooksLikeLocalPath(context.Settings.SourceRepo),
-                isDryRun: context.Settings.DryRun,
-                onHeadResolved: commit => context.State.SourceHeadCommit = commit).ConfigureAwait(false),
-            await CloneOrRefreshRepositoryAsync(
-                remoteName: "target",
-                repositoryDisplayName: context.Settings.TargetRepo,
-                remoteUri: context.State.TargetRemoteUri,
-                branchName: null,
-                cloneDirectory: context.TargetRepoRoot,
-                workDirectory: context.State.WorkDirectory,
-                allowNoHardlinks: false,
-                isDryRun: context.Settings.DryRun,
-                onHeadResolved: commit => context.State.TargetHeadCommit = commit).ConfigureAwait(false),
-        };
+    private static Task<string> CloneSourceAsync(StageContext context)
+        => CloneOrRefreshRepositoryAsync(
+            remoteName: "source",
+            repositoryDisplayName: context.Settings.SourceRepo,
+            remoteUri: context.State.SourceRemoteUri,
+            branchName: context.Settings.SourceBranch,
+            cloneDirectory: context.State.SourceCloneDirectory,
+            workDirectory: context.State.WorkDirectory,
+            allowNoHardlinks: PathHelper.LooksLikeLocalPath(context.Settings.SourceRepo),
+            isDryRun: context.Settings.DryRun,
+            onHeadResolved: commit => context.State.SourceHeadCommit = commit);
 
-        return string.Join(" ", summaries);
-    }
+    private static Task<string> CloneTargetAsync(StageContext context)
+        => CloneOrRefreshRepositoryAsync(
+            remoteName: "target",
+            repositoryDisplayName: context.Settings.TargetRepo,
+            remoteUri: context.State.TargetRemoteUri,
+            branchName: null,
+            cloneDirectory: context.TargetRepoRoot,
+            workDirectory: context.State.WorkDirectory,
+            allowNoHardlinks: false,
+            isDryRun: context.Settings.DryRun,
+            onHeadResolved: commit => context.State.TargetHeadCommit = commit);
 
     private static async Task<string> PrepareSourceAsync(StageContext context)
     {
@@ -151,6 +150,13 @@ internal static class Stages
             throw new InvalidOperationException(
                 $"The source clone directory '{context.State.SourceCloneDirectory}' does not exist. " +
                 "Run the clone-source stage first.");
+        }
+
+        if (!Directory.Exists(context.TargetRepoRoot))
+        {
+            throw new InvalidOperationException(
+                $"The target clone directory '{context.TargetRepoRoot}' does not exist. " +
+                "Run the clone-target stage first.");
         }
 
         return await RepositoryHandlerLoader.RunAsync(context).ConfigureAwait(false);
@@ -189,9 +195,10 @@ internal static class Stages
         summary.AppendLine("Available follow-up commands:");
         summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --resume");
         summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage clone-source --rerun");
+        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage clone-target --rerun");
         summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage prepare-source --rerun");
         summary.AppendLine();
-        summary.AppendLine("Current status: the external clone and repo-specific prepare/validate stages are implemented.");
+        summary.AppendLine("Current status: source/target cloning and repo-specific prepare/validate stages are implemented.");
 
         var summaryPath = Path.Combine(context.RunDirectory, "summary.txt");
         await File.WriteAllTextAsync(summaryPath, summary.ToString()).ConfigureAwait(false);
