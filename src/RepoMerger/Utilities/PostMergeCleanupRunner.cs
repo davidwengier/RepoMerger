@@ -14,8 +14,8 @@ internal static class PostMergeCleanupRunner
             RemoveCommonTargetsImportAsync),
         new(
             "convert-roslyn-package-references",
-            "Convert Razor Roslyn PackageReference items into ProjectReference items.",
-            "Convert Razor Roslyn package references to project references",
+            "Convert Roslyn PackageReference items into ProjectReference items.",
+            "Convert Roslyn package references to project references",
             ConvertRoslynPackageReferencesAsync),
     ];
 
