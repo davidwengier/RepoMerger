@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace RepoMerger;
 
@@ -11,6 +12,11 @@ internal static class PostMergeCleanupRunner
             @"Remove Razor imports of $(RepositoryEngineeringDir)targets\Common.targets.",
             "Remove Razor Common.targets import",
             RemoveCommonTargetsImportAsync),
+        new(
+            "convert-roslyn-package-references",
+            "Convert Razor Roslyn PackageReference items into ProjectReference items.",
+            "Convert Razor Roslyn package references to project references",
+            ConvertRoslynPackageReferencesAsync),
     ];
 
     public static async Task<string> RunAsync(StageContext context)
@@ -70,6 +76,30 @@ internal static class PostMergeCleanupRunner
             : $@"Removed Razor imports of $(RepositoryEngineeringDir)targets\Common.targets from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> ConvertRoslynPackageReferencesAsync(string targetRepoRoot, string targetRoot)
+    {
+        var roslynProjectMap = await BuildRoslynProjectMapAsync(targetRepoRoot, targetRoot).ConfigureAwait(false);
+        if (roslynProjectMap.Count == 0)
+            return "No Roslyn package references were found to convert.";
+
+        var changedFiles = new List<string>();
+        var convertedReferenceCount = 0;
+
+        foreach (var projectPath in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
+        {
+            var convertedInProject = await ConvertRoslynPackageReferencesInProjectAsync(projectPath, roslynProjectMap).ConfigureAwait(false);
+            if (convertedInProject == 0)
+                continue;
+
+            convertedReferenceCount += convertedInProject;
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
+        }
+
+        return convertedReferenceCount == 0
+            ? "No Roslyn package references were found to convert."
+            : $"Converted {convertedReferenceCount} Roslyn package reference(s) to project references in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
     private static IEnumerable<string> EnumerateMsBuildFiles(string root)
         => Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories)
             .Where(static path =>
@@ -77,6 +107,172 @@ internal static class PostMergeCleanupRunner
                 path.EndsWith(".targets", StringComparison.OrdinalIgnoreCase) ||
                 path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
                 path.EndsWith(".vbproj", StringComparison.OrdinalIgnoreCase));
+
+    private static async Task<Dictionary<string, string>> BuildRoslynProjectMapAsync(string targetRepoRoot, string targetRoot)
+    {
+        var referencedPackageIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var projectPath in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
+        {
+            var document = await LoadXmlAsync(projectPath).ConfigureAwait(false);
+            foreach (var packageReference in document.Descendants().Where(static element => element.Name.LocalName == "PackageReference"))
+            {
+                var packageId = packageReference.Attribute("Include")?.Value?.Trim();
+                if (LooksLikeRoslynPackageReference(packageId))
+                    referencedPackageIds.Add(packageId!);
+            }
+        }
+
+        if (referencedPackageIds.Count == 0)
+            return [];
+
+        var candidates = referencedPackageIds.ToDictionary(
+            static packageId => packageId,
+            static _ => new List<ProjectCandidate>(),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var projectPath in Directory.EnumerateFiles(Path.Combine(targetRepoRoot, "src"), "*.csproj", SearchOption.AllDirectories))
+        {
+            var projectFileName = Path.GetFileNameWithoutExtension(projectPath);
+            foreach (var packageId in referencedPackageIds)
+            {
+                if (string.Equals(projectFileName, packageId, StringComparison.OrdinalIgnoreCase))
+                    candidates[packageId].Add(new ProjectCandidate(projectPath, projectFileName, ExplicitPackageId: null));
+            }
+
+            var document = await LoadXmlAsync(projectPath).ConfigureAwait(false);
+            foreach (var explicitPackageId in document.Descendants().Where(static element => element.Name.LocalName == "PackageId").Select(static element => element.Value.Trim()))
+            {
+                if (candidates.TryGetValue(explicitPackageId, out var matches))
+                    matches.Add(new ProjectCandidate(projectPath, projectFileName, explicitPackageId));
+            }
+        }
+
+        return candidates
+            .Where(static entry => entry.Value.Count > 0)
+            .ToDictionary(
+                static entry => entry.Key,
+                static entry => ChooseBestCandidate(entry.Key, entry.Value).Path,
+                StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static async Task<int> ConvertRoslynPackageReferencesInProjectAsync(
+        string projectPath,
+        IReadOnlyDictionary<string, string> roslynProjectMap)
+    {
+        var document = await LoadXmlAsync(projectPath, preserveWhitespace: true).ConfigureAwait(false);
+        var projectDirectory = Path.GetDirectoryName(projectPath)!;
+        var existingProjectReferences = document
+            .Descendants()
+            .Where(static element => element.Name.LocalName == "ProjectReference")
+            .Select(static element => element.Attribute("Include")?.Value)
+            .Where(static include => !string.IsNullOrWhiteSpace(include))
+            .Select(include => Path.GetFullPath(Path.Combine(projectDirectory, include!)))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var packageReferences = document
+            .Descendants()
+            .Where(static element => element.Name.LocalName == "PackageReference")
+            .ToList();
+
+        var convertedCount = 0;
+        foreach (var packageReference in packageReferences)
+        {
+            var packageId = packageReference.Attribute("Include")?.Value?.Trim();
+            if (string.IsNullOrWhiteSpace(packageId) || !roslynProjectMap.TryGetValue(packageId, out var referencedProjectPath))
+                continue;
+
+            var normalizedProjectPath = Path.GetFullPath(referencedProjectPath);
+            if (existingProjectReferences.Contains(normalizedProjectPath))
+            {
+                packageReference.Remove();
+                convertedCount++;
+                continue;
+            }
+
+            var projectReference = new XElement(packageReference.Name.Namespace + "ProjectReference");
+            projectReference.SetAttributeValue("Include", Path.GetRelativePath(projectDirectory, normalizedProjectPath));
+
+            foreach (var attribute in packageReference.Attributes())
+            {
+                if (ShouldKeepProjectReferenceAttribute(attribute.Name.LocalName))
+                    projectReference.SetAttributeValue(attribute.Name, attribute.Value);
+            }
+
+            foreach (var child in packageReference.Elements())
+            {
+                if (ShouldKeepProjectReferenceElement(child.Name.LocalName))
+                    projectReference.Add(new XElement(child));
+            }
+
+            packageReference.ReplaceWith(projectReference);
+            existingProjectReferences.Add(normalizedProjectPath);
+            convertedCount++;
+        }
+
+        if (convertedCount > 0)
+            await SaveXmlAsync(document, projectPath).ConfigureAwait(false);
+
+        return convertedCount;
+    }
+
+    private static bool LooksLikeRoslynPackageReference(string? packageId)
+        => !string.IsNullOrWhiteSpace(packageId)
+            && (string.Equals(packageId, "Microsoft.CodeAnalysis", StringComparison.OrdinalIgnoreCase)
+                || packageId.StartsWith("Microsoft.CodeAnalysis.", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(packageId, "Microsoft.VisualStudio.Extensibility.Testing.Xunit", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(packageId, "Microsoft.VisualStudio.Extensibility.Testing.SourceGenerator", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(packageId, "Microsoft.VisualStudio.LanguageServices", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(packageId, "Microsoft.VisualStudio.LanguageServices.CSharp.Symbols", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(packageId, "Microsoft.VisualStudio.LanguageServices.Implementation.Symbols", StringComparison.OrdinalIgnoreCase));
+
+    private static ProjectCandidate ChooseBestCandidate(string packageId, IEnumerable<ProjectCandidate> candidates)
+        => candidates
+            .OrderByDescending(candidate => ScoreCandidate(packageId, candidate))
+            .ThenBy(candidate => candidate.Path, StringComparer.OrdinalIgnoreCase)
+            .First();
+
+    private static int ScoreCandidate(string packageId, ProjectCandidate candidate)
+    {
+        var score = 0;
+
+        if (string.Equals(candidate.ProjectFileName, packageId, StringComparison.OrdinalIgnoreCase))
+            score += 100;
+        if (string.Equals(candidate.ExplicitPackageId, packageId, StringComparison.OrdinalIgnoreCase))
+            score += 80;
+        if (!candidate.Path.Contains($"{Path.DirectorySeparatorChar}NuGet{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+            score += 20;
+        if (candidate.ProjectFileName.EndsWith(".Package", StringComparison.OrdinalIgnoreCase))
+            score -= 50;
+        if (candidate.ProjectFileName.Contains("UnitTest", StringComparison.OrdinalIgnoreCase)
+            || candidate.ProjectFileName.EndsWith(".Test", StringComparison.OrdinalIgnoreCase)
+            || candidate.ProjectFileName.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase))
+        {
+            score -= 100;
+        }
+
+        return score;
+    }
+
+    private static bool ShouldKeepProjectReferenceAttribute(string localName)
+        => localName is "Condition" or "PrivateAssets" or "ReferenceOutputAssembly" or "OutputItemType" or "Aliases";
+
+    private static bool ShouldKeepProjectReferenceElement(string localName)
+        => localName is "Condition" or "PrivateAssets" or "ReferenceOutputAssembly" or "OutputItemType" or "Aliases" or "SetTargetFramework";
+
+    private static async Task<XDocument> LoadXmlAsync(string path, bool preserveWhitespace = false)
+    {
+        await using var stream = File.OpenRead(path);
+        return await XDocument.LoadAsync(
+            stream,
+            preserveWhitespace ? LoadOptions.PreserveWhitespace : LoadOptions.None,
+            CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private static async Task SaveXmlAsync(XDocument document, string path)
+    {
+        await using var stream = File.Create(path);
+        await document.SaveAsync(stream, SaveOptions.None, CancellationToken.None).ConfigureAwait(false);
+    }
 
     private static readonly Regex CommonTargetsImportPattern = new(
         @"^[ \t]*<Import\s+Project=""\$\(RepositoryEngineeringDir\)targets(?:\\|/)Common\.targets""\s*/>\r?\n?",
@@ -87,4 +283,6 @@ internal static class PostMergeCleanupRunner
         string Description,
         string CommitMessage,
         Func<string, string, Task<string>> ExecuteAsync);
+
+    private sealed record ProjectCandidate(string Path, string ProjectFileName, string? ExplicitPackageId);
 }
