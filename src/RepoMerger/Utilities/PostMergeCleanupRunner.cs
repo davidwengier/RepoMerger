@@ -18,6 +18,11 @@ internal static class PostMergeCleanupRunner
             "Rewrite Razor Directory.Build imports",
             RewriteDirectoryBuildImportsAsync),
         new(
+            "rewrite-directory-packages-props",
+            "Rewrite Razor Directory.Packages.props to import the repo-root file and remove duplicate package versions.",
+            "Rewrite Razor Directory.Packages.props",
+            RewriteDirectoryPackagesPropsAsync),
+        new(
             "convert-roslyn-package-references",
             "Convert Roslyn PackageReference items into ProjectReference items.",
             "Convert Roslyn package references to project references",
@@ -103,6 +108,65 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor Directory.Build import rewrites were needed."
             : $"Rewrote Razor Directory.Build imports in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> RewriteDirectoryPackagesPropsAsync(string targetRepoRoot, string targetRoot)
+    {
+        var razorPackagesPath = Path.Combine(targetRoot, "Directory.Packages.props");
+        if (!File.Exists(razorPackagesPath))
+            return "No Razor Directory.Packages.props file was found.";
+
+        var rootPackagesPath = Path.Combine(targetRepoRoot, "Directory.Packages.props");
+        if (!File.Exists(rootPackagesPath))
+            return "No repo-root Directory.Packages.props file was found to import.";
+
+        var rootPackageIds = await CollectPackageVersionIdsAsync(rootPackagesPath).ConfigureAwait(false);
+
+        var document = await LoadXmlAsync(razorPackagesPath).ConfigureAwait(false);
+        var project = document.Root
+            ?? throw new InvalidOperationException($"The file '{razorPackagesPath}' does not contain a root <Project> element.");
+
+        var existingImports = project
+            .Elements()
+            .Where(IsRootDirectoryPackagesImport)
+            .ToList();
+        var importNeedsRewrite = existingImports.Count != 1
+            || !ReferenceEquals(project.Elements().FirstOrDefault(), existingImports[0]);
+
+        if (importNeedsRewrite)
+        {
+            foreach (var existingImport in existingImports)
+                existingImport.Remove();
+
+            project.AddFirst(CreateRootDirectoryImport(project.Name.Namespace, "Directory.Packages.props"));
+        }
+
+        var duplicatePackageVersions = project
+            .Descendants()
+            .Where(static element => element.Name.LocalName == "PackageVersion")
+            .Where(element =>
+            {
+                var packageId = GetPackageVersionId(element);
+                return !string.IsNullOrWhiteSpace(packageId) && rootPackageIds.Contains(packageId);
+            })
+            .ToList();
+
+        foreach (var duplicatePackageVersion in duplicatePackageVersions)
+            duplicatePackageVersion.Remove();
+
+        foreach (var itemGroup in project.Elements().Where(static element => element.Name.LocalName == "ItemGroup").ToList())
+        {
+            if (!itemGroup.Elements().Any())
+                itemGroup.Remove();
+        }
+
+        if (!importNeedsRewrite && duplicatePackageVersions.Count == 0)
+            return "No Razor Directory.Packages.props rewrite was needed.";
+
+        await SaveXmlAsync(document, razorPackagesPath).ConfigureAwait(false);
+        return
+            $"Updated '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to import the repo-root Directory.Packages.props " +
+            $"and removed {duplicatePackageVersions.Count} duplicate PackageVersion item(s).";
     }
 
     private static async Task<string> ConvertRoslynPackageReferencesAsync(string targetRepoRoot, string targetRoot)
@@ -254,6 +318,19 @@ internal static class PostMergeCleanupRunner
                 || string.Equals(packageId, "Microsoft.VisualStudio.LanguageServices.CSharp.Symbols", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(packageId, "Microsoft.VisualStudio.LanguageServices.Implementation.Symbols", StringComparison.OrdinalIgnoreCase));
 
+    private static string? GetPackageVersionId(XElement element)
+        => element.Attribute("Include")?.Value?.Trim()
+            ?? element.Attribute("Update")?.Value?.Trim();
+
+    private static bool IsRootDirectoryPackagesImport(XElement element)
+        => element.Name.LocalName == "Import"
+            && (element.Attribute("Project")?.Value?.Contains("GetPathOfFileAbove('Directory.Packages.props'", StringComparison.Ordinal) ?? false);
+
+    private static XElement CreateRootDirectoryImport(XNamespace xmlNamespace, string fileName)
+        => new(
+            xmlNamespace + "Import",
+            new XAttribute("Project", $@"$([MSBuild]::GetPathOfFileAbove('{fileName}', '$(MSBuildThisFileDirectory)../'))"));
+
     private static string RewriteDirectoryBuildImportContent(string content, DirectoryBuildImportFile file)
     {
         var hasDesiredImport = file.RootImportPattern.IsMatch(content);
@@ -302,6 +379,83 @@ internal static class PostMergeCleanupRunner
     private static bool ShouldKeepProjectReferenceElement(string localName)
         => localName is "Condition" or "PrivateAssets" or "ReferenceOutputAssembly" or "OutputItemType" or "Aliases" or "SetTargetFramework";
 
+    private static async Task<HashSet<string>> CollectPackageVersionIdsAsync(string projectFilePath)
+    {
+        var collectedPackageIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await CollectPackageVersionIdsAsync(projectFilePath, collectedPackageIds, new HashSet<string>(StringComparer.OrdinalIgnoreCase)).ConfigureAwait(false);
+        return collectedPackageIds;
+    }
+
+    private static async Task CollectPackageVersionIdsAsync(
+        string projectFilePath,
+        HashSet<string> collectedPackageIds,
+        HashSet<string> visitedFiles)
+    {
+        var normalizedPath = Path.GetFullPath(projectFilePath);
+        if (!File.Exists(normalizedPath) || !visitedFiles.Add(normalizedPath))
+            return;
+
+        var document = await LoadXmlAsync(normalizedPath).ConfigureAwait(false);
+
+        foreach (var packageId in document
+                     .Descendants()
+                     .Where(static element => element.Name.LocalName == "PackageVersion")
+                     .Select(GetPackageVersionId)
+                     .Where(static packageId => !string.IsNullOrWhiteSpace(packageId)))
+        {
+            collectedPackageIds.Add(packageId!);
+        }
+
+        foreach (var importPath in document
+                     .Descendants()
+                     .Where(static element => element.Name.LocalName == "Import")
+                     .Select(element => ResolveImportedProjectPath(normalizedPath, element.Attribute("Project")?.Value))
+                     .Where(static path => !string.IsNullOrWhiteSpace(path)))
+        {
+            await CollectPackageVersionIdsAsync(importPath!, collectedPackageIds, visitedFiles).ConfigureAwait(false);
+        }
+    }
+
+    private static string? ResolveImportedProjectPath(string importerPath, string? projectValue)
+    {
+        if (string.IsNullOrWhiteSpace(projectValue))
+            return null;
+
+        var importerDirectory = Path.GetDirectoryName(importerPath)!;
+        var resolvedPath = TryResolveSimpleImportedProjectPath(importerDirectory, projectValue)
+            ?? TryResolveGetPathOfFileAboveImport(importerDirectory, projectValue);
+
+        return resolvedPath is not null && File.Exists(resolvedPath)
+            ? resolvedPath
+            : null;
+    }
+
+    private static string? TryResolveSimpleImportedProjectPath(string importerDirectory, string projectValue)
+        => projectValue.Contains('$', StringComparison.Ordinal)
+            ? null
+            : Path.GetFullPath(Path.Combine(importerDirectory, projectValue));
+
+    private static string? TryResolveGetPathOfFileAboveImport(string importerDirectory, string projectValue)
+    {
+        var match = GetPathOfFileAbovePattern.Match(projectValue);
+        if (!match.Success)
+            return null;
+
+        var fileName = match.Groups["fileName"].Value;
+        var searchStart = match.Groups["relativeStart"].Success
+            ? Path.GetFullPath(Path.Combine(importerDirectory, match.Groups["relativeStart"].Value))
+            : importerDirectory;
+
+        for (var current = new DirectoryInfo(searchStart); current is not null; current = current.Parent)
+        {
+            var candidatePath = Path.Combine(current.FullName, fileName);
+            if (File.Exists(candidatePath))
+                return candidatePath;
+        }
+
+        return null;
+    }
+
     private static async Task<XDocument> LoadXmlAsync(string path, bool preserveWhitespace = false)
     {
         await using var stream = File.OpenRead(path);
@@ -323,6 +477,10 @@ internal static class PostMergeCleanupRunner
 
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex GetPathOfFileAbovePattern = new(
+        @"GetPathOfFileAbove\('(?<fileName>[^']+)'(?:,\s*'\$\(MSBuildThisFileDirectory\)(?<relativeStart>[^']*)')?\)",
         RegexOptions.CultureInvariant);
 
     private static readonly DirectoryBuildImportFile[] DirectoryBuildImportFiles =
