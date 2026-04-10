@@ -28,6 +28,11 @@ internal static class PostMergeCleanupRunner
             "Remove Roslyn.Diagnostics.Analyzers refs",
             RemoveRoslynDiagnosticsAnalyzersAsync),
         new(
+            "remove-xunit-execution-package-refs",
+            "Remove explicit xunit.extensibility.execution package refs from Razor test projects and defer to Roslyn's XUnit.targets.",
+            "Remove Razor xunit.extensibility.execution refs",
+            RemoveXunitExecutionPackageReferencesAsync),
+        new(
             "convert-roslyn-package-references",
             "Convert Roslyn PackageReference items into ProjectReference items.",
             "Convert Roslyn package references to project references",
@@ -210,6 +215,42 @@ internal static class PostMergeCleanupRunner
             : $"Removed {removedReferenceCount} Roslyn.Diagnostics.Analyzers reference(s) from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> RemoveXunitExecutionPackageReferencesAsync(string targetRepoRoot, string targetRoot)
+    {
+        var changedFiles = new List<string>();
+        var removedReferenceCount = 0;
+
+        foreach (var projectPath in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
+        {
+            var document = await LoadXmlAsync(projectPath, preserveWhitespace: true).ConfigureAwait(false);
+            var packageReferences = document
+                .Descendants()
+                .Where(static element => element.Name.LocalName == "PackageReference")
+                .Where(static element => IsPackageReferenceFor(element, "xunit.extensibility.execution"))
+                .ToList();
+
+            if (packageReferences.Count == 0)
+                continue;
+
+            removedReferenceCount += packageReferences.Count;
+            foreach (var packageReference in packageReferences)
+                packageReference.Remove();
+
+            foreach (var itemGroup in document.Descendants().Where(static element => element.Name.LocalName == "ItemGroup").ToList())
+            {
+                if (!itemGroup.Elements().Any())
+                    itemGroup.Remove();
+            }
+
+            await SaveXmlAsync(document, projectPath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
+        }
+
+        return removedReferenceCount == 0
+            ? "No explicit xunit.extensibility.execution package references were found in Razor projects."
+            : $"Removed {removedReferenceCount} explicit xunit.extensibility.execution reference(s) from {changedFiles.Count} Razor project(s): {string.Join(", ", changedFiles)}.";
+    }
+
     private static async Task<string> ConvertRoslynPackageReferencesAsync(string targetRepoRoot, string targetRoot)
     {
         var roslynProjectMap = await BuildRoslynProjectMapAsync(targetRepoRoot, targetRoot).ConfigureAwait(false);
@@ -363,11 +404,13 @@ internal static class PostMergeCleanupRunner
         => element.Attribute("Include")?.Value?.Trim()
             ?? element.Attribute("Update")?.Value?.Trim();
 
+    private static bool IsPackageReferenceFor(XElement element, string packageId)
+        => string.Equals(element.Attribute("Include")?.Value?.Trim(), packageId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(element.Attribute("Update")?.Value?.Trim(), packageId, StringComparison.OrdinalIgnoreCase);
+
     private static bool IsRoslynDiagnosticsAnalyzersReference(XElement element)
-        => string.Equals(element.Attribute("Include")?.Value?.Trim(), "Roslyn.Diagnostics.Analyzers", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(element.Attribute("Include")?.Value?.Trim(), "Roslyn.Diagnostics.Anaylzers", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(element.Attribute("Update")?.Value?.Trim(), "Roslyn.Diagnostics.Analyzers", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(element.Attribute("Update")?.Value?.Trim(), "Roslyn.Diagnostics.Anaylzers", StringComparison.OrdinalIgnoreCase);
+        => IsPackageReferenceFor(element, "Roslyn.Diagnostics.Analyzers")
+            || IsPackageReferenceFor(element, "Roslyn.Diagnostics.Anaylzers");
 
     private static bool IsRootDirectoryPackagesImport(XElement element)
         => element.Name.LocalName == "Import"
