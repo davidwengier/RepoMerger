@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace RepoMerger;
 
 internal static class Stages
@@ -110,30 +108,7 @@ internal static class Stages
         Directory.CreateDirectory(Path.GetDirectoryName(context.State.SourceCloneDirectory)!);
         Directory.CreateDirectory(Path.GetDirectoryName(context.State.TargetRepoRoot)!);
 
-        var manifest = new
-        {
-            workflowVersion = Constants.WorkflowVersion,
-            context.State.RunName,
-            context.Settings.SourceRepo,
-            context.Settings.SourceBranch,
-            context.Settings.TargetRepo,
-            targetBranch = GetTargetMergeBranchName(context.State.RunName),
-            context.Settings.TargetPath,
-            context.Settings.SkipHistoryFilter,
-            context.Settings.PostMergeCleanupOnly,
-            context.State.WorkRoot,
-            context.State.WorkDirectory,
-            context.State.SourceCloneDirectory,
-            context.State.TargetRepoRoot,
-            context.Settings.DryRun,
-        };
-
-        var manifestPath = Path.Combine(context.RunDirectory, "inputs.json");
-        await File.WriteAllTextAsync(
-            manifestPath,
-            JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true })).ConfigureAwait(false);
-
-        return $"Prepared fresh work area '{context.State.WorkDirectory}' and wrote inputs to '{manifestPath}'.";
+        return $"Prepared fresh work area '{context.State.WorkDirectory}'.";
     }
 
     private static Task<string> CloneSourceAsync(StageContext context)
