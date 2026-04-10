@@ -38,7 +38,11 @@ internal static class SourceHistoryFilter
         if (topLevelEntries.Length == 0)
             return;
 
-        Directory.CreateDirectory(Path.Combine(repositoryDirectory, targetRelativePath));
+        const string temporaryRootDirectoryName = "__repo_merge_filtered_root";
+        if (topLevelEntries.Contains(temporaryRootDirectoryName, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"The temporary folder '{temporaryRootDirectoryName}' already exists.");
+
+        Directory.CreateDirectory(Path.Combine(repositoryDirectory, temporaryRootDirectoryName));
 
         foreach (var entry in topLevelEntries)
         {
@@ -47,8 +51,19 @@ internal static class SourceHistoryFilter
                 "mv",
                 "--",
                 entry,
-                Path.Combine(targetRelativePath, entry)).ConfigureAwait(false);
+                Path.Combine(temporaryRootDirectoryName, entry)).ConfigureAwait(false);
         }
+
+        var targetParentPath = Path.GetDirectoryName(targetRelativePath);
+        if (!string.IsNullOrWhiteSpace(targetParentPath))
+            Directory.CreateDirectory(Path.Combine(repositoryDirectory, targetParentPath));
+
+        await GitRunner.RunGitAsync(
+            repositoryDirectory,
+            "mv",
+            "--",
+            temporaryRootDirectoryName,
+            targetRelativePath).ConfigureAwait(false);
 
         await GitRunner.CommitAsync(
             repositoryDirectory,
