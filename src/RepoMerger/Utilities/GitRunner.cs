@@ -185,12 +185,18 @@ public static class GitRunner
     }
 
     public static async Task CheckoutBranchAsync(string repositoryDirectory, string branchName, string startPoint)
-        => _ = await RunGitAsync(
-            repositoryDirectory,
+    {
+        var arguments = new List<string>
+        {
             "checkout",
+            "--no-track",
             "-B",
             branchName,
-            startPoint).ConfigureAwait(false);
+            startPoint,
+        };
+
+        _ = await RunGitAsync(repositoryDirectory, arguments).ConfigureAwait(false);
+    }
 
     public static async Task ResetHardAsync(string repositoryDirectory, string target)
         => _ = await RunGitAsync(repositoryDirectory, "reset", "--hard", target).ConfigureAwait(false);

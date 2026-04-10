@@ -358,7 +358,7 @@ internal static class Stages
         {
             var branchSummary = string.IsNullOrWhiteSpace(localBranchName)
                 ? string.Empty
-                : $" and check out local branch '{localBranchName}'";
+                : $" and check out local branch '{localBranchName}' without upstream tracking";
             return $"Dry run: would clone or refresh '{repositoryDisplayName}' from '{remoteUri}' into '{cloneDirectory}'{branchSummary}.";
         }
 
@@ -402,7 +402,10 @@ internal static class Stages
         Console.WriteLine(
             $"Refreshing '{cloneDirectory}' from remote '{actualRemoteName}' and checking out '{checkoutBranchName}' from '{actualRemoteName}/{effectiveBranchName}'.");
 
-        await GitRunner.CheckoutBranchAsync(cloneDirectory, checkoutBranchName, $"{actualRemoteName}/{effectiveBranchName}").ConfigureAwait(false);
+        await GitRunner.CheckoutBranchAsync(
+            cloneDirectory,
+            checkoutBranchName,
+            $"{actualRemoteName}/{effectiveBranchName}").ConfigureAwait(false);
         onBranchResolved(checkoutBranchName);
 
         var headCommit = await GitRunner.GetHeadCommitAsync(cloneDirectory).ConfigureAwait(false);
