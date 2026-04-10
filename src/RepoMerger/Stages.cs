@@ -97,7 +97,7 @@ internal static class Stages
         Console.WriteLine($"Resolved target clone directory: {context.TargetRepoRoot}");
         Console.WriteLine($"Resolved target path: {fullTargetPath}");
         Console.WriteLine($"Resolved external work root: {fullWorkRoot}");
-        Console.WriteLine($"Resolved repository handler key: {RepositoryHandlerLoader.GetRepositoryKey(context.Settings.SourceRepo)}");
+        Console.WriteLine($"Resolved source repo key: {RepositoryPreparer.GetRepositoryKey(context.Settings.SourceRepo)}");
 
         return $"Validated target repo and inputs. Git: {gitVersion.Trim()}";
     }
@@ -170,7 +170,7 @@ internal static class Stages
                 $"Current source HEAD is '{context.State.SourceHeadCommit}'.";
         }
 
-        var summary = await RepositoryHandlerLoader.RunAsync(context).ConfigureAwait(false);
+        var summary = await RepositoryPreparer.RunAsync(context).ConfigureAwait(false);
         await SnapshotSourceSolutionAsync(context).ConfigureAwait(false);
         context.State.SourceHeadCommit = await GitRunner.GetHeadCommitAsync(context.State.SourceCloneDirectory).ConfigureAwait(false);
         return $"{summary} Prepared source HEAD is '{context.State.SourceHeadCommit}'.";

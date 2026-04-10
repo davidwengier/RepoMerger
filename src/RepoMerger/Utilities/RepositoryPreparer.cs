@@ -1,36 +1,67 @@
 namespace RepoMerger;
 
-public sealed class RazorRepositoryHandler : IRepositoryHandler
+internal static class RepositoryPreparer
 {
-    public string Key => "razor";
-
-    public async Task PrepareAsync(RepositoryHandlerContext context)
+    public static async Task<string> RunAsync(StageContext context)
     {
-        if (!Directory.Exists(context.SourceRoot))
-            throw new InvalidOperationException($"Source root '{context.SourceRoot}' does not exist.");
+        var repositoryKey = GetRepositoryKey(context.Settings.SourceRepo);
+        if (string.IsNullOrWhiteSpace(repositoryKey))
+        {
+            throw new InvalidOperationException(
+                $"Could not determine a source repo key from '{context.Settings.SourceRepo}'.");
+        }
 
-        if (!GitRunner.IsRepository(context.SourceRoot))
-            throw new InvalidOperationException($"'{context.SourceRoot}' is not a git repository.");
+        Console.WriteLine($"Using built-in source preparer '{repositoryKey}'.");
 
-        var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.TargetPath, "Razor preparation");
-        var targetRoot = Path.Combine(context.SourceRoot, targetRelativePath);
-        var srcTreeAlreadyNested = IsSourceTreeAlreadyNested(context.SourceRoot, targetRoot);
+        return repositoryKey switch
+        {
+            "razor" => await PrepareRazorAsync(context.State.SourceCloneDirectory, context.Settings.TargetPath).ConfigureAwait(false),
+            _ => throw new InvalidOperationException($"No built-in source preparer is available for '{repositoryKey}'."),
+        };
+    }
 
-        Console.WriteLine($"Preparing Razor source repo at '{context.SourceRoot}'.");
+    internal static string GetRepositoryKey(string sourceRepo)
+    {
+        var normalizedRepo = sourceRepo.Trim()
+            .Replace('/', Path.DirectorySeparatorChar)
+            .TrimEnd(Path.DirectorySeparatorChar);
+        var repoName = Path.GetFileName(normalizedRepo);
 
-        var status = await GitRunner.GetShortStatusAsync(context.SourceRoot).ConfigureAwait(false);
+        if (repoName.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+            repoName = repoName[..^4];
+
+        return string.IsNullOrWhiteSpace(repoName)
+            ? string.Empty
+            : PathHelper.SanitizePathSegment(repoName);
+    }
+
+    private static async Task<string> PrepareRazorAsync(string sourceRoot, string targetPath)
+    {
+        if (!Directory.Exists(sourceRoot))
+            throw new InvalidOperationException($"Source root '{sourceRoot}' does not exist.");
+
+        if (!GitRunner.IsRepository(sourceRoot))
+            throw new InvalidOperationException($"'{sourceRoot}' is not a git repository.");
+
+        var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(targetPath, "Razor preparation");
+        var targetRoot = Path.Combine(sourceRoot, targetRelativePath);
+        var srcTreeAlreadyNested = IsSourceTreeAlreadyNested(sourceRoot, targetRoot);
+
+        Console.WriteLine($"Preparing Razor source repo at '{sourceRoot}'.");
+
+        var status = await GitRunner.GetShortStatusAsync(sourceRoot).ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(status))
             throw new InvalidOperationException("The source clone is not clean. Preparation expects a clean checkout.");
 
-        var normalizedEngFiles = await SolutionPathUpdater.NormalizeRepositoryEngineeringReferencesAsync(context.SourceRoot).ConfigureAwait(false);
+        var normalizedEngFiles = await SolutionPathUpdater.NormalizeRepositoryEngineeringReferencesAsync(sourceRoot).ConfigureAwait(false);
         if (normalizedEngFiles > 0)
         {
             await CommitPreparationStepAsync(
-                context.SourceRoot,
+                sourceRoot,
                 "Normalize eng path references to $(RepositoryEngineeringDir)").ConfigureAwait(false);
         }
 
-        var topLevelEntries = Directory.GetFileSystemEntries(context.SourceRoot)
+        var topLevelEntries = Directory.GetFileSystemEntries(sourceRoot)
             .Select(static path => Path.GetFileName(path))
             .Where(static name => !string.IsNullOrEmpty(name) && !string.Equals(name, ".git", StringComparison.OrdinalIgnoreCase))
             .Select(static name => name!)
@@ -44,7 +75,7 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
             throw new InvalidOperationException($"The temporary folder '{temporarySourceDirectoryName}' already exists.");
 
         if (!srcTreeAlreadyNested && entriesToMove.Contains("src", StringComparer.OrdinalIgnoreCase))
-            await GitRunner.RunGitAsync(context.SourceRoot, "mv", "--", "src", temporarySourceDirectoryName).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(sourceRoot, "mv", "--", "src", temporarySourceDirectoryName).ConfigureAwait(false);
 
         Directory.CreateDirectory(targetRoot);
 
@@ -53,35 +84,35 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
             if (string.Equals(entry, "src", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            await GitRunner.RunGitAsync(context.SourceRoot, "mv", "--", entry, Path.Combine(targetRelativePath, entry)).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(sourceRoot, "mv", "--", entry, Path.Combine(targetRelativePath, entry)).ConfigureAwait(false);
         }
 
-        if (!srcTreeAlreadyNested && Directory.Exists(Path.Combine(context.SourceRoot, temporarySourceDirectoryName)))
+        if (!srcTreeAlreadyNested && Directory.Exists(Path.Combine(sourceRoot, temporarySourceDirectoryName)))
         {
             await GitRunner.RunGitAsync(
-                context.SourceRoot,
+                sourceRoot,
                 "mv",
                 "--",
                 temporarySourceDirectoryName,
                 Path.Combine(targetRelativePath, "src")).ConfigureAwait(false);
         }
 
-        var updatedPathFiles = await SolutionPathUpdater.UpdateMovedPathsAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
+        var updatedPathFiles = await SolutionPathUpdater.UpdateMovedPathsAsync(sourceRoot, targetRelativePath).ConfigureAwait(false);
         var rootMoveCount = entriesToMove.Count(static entry =>
             !string.Equals(entry, "src", StringComparison.OrdinalIgnoreCase));
 
         if (rootMoveCount > 0 || updatedPathFiles > 0)
         {
             await CommitPreparationStepAsync(
-                context.SourceRoot,
+                sourceRoot,
                 $"Move Razor repo contents under '{targetRelativePath}'").ConfigureAwait(false);
         }
 
-        var rewrittenRepoRootFiles = await SolutionPathUpdater.RewriteRepoRootReferencesAsync(context.SourceRoot, targetRelativePath).ConfigureAwait(false);
+        var rewrittenRepoRootFiles = await SolutionPathUpdater.RewriteRepoRootReferencesAsync(sourceRoot, targetRelativePath).ConfigureAwait(false);
         if (rewrittenRepoRootFiles > 0)
         {
             await CommitPreparationStepAsync(
-                context.SourceRoot,
+                sourceRoot,
                 $"Rewrite $(RepoRoot) references for '{targetRelativePath}' nesting").ConfigureAwait(false);
         }
 
@@ -90,12 +121,14 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
         if (srcTreeAlreadyNested && rootMoveCount == 0 && updatedFileCount == 0)
         {
             Console.WriteLine($"Razor repo is already prepared under '{targetRoot}'.");
-            return;
+            return "Ran built-in Razor source preparation successfully.";
         }
 
         Console.WriteLine($"Moved {rootMoveCount} root entr{(rootMoveCount == 1 ? "y" : "ies")} under '{targetRelativePath}'.");
         if (updatedFileCount > 0)
             Console.WriteLine($"Updated {updatedFileCount} solution/build file(s).");
+
+        return "Ran built-in Razor source preparation successfully.";
     }
 
     private static bool IsSourceTreeAlreadyNested(string sourceRoot, string targetRoot)

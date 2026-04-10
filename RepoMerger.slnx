@@ -1,4 +1,3 @@
 <Solution>
   <Project Path="src\RepoMerger\RepoMerger.csproj" />
-  <Project Path="src\Razor\Razor.csproj" />
 </Solution>
