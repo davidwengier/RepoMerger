@@ -103,6 +103,7 @@ internal static class Stages
             context.Settings.SourceBranch,
             context.Settings.TargetRepo,
             context.Settings.TargetPath,
+            context.Settings.SkipHistoryFilter,
             context.State.WorkRoot,
             context.State.WorkDirectory,
             context.State.SourceCloneDirectory,
@@ -179,6 +180,9 @@ internal static class Stages
     private static async Task<string> FilterSourceHistoryAsync(StageContext context)
     {
         var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.Settings.TargetPath, "Source history filtering");
+        if (context.Settings.SkipHistoryFilter)
+            return "Skipped history filtering (--skip-history-filter).";
+
         if (context.Settings.DryRun)
         {
             return
@@ -222,7 +226,9 @@ internal static class Stages
                 "while preserving surviving file history.";
         }
 
-        var filterSummary = await FilterSourceHistoryAsync(context).ConfigureAwait(false);
+        var filterSummary = context.Settings.SkipHistoryFilter
+            ? "Skipped history filtering (--skip-history-filter)."
+            : await FilterSourceHistoryAsync(context).ConfigureAwait(false);
         var sourceRootForMerge = context.State.SourceCloneDirectory;
         var sourceHeadCommit = await GitRunner.GetHeadCommitAsync(sourceRootForMerge).ConfigureAwait(false);
         context.State.SourceHeadCommit = sourceHeadCommit;
@@ -333,6 +339,7 @@ internal static class Stages
         summary.AppendLine($"Source clone dir : {context.State.SourceCloneDirectory}");
         summary.AppendLine($"Target clone dir : {context.TargetRepoRoot}");
         summary.AppendLine($"Import preview   : {context.State.ImportPreviewDirectory}");
+        summary.AppendLine($"Skip hist filter : {context.Settings.SkipHistoryFilter}");
         summary.AppendLine($"Handler key      : {RepositoryHandlerLoader.GetRepositoryKey(context.Settings.SourceRepo)}");
         summary.AppendLine($"Source HEAD      : {context.State.SourceHeadCommit}");
         summary.AppendLine($"Target HEAD      : {context.State.TargetHeadCommit}");

@@ -79,6 +79,11 @@ internal static class Program
             Description = "Skip side-effecting stage work."
         };
 
+        var skipHistoryFilterOption = new Option<bool>("--skip-history-filter")
+        {
+            Description = "Skip the post-prepare history filtering step and merge the full prepared source history."
+        };
+
         var resumeOption = new Option<bool>("--resume")
         {
             Description = "Resume a previous run from state.json."
@@ -107,6 +112,7 @@ internal static class Program
             startAtOption,
             stopAfterOption,
             listStagesOption,
+            skipHistoryFilterOption,
             dryRunOption,
             resumeOption,
             rerunOption,
@@ -126,13 +132,14 @@ internal static class Program
             var startAt = parseResult.GetValue(startAtOption);
             var stopAfter = parseResult.GetValue(stopAfterOption);
             var listStages = parseResult.GetValue(listStagesOption);
+            var skipHistoryFilter = parseResult.GetValue(skipHistoryFilterOption);
             var dryRun = parseResult.GetValue(dryRunOption);
             var resume = parseResult.GetValue(resumeOption);
             var rerun = parseResult.GetValue(rerunOption);
             var reset = parseResult.GetValue(resetOption);
 
             return await InvokeRunAsync(sourceRepo, sourceBranch, targetRepo, targetPath, stateRoot,
-                workRoot, runName, stage, startAt, stopAfter, listStages, dryRun, resume, rerun, reset,
+                workRoot, runName, stage, startAt, stopAfter, listStages, skipHistoryFilter, dryRun, resume, rerun, reset,
                 cancellationToken);
         });
 
@@ -141,7 +148,7 @@ internal static class Program
 
     private static async Task<int> InvokeRunAsync(string sourceRepo, string sourceBranch, string targetRepo,
         string targetPath, string stateRoot, string workRoot, string? runName, string? stage, string? startAt,
-        string? stopAfter, bool listStages, bool dryRun, bool resume, bool rerun, bool reset,
+        string? stopAfter, bool listStages, bool skipHistoryFilter, bool dryRun, bool resume, bool rerun, bool reset,
         CancellationToken cancellationToken)
     {
         if (listStages)
@@ -162,6 +169,7 @@ internal static class Program
             StartAt: startAt,
             StopAfter: stopAfter,
             ListStages: listStages,
+            SkipHistoryFilter: skipHistoryFilter,
             DryRun: dryRun,
             Resume: resume,
             Rerun: rerun,

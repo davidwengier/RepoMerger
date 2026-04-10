@@ -12,6 +12,7 @@ internal readonly record struct Settings(
     string? StartAt,
     string? StopAfter,
     bool ListStages,
+    bool SkipHistoryFilter,
     bool DryRun,
     bool Resume,
     bool Rerun,
