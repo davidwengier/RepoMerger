@@ -23,6 +23,11 @@ internal static class PostMergeCleanupRunner
             "Rewrite Razor Directory.Packages.props",
             RewriteDirectoryPackagesPropsAsync),
         new(
+            "remove-roslyn-diagnostics-analyzers",
+            "Remove Roslyn.Diagnostics.Analyzers package references from Razor Directory.Build.props files.",
+            "Remove Roslyn.Diagnostics.Analyzers refs",
+            RemoveRoslynDiagnosticsAnalyzersAsync),
+        new(
             "convert-roslyn-package-references",
             "Convert Roslyn PackageReference items into ProjectReference items.",
             "Convert Roslyn package references to project references",
@@ -167,6 +172,42 @@ internal static class PostMergeCleanupRunner
         return
             $"Updated '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to import the repo-root Directory.Packages.props " +
             $"and removed {duplicatePackageVersions.Count} duplicate PackageVersion item(s).";
+    }
+
+    private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(string targetRepoRoot, string targetRoot)
+    {
+        var changedFiles = new List<string>();
+        var removedReferenceCount = 0;
+
+        foreach (var propsPath in Directory.EnumerateFiles(targetRoot, "Directory.Build.props", SearchOption.AllDirectories))
+        {
+            var document = await LoadXmlAsync(propsPath, preserveWhitespace: true).ConfigureAwait(false);
+            var packageReferences = document
+                .Descendants()
+                .Where(static element => element.Name.LocalName == "PackageReference")
+                .Where(IsRoslynDiagnosticsAnalyzersReference)
+                .ToList();
+
+            if (packageReferences.Count == 0)
+                continue;
+
+            removedReferenceCount += packageReferences.Count;
+            foreach (var packageReference in packageReferences)
+                packageReference.Remove();
+
+            foreach (var itemGroup in document.Descendants().Where(static element => element.Name.LocalName == "ItemGroup").ToList())
+            {
+                if (!itemGroup.Elements().Any())
+                    itemGroup.Remove();
+            }
+
+            await SaveXmlAsync(document, propsPath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, propsPath));
+        }
+
+        return removedReferenceCount == 0
+            ? "No Roslyn.Diagnostics.Analyzers references were found in Razor Directory.Build.props files."
+            : $"Removed {removedReferenceCount} Roslyn.Diagnostics.Analyzers reference(s) from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> ConvertRoslynPackageReferencesAsync(string targetRepoRoot, string targetRoot)
@@ -321,6 +362,12 @@ internal static class PostMergeCleanupRunner
     private static string? GetPackageVersionId(XElement element)
         => element.Attribute("Include")?.Value?.Trim()
             ?? element.Attribute("Update")?.Value?.Trim();
+
+    private static bool IsRoslynDiagnosticsAnalyzersReference(XElement element)
+        => string.Equals(element.Attribute("Include")?.Value?.Trim(), "Roslyn.Diagnostics.Analyzers", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(element.Attribute("Include")?.Value?.Trim(), "Roslyn.Diagnostics.Anaylzers", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(element.Attribute("Update")?.Value?.Trim(), "Roslyn.Diagnostics.Analyzers", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(element.Attribute("Update")?.Value?.Trim(), "Roslyn.Diagnostics.Anaylzers", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsRootDirectoryPackagesImport(XElement element)
         => element.Name.LocalName == "Import"
