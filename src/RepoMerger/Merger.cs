@@ -14,7 +14,18 @@ internal static class Merger
         var workDirectory = Path.Combine(workRoot, runName);
         var targetRepoRoot = Path.Combine(workDirectory, "target");
 
-        if (Directory.Exists(workDirectory))
+        if (settings.PostMergeCleanupOnly)
+        {
+            if (!Directory.Exists(workDirectory))
+            {
+                throw new InvalidOperationException(
+                    $"Cleanup-only mode requires an existing work directory at '{workDirectory}'. " +
+                    "Run the full workflow first, or point --work-root/--run-name at an existing run.");
+            }
+
+            Console.WriteLine($"Reusing existing work directory '{workDirectory}' for post-merge cleanup only.");
+        }
+        else if (Directory.Exists(workDirectory))
         {
             Console.WriteLine($"Deleting existing work directory '{workDirectory}' for a fresh run.");
             Directory.Delete(workDirectory, recursive: true);
@@ -25,6 +36,8 @@ internal static class Merger
         Console.WriteLine($"Starting repo-merge run '{runName}' (workflow version {Constants.WorkflowVersion}).");
         if (settings.DryRun)
             Console.WriteLine("Running in dry-run mode.");
+        if (settings.PostMergeCleanupOnly)
+            Console.WriteLine("Running in post-merge-cleanup-only mode.");
 
         var state = new RunState
         {
@@ -51,7 +64,7 @@ internal static class Merger
             RunDirectory: workDirectory,
             State: state);
 
-        foreach (var definition in Stages.Definitions)
+        foreach (var definition in Stages.GetExecutionPlan(settings))
         {
             try
             {

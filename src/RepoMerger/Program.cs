@@ -52,12 +52,17 @@ internal static class Program
             Description = "Skip side-effecting stage work."
         };
 
+        var postMergeCleanupOnlyOption = new Option<bool>("--post-merge-cleanup-only")
+        {
+            Description = "Reuse an existing run's target worktree and run only the post-merge cleanup stage."
+        };
+
         var skipHistoryFilterOption = new Option<bool>("--skip-history-filter")
         {
             Description = "Skip the post-prepare history filtering step and merge the full prepared source history."
         };
 
-        var rootCommand = new RootCommand("Run a fresh source-to-target merge in an external work area.")
+        var rootCommand = new RootCommand("Run a fresh source-to-target merge, or rerun post-merge cleanup in an existing work area.")
         {
             sourceRepoOption,
             sourceBranchOption,
@@ -66,6 +71,7 @@ internal static class Program
             workRootOption,
             runNameOption,
             skipHistoryFilterOption,
+            postMergeCleanupOnlyOption,
             dryRunOption,
         };
 
@@ -78,10 +84,11 @@ internal static class Program
             var workRoot = parseResult.GetValue(workRootOption)!;
             var runName = parseResult.GetValue(runNameOption);
             var skipHistoryFilter = parseResult.GetValue(skipHistoryFilterOption);
+            var postMergeCleanupOnly = parseResult.GetValue(postMergeCleanupOnlyOption);
             var dryRun = parseResult.GetValue(dryRunOption);
 
             return await InvokeRunAsync(sourceRepo, sourceBranch, targetRepo, targetPath,
-                workRoot, runName, skipHistoryFilter, dryRun,
+                workRoot, runName, skipHistoryFilter, dryRun, postMergeCleanupOnly,
                 cancellationToken);
         });
 
@@ -90,6 +97,7 @@ internal static class Program
 
     private static async Task<int> InvokeRunAsync(string sourceRepo, string sourceBranch, string targetRepo,
         string targetPath, string workRoot, string? runName, bool skipHistoryFilter, bool dryRun,
+        bool postMergeCleanupOnly,
         CancellationToken cancellationToken)
     {
         var settings = new Settings(
@@ -100,7 +108,8 @@ internal static class Program
             WorkRoot: workRoot,
             RunName: runName,
             SkipHistoryFilter: skipHistoryFilter,
-            DryRun: dryRun);
+            DryRun: dryRun,
+            PostMergeCleanupOnly: postMergeCleanupOnly);
 
         try
         {

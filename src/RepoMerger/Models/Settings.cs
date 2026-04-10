@@ -8,4 +8,5 @@ internal readonly record struct Settings(
     string WorkRoot,
     string? RunName,
     bool SkipHistoryFilter,
-    bool DryRun);
+    bool DryRun,
+    bool PostMergeCleanupOnly);

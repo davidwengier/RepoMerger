@@ -40,6 +40,15 @@ internal static class Stages
             PostMergeCleanupAsync),
     ];
 
+    public static IEnumerable<StageDefinition> GetExecutionPlan(Settings settings)
+    {
+        if (!settings.PostMergeCleanupOnly)
+            return Definitions;
+
+        return Definitions.Where(static definition =>
+            definition.Name is "validate-environment" or "post-merge-cleanup");
+    }
+
     private static async Task<string> ValidateEnvironmentAsync(StageContext context)
     {
         if (string.IsNullOrWhiteSpace(context.Settings.SourceRepo))
@@ -75,6 +84,14 @@ internal static class Stages
         if (PathHelper.LooksLikeLocalPath(context.Settings.TargetRepo) || context.Settings.TargetRepo.Count(static c => c == '/') != 1)
             throw new InvalidOperationException("--target-repo must be in owner/repo format.");
 
+        if (context.Settings.PostMergeCleanupOnly
+            && (!Directory.Exists(context.TargetRepoRoot) || !GitRunner.IsRepository(context.TargetRepoRoot)))
+        {
+            throw new InvalidOperationException(
+                $"--post-merge-cleanup-only requires an existing target clone at '{context.TargetRepoRoot}'. " +
+                "Run the full workflow first, or point --work-root/--run-name at an existing run.");
+        }
+
         var gitVersion = await GitRunner.RunGitAsync(context.ToolRoot, "--version").ConfigureAwait(false);
 
         Console.WriteLine($"Resolved source repo: {context.Settings.SourceRepo}");
@@ -103,6 +120,7 @@ internal static class Stages
             targetBranch = GetTargetMergeBranchName(context.State.RunName),
             context.Settings.TargetPath,
             context.Settings.SkipHistoryFilter,
+            context.Settings.PostMergeCleanupOnly,
             context.State.WorkRoot,
             context.State.WorkDirectory,
             context.State.SourceCloneDirectory,
