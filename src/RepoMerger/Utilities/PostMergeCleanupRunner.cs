@@ -13,6 +13,11 @@ internal static class PostMergeCleanupRunner
             "Remove Razor Common.targets import",
             RemoveCommonTargetsImportAsync),
         new(
+            "rewrite-directory-build-imports",
+            "Rewrite Razor Directory.Build.props/targets to import the repo-root Directory.Build files.",
+            "Rewrite Razor Directory.Build imports",
+            RewriteDirectoryBuildImportsAsync),
+        new(
             "convert-roslyn-package-references",
             "Convert Roslyn PackageReference items into ProjectReference items.",
             "Convert Roslyn package references to project references",
@@ -74,6 +79,30 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? @"No Razor imports of $(RepositoryEngineeringDir)targets\Common.targets were found."
             : $@"Removed Razor imports of $(RepositoryEngineeringDir)targets\Common.targets from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> RewriteDirectoryBuildImportsAsync(string targetRepoRoot, string targetRoot)
+    {
+        var changedFiles = new List<string>();
+
+        foreach (var file in DirectoryBuildImportFiles)
+        {
+            var path = Path.Combine(targetRoot, file.FileName);
+            if (!File.Exists(path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = RewriteDirectoryBuildImportContent(originalContent, file);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await File.WriteAllTextAsync(path, updatedContent).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor Directory.Build import rewrites were needed."
+            : $"Rewrote Razor Directory.Build imports in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> ConvertRoslynPackageReferencesAsync(string targetRepoRoot, string targetRoot)
@@ -225,6 +254,20 @@ internal static class PostMergeCleanupRunner
                 || string.Equals(packageId, "Microsoft.VisualStudio.LanguageServices.CSharp.Symbols", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(packageId, "Microsoft.VisualStudio.LanguageServices.Implementation.Symbols", StringComparison.OrdinalIgnoreCase));
 
+    private static string RewriteDirectoryBuildImportContent(string content, DirectoryBuildImportFile file)
+    {
+        var hasDesiredImport = file.RootImportPattern.IsMatch(content);
+        if (hasDesiredImport)
+            return file.ArcadeImportPattern.Replace(content, string.Empty, 1);
+
+        if (file.ArcadeImportPattern.IsMatch(content))
+            return file.ArcadeImportPattern.Replace(content, file.ReplacementImport + Environment.NewLine, 1);
+
+        return ProjectOpenPattern.IsMatch(content)
+            ? ProjectOpenPattern.Replace(content, match => $"{match.Value}{Environment.NewLine}{file.ReplacementImport}", 1)
+            : content;
+    }
+
     private static ProjectCandidate ChooseBestCandidate(string packageId, IEnumerable<ProjectCandidate> candidates)
         => candidates
             .OrderByDescending(candidate => ScoreCandidate(packageId, candidate))
@@ -278,6 +321,24 @@ internal static class PostMergeCleanupRunner
         @"^[ \t]*<Import\s+Project=""\$\(RepositoryEngineeringDir\)targets(?:\\|/)Common\.targets""\s*/>\r?\n?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
+    private static readonly Regex ProjectOpenPattern = new(
+        @"<Project[^>]*>",
+        RegexOptions.CultureInvariant);
+
+    private static readonly DirectoryBuildImportFile[] DirectoryBuildImportFiles =
+    [
+        new(
+            "Directory.Build.props",
+            "  <Import Project=\"$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))\" />",
+            new Regex(@"GetPathOfFileAbove\('Directory\.Build\.props'", RegexOptions.CultureInvariant),
+            new Regex(@"^[ \t]*(?:<!--\s*)?<Import\s+Project=""Sdk\.props""\s+Sdk=""Microsoft\.DotNet\.Arcade\.Sdk""\s*/>(?:\s*-->)?\r?\n?", RegexOptions.Multiline | RegexOptions.CultureInvariant)),
+        new(
+            "Directory.Build.targets",
+            "  <Import Project=\"$([MSBuild]::GetPathOfFileAbove('Directory.Build.targets', '$(MSBuildThisFileDirectory)../'))\" />",
+            new Regex(@"GetPathOfFileAbove\('Directory\.Build\.targets'", RegexOptions.CultureInvariant),
+            new Regex(@"^[ \t]*(?:<!--\s*)?<Import\s+Project=""Sdk\.targets""\s+Sdk=""Microsoft\.DotNet\.Arcade\.Sdk""\s*/>(?:\s*-->)?\r?\n?", RegexOptions.Multiline | RegexOptions.CultureInvariant)),
+    ];
+
     private sealed record CleanupStep(
         string Name,
         string Description,
@@ -285,4 +346,10 @@ internal static class PostMergeCleanupRunner
         Func<string, string, Task<string>> ExecuteAsync);
 
     private sealed record ProjectCandidate(string Path, string ProjectFileName, string? ExplicitPackageId);
+
+    private sealed record DirectoryBuildImportFile(
+        string FileName,
+        string ReplacementImport,
+        Regex RootImportPattern,
+        Regex ArcadeImportPattern);
 }
