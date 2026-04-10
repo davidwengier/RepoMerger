@@ -8,6 +8,7 @@ internal sealed class RunState
     public string SourceBranch { get; set; } = string.Empty;
     public string TargetRepo { get; set; } = string.Empty;
     public string TargetRepoRoot { get; set; } = string.Empty;
+    public string TargetBranch { get; set; } = string.Empty;
     public string TargetPath { get; set; } = string.Empty;
     public string WorkRoot { get; set; } = string.Empty;
     public string RunDirectory { get; set; } = string.Empty;

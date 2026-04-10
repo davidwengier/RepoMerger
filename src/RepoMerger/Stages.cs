@@ -36,6 +36,10 @@ internal static class Stages
             "Merge the prepared source history into the target repo at the selected path.",
             MergeIntoTargetAsync),
         new(
+            "post-merge-cleanup",
+            "Apply targeted Razor cleanup fixes in the target repo, committing each cleanup separately.",
+            PostMergeCleanupAsync),
+        new(
             "finalize-scaffold",
             "Write the current run summary and next-step commands.",
             FinalizeScaffoldAsync),
@@ -101,6 +105,7 @@ internal static class Stages
             context.Settings.SourceRepo,
             context.Settings.SourceBranch,
             context.Settings.TargetRepo,
+            targetBranch = GetTargetMergeBranchName(context.State.RunName),
             context.Settings.TargetPath,
             context.Settings.SkipHistoryFilter,
             context.State.WorkRoot,
@@ -123,24 +128,28 @@ internal static class Stages
             remoteName: "source",
             repositoryDisplayName: context.Settings.SourceRepo,
             remoteUri: context.State.SourceRemoteUri,
+            localBranchName: null,
             branchName: context.Settings.SourceBranch,
             cloneDirectory: context.State.SourceCloneDirectory,
             workDirectory: context.State.WorkDirectory,
             allowNoHardlinks: PathHelper.LooksLikeLocalPath(context.Settings.SourceRepo),
             isDryRun: context.Settings.DryRun,
-            onHeadResolved: commit => context.State.SourceHeadCommit = commit);
+            onHeadResolved: commit => context.State.SourceHeadCommit = commit,
+            onBranchResolved: _ => { });
 
     private static Task<string> CloneTargetAsync(StageContext context)
         => CloneOrRefreshRepositoryAsync(
             remoteName: "target",
             repositoryDisplayName: context.Settings.TargetRepo,
             remoteUri: context.State.TargetRemoteUri,
+            localBranchName: GetTargetMergeBranchName(context.State.RunName),
             branchName: null,
             cloneDirectory: context.TargetRepoRoot,
             workDirectory: context.State.WorkDirectory,
             allowNoHardlinks: false,
             isDryRun: context.Settings.DryRun,
-            onHeadResolved: commit => context.State.TargetHeadCommit = commit);
+            onHeadResolved: commit => context.State.TargetHeadCommit = commit,
+            onBranchResolved: branch => context.State.TargetBranch = branch);
 
     private static async Task<string> PrepareSourceAsync(StageContext context)
     {
@@ -346,6 +355,9 @@ internal static class Stages
             $"New target HEAD: '{targetHeadAfterMerge}'. Review summary: '{previewSummaryPath}'.";
     }
 
+    private static Task<string> PostMergeCleanupAsync(StageContext context)
+        => PostMergeCleanupRunner.RunAsync(context);
+
     private static async Task<string> FinalizeScaffoldAsync(StageContext context)
     {
         var summary = new StringBuilder();
@@ -356,6 +368,7 @@ internal static class Stages
         summary.AppendLine($"Source repo      : {context.Settings.SourceRepo}");
         summary.AppendLine($"Source branch    : {context.Settings.SourceBranch}");
         summary.AppendLine($"Target repo      : {context.Settings.TargetRepo}");
+        summary.AppendLine($"Target branch    : {context.State.TargetBranch}");
         summary.AppendLine($"Target path      : {context.Settings.TargetPath}");
         summary.AppendLine($"Work root        : {context.State.WorkRoot}");
         summary.AppendLine($"Source clone dir : {context.State.SourceCloneDirectory}");
@@ -376,7 +389,7 @@ internal static class Stages
             summary.Append(" --dry-run");
         summary.AppendLine();
         summary.AppendLine();
-        summary.AppendLine("Current status: this tool now performs a fresh, start-to-finish merge run each time.");
+        summary.AppendLine("Current status: this tool now performs a fresh, start-to-finish merge run with post-merge cleanup commits.");
 
         var summaryPath = Path.Combine(context.RunDirectory, "summary.txt");
         await File.WriteAllTextAsync(summaryPath, summary.ToString()).ConfigureAwait(false);
@@ -388,17 +401,24 @@ internal static class Stages
         string remoteName,
         string repositoryDisplayName,
         string remoteUri,
+        string? localBranchName,
         string? branchName,
         string cloneDirectory,
         string workDirectory,
         bool allowNoHardlinks,
         bool isDryRun,
-        Action<string> onHeadResolved)
+        Action<string> onHeadResolved,
+        Action<string> onBranchResolved)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(cloneDirectory)!);
 
         if (isDryRun)
-            return $"Dry run: would clone or refresh '{repositoryDisplayName}' from '{remoteUri}' into '{cloneDirectory}'.";
+        {
+            var branchSummary = string.IsNullOrWhiteSpace(localBranchName)
+                ? string.Empty
+                : $" and check out local branch '{localBranchName}'";
+            return $"Dry run: would clone or refresh '{repositoryDisplayName}' from '{remoteUri}' into '{cloneDirectory}'{branchSummary}.";
+        }
 
         if (!Directory.Exists(cloneDirectory))
         {
@@ -411,43 +431,46 @@ internal static class Stages
                 branchName: branchName,
                 noHardlinks: allowNoHardlinks).ConfigureAwait(false);
         }
-        else
+
+        if (!GitRunner.IsRepository(cloneDirectory))
+            throw new InvalidOperationException($"The clone directory '{cloneDirectory}' already exists but is not a git repository.");
+
+        var actualRemoteName = await GitRunner.GetPreferredRemoteNameAsync(cloneDirectory).ConfigureAwait(false);
+        var actualRemoteUri = await GitRunner.GetRemoteUrlAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
+        if (!PathHelper.RepositoryLocationsMatch(actualRemoteUri, remoteUri))
         {
-            if (!GitRunner.IsRepository(cloneDirectory))
-                throw new InvalidOperationException($"The clone directory '{cloneDirectory}' already exists but is not a git repository.");
-
-            var actualRemoteName = await GitRunner.GetPreferredRemoteNameAsync(cloneDirectory).ConfigureAwait(false);
-            var actualRemoteUri = await GitRunner.GetRemoteUrlAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
-            if (!PathHelper.RepositoryLocationsMatch(actualRemoteUri, remoteUri))
-            {
-                throw new InvalidOperationException(
-                    $"The existing clone at '{cloneDirectory}' points at '{actualRemoteUri}', not '{remoteUri}'. " +
-                    "Delete the work directory or choose a different --run-name to create a fresh working copy.");
-            }
-
-            await GitRunner.FetchAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
-
-            var effectiveBranchName = branchName;
-            if (string.IsNullOrWhiteSpace(effectiveBranchName))
-            {
-                effectiveBranchName = await GitRunner.GetRemoteHeadBranchAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
-            }
-
-            if (string.IsNullOrWhiteSpace(effectiveBranchName))
-                throw new InvalidOperationException($"Could not determine which branch to check out for '{repositoryDisplayName}'.");
-
-            Console.WriteLine(
-                $"Refreshing existing clone in '{cloneDirectory}' from remote '{actualRemoteName}' and resetting to '{actualRemoteName}/{effectiveBranchName}'.");
-
-            await GitRunner.CheckoutTrackingBranchAsync(cloneDirectory, actualRemoteName, effectiveBranchName).ConfigureAwait(false);
-            await GitRunner.ResetHardAsync(cloneDirectory, $"{actualRemoteName}/{effectiveBranchName}").ConfigureAwait(false);
+            throw new InvalidOperationException(
+                $"The existing clone at '{cloneDirectory}' points at '{actualRemoteUri}', not '{remoteUri}'. " +
+                "Delete the work directory or choose a different --run-name to create a fresh working copy.");
         }
+
+        await GitRunner.FetchAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
+
+        var effectiveBranchName = branchName;
+        if (string.IsNullOrWhiteSpace(effectiveBranchName))
+            effectiveBranchName = await GitRunner.GetRemoteHeadBranchAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(effectiveBranchName))
+            throw new InvalidOperationException($"Could not determine which branch to check out for '{repositoryDisplayName}'.");
+
+        var checkoutBranchName = string.IsNullOrWhiteSpace(localBranchName)
+            ? effectiveBranchName
+            : localBranchName;
+
+        Console.WriteLine(
+            $"Refreshing '{cloneDirectory}' from remote '{actualRemoteName}' and checking out '{checkoutBranchName}' from '{actualRemoteName}/{effectiveBranchName}'.");
+
+        await GitRunner.CheckoutBranchAsync(cloneDirectory, checkoutBranchName, $"{actualRemoteName}/{effectiveBranchName}").ConfigureAwait(false);
+        onBranchResolved(checkoutBranchName);
 
         var headCommit = await GitRunner.GetHeadCommitAsync(cloneDirectory).ConfigureAwait(false);
         onHeadResolved(headCommit);
 
-        return $"Cloned/refreshed '{repositoryDisplayName}' into '{cloneDirectory}' at commit '{headCommit}'.";
+        return $"Cloned/refreshed '{repositoryDisplayName}' into '{cloneDirectory}' on branch '{checkoutBranchName}' at commit '{headCommit}'.";
     }
+
+    private static string GetTargetMergeBranchName(string runName)
+        => $"repo-merge/{runName}";
 
     private static async Task SnapshotSourceSolutionAsync(StageContext context)
     {
