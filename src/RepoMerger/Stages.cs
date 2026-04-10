@@ -173,6 +173,7 @@ internal static class Stages
         }
 
         var summary = await RepositoryHandlerLoader.RunAsync(context).ConfigureAwait(false);
+        await SnapshotSourceSolutionAsync(context).ConfigureAwait(false);
         context.State.SourceHeadCommit = await GitRunner.GetHeadCommitAsync(context.State.SourceCloneDirectory).ConfigureAwait(false);
         return $"{summary} Prepared source HEAD is '{context.State.SourceHeadCommit}'.";
     }
@@ -190,6 +191,7 @@ internal static class Stages
                 $"that retains only history for '{targetRelativePath}'.";
         }
 
+        await SnapshotSourceSolutionAsync(context).ConfigureAwait(false);
         var summary = await SourceHistoryFilter.FilterInPlaceAsync(
             context.State.SourceCloneDirectory,
             targetRelativePath).ConfigureAwait(false);
@@ -219,6 +221,7 @@ internal static class Stages
 
         var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.Settings.TargetPath, "Target merge");
         var fullTargetPath = PathHelper.GetAbsolutePath(context.TargetRepoRoot, targetRelativePath);
+        var sourceSolutionContent = await LoadSourceSolutionContentAsync(context).ConfigureAwait(false);
         if (context.Settings.DryRun)
         {
             return
@@ -259,9 +262,26 @@ internal static class Stages
 
         if (await GitRunner.IsAncestorAsync(context.TargetRepoRoot, sourceHeadCommit, "HEAD").ConfigureAwait(false))
         {
+            var solutionSummary = await SyncTargetSolutionAsync(context, sourceSolutionContent).ConfigureAwait(false);
+            var committedSolutionUpdate = await GitRunner.CommitTrackedChangesAsync(
+                context.TargetRepoRoot,
+                "Add imported Razor projects to Roslyn.slnx").ConfigureAwait(false);
+            var targetHeadAfterSolutionCommit = await GitRunner.GetHeadCommitAsync(context.TargetRepoRoot).ConfigureAwait(false);
+            context.State.TargetHeadCommit = targetHeadAfterSolutionCommit;
+
             var alreadyMergedSummaryPath = Path.Combine(importDirectory, "merge-summary.txt");
             var alreadyMergedSummary =
                 $"Filtered source commit '{sourceHeadCommit}' is already reachable from target HEAD '{targetHeadBeforeMerge}'.";
+            if (committedSolutionUpdate)
+            {
+                alreadyMergedSummary +=
+                    $" Committed the target solution update at '{targetHeadAfterSolutionCommit}'. {solutionSummary}";
+            }
+            else
+            {
+                alreadyMergedSummary += $" {solutionSummary}";
+            }
+
             await File.WriteAllTextAsync(alreadyMergedSummaryPath, alreadyMergedSummary).ConfigureAwait(false);
             return $"{alreadyMergedSummary} Review note: '{alreadyMergedSummaryPath}'.";
         }
@@ -291,10 +311,12 @@ internal static class Stages
                 sourceHeadCommit,
                 "--",
                 targetRelativePath).ConfigureAwait(false);
+            var solutionSummary = await SyncTargetSolutionAsync(context, sourceSolutionContent).ConfigureAwait(false);
             await GitRunner.CommitAsync(
                 context.TargetRepoRoot,
                 $"Merge '{context.Settings.SourceRepo}' into '{targetRelativePath}'",
-                $"Import filtered history from '{sourceHeadCommit}' into the target repo path.").ConfigureAwait(false);
+                $"Import filtered history from '{sourceHeadCommit}' into the target repo path.",
+                solutionSummary).ConfigureAwait(false);
         }
         catch
         {
@@ -314,9 +336,7 @@ internal static class Stages
             "--stat",
             "--summary",
             "--format=medium",
-            targetHeadAfterMerge,
-            "--",
-            targetRelativePath).ConfigureAwait(false);
+            targetHeadAfterMerge).ConfigureAwait(false);
         await File.WriteAllTextAsync(previewSummaryPath, mergeSummary).ConfigureAwait(false);
 
         return
@@ -426,4 +446,52 @@ internal static class Stages
 
         return $"Cloned/refreshed '{repositoryDisplayName}' into '{cloneDirectory}' at commit '{headCommit}'.";
     }
+
+    private static async Task SnapshotSourceSolutionAsync(StageContext context)
+    {
+        var sourceSolutionPath = GetSourceSolutionPath(context.State.SourceCloneDirectory);
+        if (sourceSolutionPath is null)
+            return;
+
+        var snapshotPath = GetSourceSolutionSnapshotPath(context.RunDirectory);
+        var sourceSolutionContent = await File.ReadAllTextAsync(sourceSolutionPath).ConfigureAwait(false);
+        await File.WriteAllTextAsync(snapshotPath, sourceSolutionContent).ConfigureAwait(false);
+    }
+
+    private static async Task<string> LoadSourceSolutionContentAsync(StageContext context)
+    {
+        var sourceSolutionPath = GetSourceSolutionPath(context.State.SourceCloneDirectory);
+        if (sourceSolutionPath is not null)
+            return await File.ReadAllTextAsync(sourceSolutionPath).ConfigureAwait(false);
+
+        var snapshotPath = GetSourceSolutionSnapshotPath(context.RunDirectory);
+        return File.Exists(snapshotPath)
+            ? await File.ReadAllTextAsync(snapshotPath).ConfigureAwait(false)
+            : string.Empty;
+    }
+
+    private static async Task<string> SyncTargetSolutionAsync(StageContext context, string sourceSolutionContent)
+    {
+        var targetSolutionPath = Directory.GetFiles(context.TargetRepoRoot, "*.slnx", SearchOption.TopDirectoryOnly)
+            .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        if (targetSolutionPath is null)
+            return "Skipped target solution update because no root .slnx file was found.";
+
+        return await SlnxImporter.ImportUnderFolderAsync(sourceSolutionContent, targetSolutionPath, "Razor").ConfigureAwait(false);
+    }
+
+    private static string? GetSourceSolutionPath(string sourceRoot)
+    {
+        var preferredPath = Path.Combine(sourceRoot, "Razor.slnx");
+        if (File.Exists(preferredPath))
+            return preferredPath;
+
+        return Directory.GetFiles(sourceRoot, "*.slnx", SearchOption.TopDirectoryOnly)
+            .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+    }
+
+    private static string GetSourceSolutionSnapshotPath(string runDirectory)
+        => Path.Combine(runDirectory, "source-solution.slnx");
 }
