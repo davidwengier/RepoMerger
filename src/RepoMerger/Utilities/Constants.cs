@@ -2,6 +2,5 @@ namespace RepoMerger;
 
 internal static class Constants
 {
-    public const int StateSchemaVersion = 2;
-    public const string WorkflowVersion = "work-root-target-merge-v2";
+    public const string WorkflowVersion = "fresh-run-v3";
 }

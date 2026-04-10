@@ -5,5 +5,4 @@ internal readonly record struct StageContext(
     string ToolRoot,
     string TargetRepoRoot,
     string RunDirectory,
-    string StatePath,
     RunState State);

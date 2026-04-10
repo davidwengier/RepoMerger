@@ -12,8 +12,8 @@ internal static class Stages
             "Validate the target repo, input arguments, and required tooling.",
             ValidateEnvironmentAsync),
         new(
-            "prepare-state",
-            "Create the persisted state and external work-area layout for the run.",
+            "prepare-workspace",
+            "Create the fresh external work-area layout for the run.",
             PrepareStateAsync),
         new(
             "clone-source",
@@ -90,7 +90,6 @@ internal static class Stages
 
     private static async Task<string> PrepareStateAsync(StageContext context)
     {
-        Directory.CreateDirectory(Path.Combine(context.RunDirectory, "sentinels"));
         Directory.CreateDirectory(context.State.WorkDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(context.State.SourceCloneDirectory)!);
         Directory.CreateDirectory(Path.GetDirectoryName(context.State.TargetRepoRoot)!);
@@ -98,7 +97,7 @@ internal static class Stages
         var manifest = new
         {
             workflowVersion = Constants.WorkflowVersion,
-            stateSchemaVersion = Constants.StateSchemaVersion,
+            context.State.RunName,
             context.Settings.SourceRepo,
             context.Settings.SourceBranch,
             context.Settings.TargetRepo,
@@ -109,19 +108,14 @@ internal static class Stages
             context.State.SourceCloneDirectory,
             context.State.TargetRepoRoot,
             context.Settings.DryRun,
-            selectedStages = new
-            {
-                start = context.State.SelectedStartStage,
-                stop = context.State.SelectedStopStage,
-            },
         };
 
         var manifestPath = Path.Combine(context.RunDirectory, "inputs.json");
         await File.WriteAllTextAsync(
             manifestPath,
-            JsonSerializer.Serialize(manifest, RunStateStore.JsonOptions)).ConfigureAwait(false);
+            JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true })).ConfigureAwait(false);
 
-        return $"Prepared persisted state under '{context.RunDirectory}' and external work area '{context.State.WorkDirectory}'.";
+        return $"Prepared fresh work area '{context.State.WorkDirectory}' and wrote inputs to '{manifestPath}'.";
     }
 
     private static Task<string> CloneSourceAsync(StageContext context)
@@ -150,6 +144,13 @@ internal static class Stages
 
     private static async Task<string> PrepareSourceAsync(StageContext context)
     {
+        if (context.Settings.DryRun)
+        {
+            return
+                $"Dry run: would run the repository handler against '{context.State.SourceCloneDirectory}' " +
+                "and snapshot the source solution if present.";
+        }
+
         if (!Directory.Exists(context.State.SourceCloneDirectory))
         {
             throw new InvalidOperationException(
@@ -204,6 +205,15 @@ internal static class Stages
     {
         var importDirectory = context.State.ImportPreviewDirectory;
         Directory.CreateDirectory(importDirectory);
+        var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.Settings.TargetPath, "Target merge");
+        var fullTargetPath = PathHelper.GetAbsolutePath(context.TargetRepoRoot, targetRelativePath);
+
+        if (context.Settings.DryRun)
+        {
+            return
+                $"Dry run: would optionally filter the prepared source clone in place for '{targetRelativePath}' " +
+                $"and merge it into '{fullTargetPath}' while preserving surviving file history.";
+        }
 
         if (!Directory.Exists(context.State.SourceCloneDirectory) || !GitRunner.IsRepository(context.State.SourceCloneDirectory))
         {
@@ -219,15 +229,7 @@ internal static class Stages
                 "Run the clone-target stage first.");
         }
 
-        var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.Settings.TargetPath, "Target merge");
-        var fullTargetPath = PathHelper.GetAbsolutePath(context.TargetRepoRoot, targetRelativePath);
         var sourceSolutionContent = await LoadSourceSolutionContentAsync(context).ConfigureAwait(false);
-        if (context.Settings.DryRun)
-        {
-            return
-                $"Dry run: would filter the prepared source clone in place for '{targetRelativePath}' and merge it into '{fullTargetPath}' " +
-                "while preserving surviving file history.";
-        }
 
         var filterSummary = context.Settings.SkipHistoryFilter
             ? "Skipped history filtering (--skip-history-filter)."
@@ -364,17 +366,17 @@ internal static class Stages
         summary.AppendLine($"Source HEAD      : {context.State.SourceHeadCommit}");
         summary.AppendLine($"Target HEAD      : {context.State.TargetHeadCommit}");
         summary.AppendLine($"Dry run          : {context.Settings.DryRun}");
-        summary.AppendLine($"State file       : {context.StatePath}");
         summary.AppendLine();
-        summary.AppendLine("Available follow-up commands:");
-        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --resume");
-        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage clone-source --rerun");
-        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage clone-target --rerun");
-        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage prepare-source --rerun");
-        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage filter-source-history --rerun");
-        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage merge-into-target --rerun");
+        summary.AppendLine("To run the full flow again from scratch:");
+        summary.Append("  dotnet run --project src\\RepoMerger\\RepoMerger.csproj --");
+        summary.Append($" --run-name {context.State.RunName}");
+        if (context.Settings.SkipHistoryFilter)
+            summary.Append(" --skip-history-filter");
+        if (context.Settings.DryRun)
+            summary.Append(" --dry-run");
         summary.AppendLine();
-        summary.AppendLine("Current status: source/target cloning, Razor preparation, filtered-history import, and target merge are implemented.");
+        summary.AppendLine();
+        summary.AppendLine("Current status: this tool now performs a fresh, start-to-finish merge run each time.");
 
         var summaryPath = Path.Combine(context.RunDirectory, "summary.txt");
         await File.WriteAllTextAsync(summaryPath, summary.ToString()).ConfigureAwait(false);
@@ -420,7 +422,7 @@ internal static class Stages
             {
                 throw new InvalidOperationException(
                     $"The existing clone at '{cloneDirectory}' points at '{actualRemoteUri}', not '{remoteUri}'. " +
-                    "Use --reset or a different --run-name to create a fresh working copy.");
+                    "Delete the work directory or choose a different --run-name to create a fresh working copy.");
             }
 
             await GitRunner.FetchAsync(cloneDirectory, actualRemoteName).ConfigureAwait(false);
