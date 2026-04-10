@@ -23,6 +23,11 @@ internal static class PostMergeCleanupRunner
             "Rewrite Razor Directory.Packages.props",
             RewriteDirectoryPackagesPropsAsync),
         new(
+            "normalize-sdk-razor-package-version",
+            "Replace Razor's missing Microsoft.NET.Sdk.Razor version property with the source repo's explicit lower-bound package version.",
+            "Normalize Razor Microsoft.NET.Sdk.Razor version\n\nRoslyn does not define $(MicrosoftNETSdkRazorPackageVersion), so the merged Razor Directory.Packages.props should carry the source repo's explicit lower bound for Microsoft.NET.Sdk.Razor instead of restoring without a version.",
+            NormalizeSdkRazorPackageVersionAsync),
+        new(
             "normalize-objectpool-package-version",
             "Rewrite Razor's Microsoft.Extensions.ObjectPool package version to use the shared Microsoft.Extensions version.",
             "Normalize Razor ObjectPool package version",
@@ -228,6 +233,42 @@ internal static class PostMergeCleanupRunner
         return
             $"Updated {updatedCount} Razor Microsoft.Extensions.ObjectPool package version entr{(updatedCount == 1 ? "y" : "ies")} " +
             $"in '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use $(_MicrosoftExtensionsPackageVersion).";
+    }
+
+    private static async Task<string> NormalizeSdkRazorPackageVersionAsync(string targetRepoRoot, string targetRoot)
+    {
+        var razorPackagesPath = Path.Combine(targetRoot, "Directory.Packages.props");
+        if (!File.Exists(razorPackagesPath))
+            return "No Razor Directory.Packages.props file was found for Microsoft.NET.Sdk.Razor version normalization.";
+
+        var document = await LoadXmlAsync(razorPackagesPath, preserveWhitespace: true).ConfigureAwait(false);
+        var sdkRazorEntries = document
+            .Descendants()
+            .Where(static element => element.Name.LocalName == "PackageVersion")
+            .Where(static element => IsPackageReferenceFor(element, "Microsoft.NET.Sdk.Razor"))
+            .ToList();
+
+        if (sdkRazorEntries.Count == 0)
+            return "No Razor Microsoft.NET.Sdk.Razor package version entry was found.";
+
+        var updatedCount = 0;
+        foreach (var sdkRazorEntry in sdkRazorEntries)
+        {
+            var currentVersion = sdkRazorEntry.Attribute("Version")?.Value?.Trim();
+            if (string.Equals(currentVersion, RazorSdkPackageVersion, StringComparison.Ordinal))
+                continue;
+
+            sdkRazorEntry.SetAttributeValue("Version", RazorSdkPackageVersion);
+            updatedCount++;
+        }
+
+        if (updatedCount == 0)
+            return "Razor Microsoft.NET.Sdk.Razor already has an explicit lower-bound package version.";
+
+        await SaveXmlAsync(document, razorPackagesPath).ConfigureAwait(false);
+        return
+            $"Updated {updatedCount} Razor Microsoft.NET.Sdk.Razor package version entr{(updatedCount == 1 ? "y" : "ies")} " +
+            $"in '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use {RazorSdkPackageVersion}.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(string targetRepoRoot, string targetRoot)
@@ -726,6 +767,8 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
         RegexOptions.CultureInvariant);
+
+    private const string RazorSdkPackageVersion = "6.0.0-alpha.1.21072.5";
 
     private static readonly Regex GetPathOfFileAbovePattern = new(
         @"GetPathOfFileAbove\('(?<fileName>[^']+)'(?:,\s*'\$\(MSBuildThisFileDirectory\)(?<relativeStart>[^']*)')?\)",
