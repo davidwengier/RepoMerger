@@ -31,8 +31,6 @@ internal static class PostMergeCleanupRunner
                 $"The merged target path '{targetRoot}' does not exist. Run the merge-into-target stage first.");
         }
 
-        Directory.CreateDirectory(context.State.ImportPreviewDirectory);
-
         var summaries = new List<string>();
         foreach (var step in Steps)
         {
@@ -49,10 +47,7 @@ internal static class PostMergeCleanupRunner
             }
         }
 
-        var summaryPath = Path.Combine(context.State.ImportPreviewDirectory, "cleanup-summary.txt");
-        await File.WriteAllLinesAsync(summaryPath, summaries).ConfigureAwait(false);
-
-        return $"Applied post-merge cleanup stage. Review summary: '{summaryPath}'. {string.Join(" ", summaries)}";
+        return $"Applied post-merge cleanup stage. {string.Join(" ", summaries)}";
     }
 
     private static async Task<string> RemoveCommonTargetsImportAsync(string targetRepoRoot, string targetRoot)

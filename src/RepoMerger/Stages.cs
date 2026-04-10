@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 
 namespace RepoMerger;
@@ -39,10 +38,6 @@ internal static class Stages
             "post-merge-cleanup",
             "Apply targeted Razor cleanup fixes in the target repo, committing each cleanup separately.",
             PostMergeCleanupAsync),
-        new(
-            "finalize-scaffold",
-            "Write the current run summary and next-step commands.",
-            FinalizeScaffoldAsync),
     ];
 
     private static async Task<string> ValidateEnvironmentAsync(StageContext context)
@@ -212,8 +207,6 @@ internal static class Stages
 
     private static async Task<string> MergeIntoTargetAsync(StageContext context)
     {
-        var importDirectory = context.State.ImportPreviewDirectory;
-        Directory.CreateDirectory(importDirectory);
         var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.Settings.TargetPath, "Target merge");
         var fullTargetPath = PathHelper.GetAbsolutePath(context.TargetRepoRoot, targetRelativePath);
 
@@ -280,7 +273,6 @@ internal static class Stages
             var targetHeadAfterSolutionCommit = await GitRunner.GetHeadCommitAsync(context.TargetRepoRoot).ConfigureAwait(false);
             context.State.TargetHeadCommit = targetHeadAfterSolutionCommit;
 
-            var alreadyMergedSummaryPath = Path.Combine(importDirectory, "merge-summary.txt");
             var alreadyMergedSummary =
                 $"Filtered source commit '{sourceHeadCommit}' is already reachable from target HEAD '{targetHeadBeforeMerge}'.";
             if (committedSolutionUpdate)
@@ -293,8 +285,7 @@ internal static class Stages
                 alreadyMergedSummary += $" {solutionSummary}";
             }
 
-            await File.WriteAllTextAsync(alreadyMergedSummaryPath, alreadyMergedSummary).ConfigureAwait(false);
-            return $"{alreadyMergedSummary} Review note: '{alreadyMergedSummaryPath}'.";
+            return alreadyMergedSummary;
         }
 
         Console.WriteLine($"Merging filtered source commit '{sourceHeadCommit}' into '{targetRelativePath}'.");
@@ -340,62 +331,13 @@ internal static class Stages
         var targetHeadAfterMerge = await GitRunner.GetHeadCommitAsync(context.TargetRepoRoot).ConfigureAwait(false);
         context.State.TargetHeadCommit = targetHeadAfterMerge;
 
-        var previewSummaryPath = Path.Combine(importDirectory, "merge-summary.txt");
-        var mergeSummary = await GitRunner.RunGitAsync(
-            context.TargetRepoRoot,
-            "show",
-            "--stat",
-            "--summary",
-            "--format=medium",
-            targetHeadAfterMerge).ConfigureAwait(false);
-        await File.WriteAllTextAsync(previewSummaryPath, mergeSummary).ConfigureAwait(false);
-
         return
             $"{filterSummary} Merged filtered source commit '{sourceHeadCommit}' into '{fullTargetPath}'. " +
-            $"New target HEAD: '{targetHeadAfterMerge}'. Review summary: '{previewSummaryPath}'.";
+            $"New target HEAD: '{targetHeadAfterMerge}'.";
     }
 
     private static Task<string> PostMergeCleanupAsync(StageContext context)
         => PostMergeCleanupRunner.RunAsync(context);
-
-    private static async Task<string> FinalizeScaffoldAsync(StageContext context)
-    {
-        var summary = new StringBuilder();
-        summary.AppendLine("RepoMerger run summary");
-        summary.AppendLine("=====================");
-        summary.AppendLine($"Workflow version : {Constants.WorkflowVersion}");
-        summary.AppendLine($"Run name         : {context.State.RunName}");
-        summary.AppendLine($"Source repo      : {context.Settings.SourceRepo}");
-        summary.AppendLine($"Source branch    : {context.Settings.SourceBranch}");
-        summary.AppendLine($"Target repo      : {context.Settings.TargetRepo}");
-        summary.AppendLine($"Target branch    : {context.State.TargetBranch}");
-        summary.AppendLine($"Target path      : {context.Settings.TargetPath}");
-        summary.AppendLine($"Work root        : {context.State.WorkRoot}");
-        summary.AppendLine($"Source clone dir : {context.State.SourceCloneDirectory}");
-        summary.AppendLine($"Target clone dir : {context.TargetRepoRoot}");
-        summary.AppendLine($"Import preview   : {context.State.ImportPreviewDirectory}");
-        summary.AppendLine($"Skip hist filter : {context.Settings.SkipHistoryFilter}");
-        summary.AppendLine($"Handler key      : {RepositoryHandlerLoader.GetRepositoryKey(context.Settings.SourceRepo)}");
-        summary.AppendLine($"Source HEAD      : {context.State.SourceHeadCommit}");
-        summary.AppendLine($"Target HEAD      : {context.State.TargetHeadCommit}");
-        summary.AppendLine($"Dry run          : {context.Settings.DryRun}");
-        summary.AppendLine();
-        summary.AppendLine("To run the full flow again from scratch:");
-        summary.Append("  dotnet run --project src\\RepoMerger\\RepoMerger.csproj --");
-        summary.Append($" --run-name {context.State.RunName}");
-        if (context.Settings.SkipHistoryFilter)
-            summary.Append(" --skip-history-filter");
-        if (context.Settings.DryRun)
-            summary.Append(" --dry-run");
-        summary.AppendLine();
-        summary.AppendLine();
-        summary.AppendLine("Current status: this tool now performs a fresh, start-to-finish merge run with post-merge cleanup commits.");
-
-        var summaryPath = Path.Combine(context.RunDirectory, "summary.txt");
-        await File.WriteAllTextAsync(summaryPath, summary.ToString()).ConfigureAwait(false);
-
-        return $"Wrote run summary to '{summaryPath}'.";
-    }
 
     private static async Task<string> CloneOrRefreshRepositoryAsync(
         string remoteName,

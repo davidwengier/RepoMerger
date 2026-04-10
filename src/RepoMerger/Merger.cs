@@ -41,7 +41,6 @@ internal static class Merger
             SourceRemoteUri = PathHelper.ResolveRepositoryUri(settings.SourceRepo, toolRoot),
             TargetRemoteUri = PathHelper.ResolveRepositoryUri(settings.TargetRepo, toolRoot),
             SourceCloneDirectory = Path.Combine(workDirectory, "source"),
-            ImportPreviewDirectory = Path.Combine(workDirectory, "import-preview"),
             DryRun = settings.DryRun,
         };
 
