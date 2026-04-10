@@ -23,6 +23,11 @@ internal static class PostMergeCleanupRunner
             "Rewrite Razor Directory.Packages.props",
             RewriteDirectoryPackagesPropsAsync),
         new(
+            "normalize-objectpool-package-version",
+            "Rewrite Razor's Microsoft.Extensions.ObjectPool package version to use the shared Microsoft.Extensions version.",
+            "Normalize Razor ObjectPool package version",
+            NormalizeObjectPoolPackageVersionAsync),
+        new(
             "remove-roslyn-diagnostics-analyzers",
             "Remove Roslyn.Diagnostics.Analyzers package references from Razor Directory.Build.props files.",
             "Remove Roslyn.Diagnostics.Analyzers refs",
@@ -177,6 +182,42 @@ internal static class PostMergeCleanupRunner
         return
             $"Updated '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to import the repo-root Directory.Packages.props " +
             $"and removed {duplicatePackageVersions.Count} duplicate PackageVersion item(s).";
+    }
+
+    private static async Task<string> NormalizeObjectPoolPackageVersionAsync(string targetRepoRoot, string targetRoot)
+    {
+        var razorPackagesPath = Path.Combine(targetRoot, "Directory.Packages.props");
+        if (!File.Exists(razorPackagesPath))
+            return "No Razor Directory.Packages.props file was found for ObjectPool version normalization.";
+
+        var document = await LoadXmlAsync(razorPackagesPath, preserveWhitespace: true).ConfigureAwait(false);
+        var objectPoolEntries = document
+            .Descendants()
+            .Where(static element => element.Name.LocalName == "PackageVersion")
+            .Where(static element => IsPackageReferenceFor(element, "Microsoft.Extensions.ObjectPool"))
+            .ToList();
+
+        if (objectPoolEntries.Count == 0)
+            return "No Razor Microsoft.Extensions.ObjectPool package version entry was found.";
+
+        var updatedCount = 0;
+        foreach (var objectPoolEntry in objectPoolEntries)
+        {
+            var currentVersion = objectPoolEntry.Attribute("Version")?.Value?.Trim();
+            if (string.Equals(currentVersion, "$(_MicrosoftExtensionsPackageVersion)", StringComparison.Ordinal))
+                continue;
+
+            objectPoolEntry.SetAttributeValue("Version", "$(_MicrosoftExtensionsPackageVersion)");
+            updatedCount++;
+        }
+
+        if (updatedCount == 0)
+            return "Razor Microsoft.Extensions.ObjectPool already uses the shared Microsoft.Extensions version.";
+
+        await SaveXmlAsync(document, razorPackagesPath).ConfigureAwait(false);
+        return
+            $"Updated {updatedCount} Razor Microsoft.Extensions.ObjectPool package version entr{(updatedCount == 1 ? "y" : "ies")} " +
+            $"in '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use $(_MicrosoftExtensionsPackageVersion).";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(string targetRepoRoot, string targetRoot)
