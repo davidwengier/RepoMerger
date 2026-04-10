@@ -1,0 +1,82 @@
+---
+name: restore-post-merge-cleanup
+description: Investigate one restore warning or error in the merged Razor worktree and fix it by adding a post-merge cleanup step in RepoMerger. Use this when asked to debug restore.cmd issues after merging src\Razor into Roslyn.
+---
+
+Use this skill for the recurring Razor-on-Roslyn cleanup loop:
+
+- run `restore.cmd`
+- pick one warning or error
+- find the Razor-specific cause
+- add a post-merge cleanup step in RepoMerger
+- rerun restore to validate the issue is gone
+- commit the cleanup with a rationale
+
+Unless the user says otherwise, use the existing merged worktree here:
+
+- `D:\Code\repo-merge-work\razor\target`
+
+Prefer the short run name `razor` for RepoMerger validation runs to avoid long Windows paths.
+
+## Preferred approach
+
+Err on the side of **removing** Razor-local configuration and deferring to Roslyn's existing packages, versions, targets, conventions, and infrastructure.
+
+Good fixes look like:
+
+- removing duplicate package references that Roslyn already adds centrally
+- removing Razor-local analyzer references that Roslyn already enforces elsewhere
+- rewriting Razor package versions to use Roslyn's shared version properties
+- deleting redundant imports or build/test settings that conflict with Roslyn infrastructure
+
+Avoid fixing the issue by changing Roslyn's central infrastructure unless the user explicitly asks for that.
+
+## Workflow
+
+1. Run `restore.cmd` in `D:\Code\repo-merge-work\razor\target`.
+2. Choose **one** warning or error to address.
+3. Identify the root cause by searching under `src\Razor` and comparing it to Roslyn's root-level build/test/package infrastructure.
+4. Implement the fix in `src\RepoMerger\Utilities\PostMergeCleanupRunner.cs` as a new or updated post-merge cleanup step.
+5. Keep the cleanup:
+   - idempotent
+   - focused on a single root cause
+   - biased toward removing Razor-specific duplication
+6. Build RepoMerger:
+
+   ```powershell
+   dotnet build RepoMerger.slnx
+   ```
+
+7. Apply the cleanup against the existing worktree:
+
+   ```powershell
+   dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name razor --post-merge-cleanup-only
+   ```
+
+8. Re-run:
+
+   ```powershell
+   .\restore.cmd
+   ```
+
+   Confirm that the specific issue you chose is gone or that restore has moved on to the next issue in the queue.
+
+9. Commit the RepoMerger change.
+
+## Commit message guidance
+
+The commit body should explain **why** the cleanup is correct in Roslyn, for example:
+
+- `Razor doesn't need to specify xunit.extensibility.execution because Roslyn already adds it in eng\targets\XUnit.targets.`
+- `Razor should use Roslyn's shared Microsoft.Extensions versioning instead of carrying its own ObjectPool version entry.`
+
+## Final response
+
+Summarize:
+
+- the warning or error you selected
+- the root cause
+- the cleanup step you implemented
+- the result of re-running `restore.cmd`
+
+Stop after that summary.
