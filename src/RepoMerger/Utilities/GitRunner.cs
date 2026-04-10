@@ -27,14 +27,29 @@ public static class GitRunner
             return false;
 
         await RunGitAsync(repositoryDirectory, "add", "--update", "--", ".").ConfigureAwait(false);
-        await RunGitAsync(
-            repositoryDirectory,
+        await CommitAsync(repositoryDirectory, message).ConfigureAwait(false);
+        return true;
+    }
+
+    public static async Task CommitAsync(string repositoryDirectory, string message, params string[] additionalParagraphs)
+    {
+        var arguments = new List<string>
+        {
             "commit",
             "-m",
             message,
-            "-m",
-            RepoMergerAttribution).ConfigureAwait(false);
-        return true;
+        };
+
+        foreach (var paragraph in additionalParagraphs.Where(static paragraph => !string.IsNullOrWhiteSpace(paragraph)))
+        {
+            arguments.Add("-m");
+            arguments.Add(paragraph);
+        }
+
+        arguments.Add("-m");
+        arguments.Add(RepoMergerAttribution);
+
+        await RunGitAsync(repositoryDirectory, arguments).ConfigureAwait(false);
     }
 
     public static async Task<string> GetPreferredRemoteNameAsync(string repositoryDirectory)
@@ -88,8 +103,74 @@ public static class GitRunner
     public static async Task<string> GetRemoteUrlAsync(string repositoryDirectory, string remoteName)
         => (await RunGitAsync(repositoryDirectory, "remote", "get-url", remoteName).ConfigureAwait(false)).Trim();
 
-    public static async Task FetchAsync(string repositoryDirectory, string remoteName)
-        => _ = await RunGitAsync(repositoryDirectory, "fetch", remoteName, "--prune", "--tags").ConfigureAwait(false);
+    public static async Task EnsureRemoteAsync(string repositoryDirectory, string remoteName, string remoteUri)
+    {
+        var remoteList = await RunGitAsync(repositoryDirectory, "remote").ConfigureAwait(false);
+        var remotes = remoteList
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (remotes.Contains(remoteName))
+        {
+            var existingRemoteUri = await GetRemoteUrlAsync(repositoryDirectory, remoteName).ConfigureAwait(false);
+            if (!PathHelper.RepositoryLocationsMatch(existingRemoteUri, remoteUri))
+            {
+                await RunGitAsync(repositoryDirectory, "remote", "set-url", remoteName, remoteUri).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        await RunGitAsync(repositoryDirectory, "remote", "add", remoteName, remoteUri).ConfigureAwait(false);
+    }
+
+    public static async Task FetchAsync(string repositoryDirectory, string remoteName, bool includeTags = true)
+    {
+        var arguments = new List<string> { "fetch", remoteName, "--prune" };
+        arguments.Add(includeTags ? "--tags" : "--no-tags");
+        _ = await RunGitAsync(repositoryDirectory, arguments).ConfigureAwait(false);
+    }
+
+    public static async Task<bool> IsAncestorAsync(string repositoryDirectory, string ancestorCommit, string descendantCommit)
+    {
+        var result = await ProcessRunner.RunProcessAsync(
+            "git",
+            ["merge-base", "--is-ancestor", ancestorCommit, descendantCommit],
+            repositoryDirectory).ConfigureAwait(false);
+
+        return result.ExitCode switch
+        {
+            0 => true,
+            1 => false,
+            _ => throw new InvalidOperationException(
+                $"git merge-base --is-ancestor {ancestorCommit} {descendantCommit} failed with exit code {result.ExitCode}:{Environment.NewLine}{result.Output.Trim()}")
+        };
+    }
+
+    public static async Task<bool> PathExistsAsync(string repositoryDirectory, string revision, string path)
+    {
+        var normalizedPath = path.Replace('\\', '/');
+        var result = await ProcessRunner.RunProcessAsync(
+            "git",
+            ["cat-file", "-e", $"{revision}:{normalizedPath}"],
+            repositoryDirectory).ConfigureAwait(false);
+
+        return result.ExitCode == 0;
+    }
+
+    public static async Task FilterBranchToSubdirectoryAsync(string repositoryDirectory, string path)
+    {
+        var normalizedPath = path.Replace('\\', '/');
+        await RunGitAsync(
+            repositoryDirectory,
+            "filter-branch",
+            "--force",
+            "--prune-empty",
+            "--subdirectory-filter",
+            normalizedPath,
+            "--",
+            "HEAD").ConfigureAwait(false);
+    }
 
     public static async Task<string> GetRemoteHeadBranchAsync(string repositoryDirectory, string remoteName)
     {

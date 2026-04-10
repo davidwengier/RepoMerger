@@ -28,8 +28,12 @@ internal static class Stages
             "Run the repo-specific handler against the external clone.",
             PrepareSourceAsync),
         new(
+            "filter-source-history",
+            "Rewrite the prepared source history so only the import path remains.",
+            FilterSourceHistoryAsync),
+        new(
             "merge-into-target",
-            "Placeholder stage for importing the prepared repo into the target repo.",
+            "Merge the prepared source history into the target repo at the selected path.",
             MergeIntoTargetAsync),
         new(
             "finalize-scaffold",
@@ -159,17 +163,159 @@ internal static class Stages
                 "Run the clone-target stage first.");
         }
 
-        return await RepositoryHandlerLoader.RunAsync(context).ConfigureAwait(false);
+        if (SourceHistoryFilter.IsFilteredInPlace(context.State.SourceCloneDirectory, context.Settings.TargetPath))
+        {
+            context.State.SourceHeadCommit = await GitRunner.GetHeadCommitAsync(context.State.SourceCloneDirectory).ConfigureAwait(false);
+            return
+                $"Source repo is already filtered in place under '{context.Settings.TargetPath}'. " +
+                $"Current source HEAD is '{context.State.SourceHeadCommit}'.";
+        }
+
+        var summary = await RepositoryHandlerLoader.RunAsync(context).ConfigureAwait(false);
+        context.State.SourceHeadCommit = await GitRunner.GetHeadCommitAsync(context.State.SourceCloneDirectory).ConfigureAwait(false);
+        return $"{summary} Prepared source HEAD is '{context.State.SourceHeadCommit}'.";
     }
 
-    private static Task<string> MergeIntoTargetAsync(StageContext context)
+    private static async Task<string> FilterSourceHistoryAsync(StageContext context)
+    {
+        var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.Settings.TargetPath, "Source history filtering");
+        if (context.Settings.DryRun)
+        {
+            return
+                $"Dry run: would filter '{context.State.SourceCloneDirectory}' in place " +
+                $"that retains only history for '{targetRelativePath}'.";
+        }
+
+        var summary = await SourceHistoryFilter.FilterInPlaceAsync(
+            context.State.SourceCloneDirectory,
+            targetRelativePath).ConfigureAwait(false);
+
+        context.State.SourceHeadCommit = await GitRunner.GetHeadCommitAsync(context.State.SourceCloneDirectory).ConfigureAwait(false);
+        return $"{summary} Filtered source HEAD is '{context.State.SourceHeadCommit}'.";
+    }
+
+    private static async Task<string> MergeIntoTargetAsync(StageContext context)
     {
         var importDirectory = context.State.ImportPreviewDirectory;
         Directory.CreateDirectory(importDirectory);
 
-        var fullTargetPath = PathHelper.GetAbsolutePath(context.TargetRepoRoot, context.Settings.TargetPath);
-        return Task.FromResult(
-            $"Placeholder only. A future milestone will import the prepared repo into '{fullTargetPath}' under target repo '{context.TargetRepoRoot}'.");
+        if (!Directory.Exists(context.State.SourceCloneDirectory) || !GitRunner.IsRepository(context.State.SourceCloneDirectory))
+        {
+            throw new InvalidOperationException(
+                $"The source clone directory '{context.State.SourceCloneDirectory}' does not exist or is not a git repository. " +
+                "Run the clone-source and prepare-source stages first.");
+        }
+
+        if (!Directory.Exists(context.TargetRepoRoot) || !GitRunner.IsRepository(context.TargetRepoRoot))
+        {
+            throw new InvalidOperationException(
+                $"The target clone directory '{context.TargetRepoRoot}' does not exist or is not a git repository. " +
+                "Run the clone-target stage first.");
+        }
+
+        var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.Settings.TargetPath, "Target merge");
+        var fullTargetPath = PathHelper.GetAbsolutePath(context.TargetRepoRoot, targetRelativePath);
+        if (context.Settings.DryRun)
+        {
+            return
+                $"Dry run: would filter the prepared source clone in place for '{targetRelativePath}' and merge it into '{fullTargetPath}' " +
+                "while preserving surviving file history.";
+        }
+
+        var filterSummary = await FilterSourceHistoryAsync(context).ConfigureAwait(false);
+        var sourceRootForMerge = context.State.SourceCloneDirectory;
+        var sourceHeadCommit = await GitRunner.GetHeadCommitAsync(sourceRootForMerge).ConfigureAwait(false);
+        context.State.SourceHeadCommit = sourceHeadCommit;
+
+        var mergeHeadPath = Path.Combine(context.TargetRepoRoot, ".git", "MERGE_HEAD");
+        if (File.Exists(mergeHeadPath))
+        {
+            Console.WriteLine("Aborting an unfinished merge left in the target clone.");
+            await GitRunner.RunGitAsync(context.TargetRepoRoot, "merge", "--abort").ConfigureAwait(false);
+        }
+
+        var targetStatus = await GitRunner.GetShortStatusAsync(context.TargetRepoRoot).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(targetStatus))
+        {
+            throw new InvalidOperationException(
+                "The target clone is not clean. Merge into target expects a clean checkout.");
+        }
+
+        const string sourceRemoteName = "prepared-source";
+        await GitRunner.EnsureRemoteAsync(
+            context.TargetRepoRoot,
+            sourceRemoteName,
+            sourceRootForMerge).ConfigureAwait(false);
+        await GitRunner.FetchAsync(context.TargetRepoRoot, sourceRemoteName, includeTags: false).ConfigureAwait(false);
+
+        var targetHeadBeforeMerge = await GitRunner.GetHeadCommitAsync(context.TargetRepoRoot).ConfigureAwait(false);
+        context.State.TargetHeadCommit = targetHeadBeforeMerge;
+
+        if (await GitRunner.IsAncestorAsync(context.TargetRepoRoot, sourceHeadCommit, "HEAD").ConfigureAwait(false))
+        {
+            var alreadyMergedSummaryPath = Path.Combine(importDirectory, "merge-summary.txt");
+            var alreadyMergedSummary =
+                $"Filtered source commit '{sourceHeadCommit}' is already reachable from target HEAD '{targetHeadBeforeMerge}'.";
+            await File.WriteAllTextAsync(alreadyMergedSummaryPath, alreadyMergedSummary).ConfigureAwait(false);
+            return $"{alreadyMergedSummary} Review note: '{alreadyMergedSummaryPath}'.";
+        }
+
+        Console.WriteLine($"Merging filtered source commit '{sourceHeadCommit}' into '{targetRelativePath}'.");
+        await GitRunner.RunGitAsync(
+            context.TargetRepoRoot,
+            "merge",
+            "--no-commit",
+            "--allow-unrelated-histories",
+            "-s",
+            "ours",
+            sourceHeadCommit).ConfigureAwait(false);
+
+        try
+        {
+            await GitRunner.RunGitAsync(
+                context.TargetRepoRoot,
+                "rm",
+                "-r",
+                "--ignore-unmatch",
+                "--",
+                targetRelativePath).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(
+                context.TargetRepoRoot,
+                "checkout",
+                sourceHeadCommit,
+                "--",
+                targetRelativePath).ConfigureAwait(false);
+            await GitRunner.CommitAsync(
+                context.TargetRepoRoot,
+                $"Merge '{context.Settings.SourceRepo}' into '{targetRelativePath}'",
+                $"Import filtered history from '{sourceHeadCommit}' into the target repo path.").ConfigureAwait(false);
+        }
+        catch
+        {
+            if (File.Exists(mergeHeadPath))
+                await GitRunner.RunGitAsync(context.TargetRepoRoot, "merge", "--abort").ConfigureAwait(false);
+
+            throw;
+        }
+
+        var targetHeadAfterMerge = await GitRunner.GetHeadCommitAsync(context.TargetRepoRoot).ConfigureAwait(false);
+        context.State.TargetHeadCommit = targetHeadAfterMerge;
+
+        var previewSummaryPath = Path.Combine(importDirectory, "merge-summary.txt");
+        var mergeSummary = await GitRunner.RunGitAsync(
+            context.TargetRepoRoot,
+            "show",
+            "--stat",
+            "--summary",
+            "--format=medium",
+            targetHeadAfterMerge,
+            "--",
+            targetRelativePath).ConfigureAwait(false);
+        await File.WriteAllTextAsync(previewSummaryPath, mergeSummary).ConfigureAwait(false);
+
+        return
+            $"{filterSummary} Merged filtered source commit '{sourceHeadCommit}' into '{fullTargetPath}'. " +
+            $"New target HEAD: '{targetHeadAfterMerge}'. Review summary: '{previewSummaryPath}'.";
     }
 
     private static async Task<string> FinalizeScaffoldAsync(StageContext context)
@@ -186,6 +332,7 @@ internal static class Stages
         summary.AppendLine($"Work root        : {context.State.WorkRoot}");
         summary.AppendLine($"Source clone dir : {context.State.SourceCloneDirectory}");
         summary.AppendLine($"Target clone dir : {context.TargetRepoRoot}");
+        summary.AppendLine($"Import preview   : {context.State.ImportPreviewDirectory}");
         summary.AppendLine($"Handler key      : {RepositoryHandlerLoader.GetRepositoryKey(context.Settings.SourceRepo)}");
         summary.AppendLine($"Source HEAD      : {context.State.SourceHeadCommit}");
         summary.AppendLine($"Target HEAD      : {context.State.TargetHeadCommit}");
@@ -197,8 +344,10 @@ internal static class Stages
         summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage clone-source --rerun");
         summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage clone-target --rerun");
         summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage prepare-source --rerun");
+        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage filter-source-history --rerun");
+        summary.AppendLine($@"  dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name {context.State.RunName} --stage merge-into-target --rerun");
         summary.AppendLine();
-        summary.AppendLine("Current status: source/target cloning and repo-specific prepare/validate stages are implemented.");
+        summary.AppendLine("Current status: source/target cloning, Razor preparation, filtered-history import, and target merge are implemented.");
 
         var summaryPath = Path.Combine(context.RunDirectory, "summary.txt");
         await File.WriteAllTextAsync(summaryPath, summary.ToString()).ConfigureAwait(false);
