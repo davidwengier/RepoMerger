@@ -38,6 +38,11 @@ internal static class PostMergeCleanupRunner
             "Remove Razor xunit.extensibility.execution refs",
             RemoveXunitExecutionPackageReferencesAsync),
         new(
+            "remove-xunit-version-overrides",
+            "Remove Razor-local xUnit VersionOverride pins and defer to Roslyn's centrally managed package versions.",
+            "Remove Razor xUnit version overrides\n\nRazor should use Roslyn's centrally managed xUnit package versions instead of overriding xunit.assert and xunit.analyzers locally.",
+            RemoveXunitVersionOverridesAsync),
+        new(
             "convert-roslyn-package-references",
             "Convert Roslyn PackageReference items into ProjectReference items.",
             "Convert Roslyn package references to project references",
@@ -292,6 +297,41 @@ internal static class PostMergeCleanupRunner
             : $"Removed {removedReferenceCount} explicit xunit.extensibility.execution reference(s) from {changedFiles.Count} Razor project(s): {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> RemoveXunitVersionOverridesAsync(string targetRepoRoot, string targetRoot)
+    {
+        if (!Directory.Exists(targetRoot))
+            return "No Razor target tree was found for xUnit version override cleanup.";
+
+        var changedFiles = new List<string>();
+        var removedOverrideCount = 0;
+
+        foreach (var projectPath in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
+        {
+            var document = await LoadXmlAsync(projectPath, preserveWhitespace: true).ConfigureAwait(false);
+            var packageReferencesWithOverrides = document
+                .Descendants()
+                .Where(static element => element.Name.LocalName == "PackageReference")
+                .Where(HasXunitVersionOverride)
+                .ToList();
+
+            if (packageReferencesWithOverrides.Count == 0)
+                continue;
+
+            foreach (var packageReference in packageReferencesWithOverrides)
+            {
+                packageReference.Attribute("VersionOverride")?.Remove();
+                removedOverrideCount++;
+            }
+
+            await SaveXmlAsync(document, projectPath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
+        }
+
+        return removedOverrideCount == 0
+            ? "No Razor xUnit VersionOverride attributes were found."
+            : $"Removed {removedOverrideCount} Razor xUnit VersionOverride attribute(s) from {changedFiles.Count} project(s): {string.Join(", ", changedFiles)}.";
+    }
+
     private static async Task<string> ConvertRoslynPackageReferencesAsync(string targetRepoRoot, string targetRoot)
     {
         var roslynProjectMap = await BuildRoslynProjectMapAsync(targetRepoRoot, targetRoot).ConfigureAwait(false);
@@ -448,6 +488,12 @@ internal static class PostMergeCleanupRunner
     private static bool IsPackageReferenceFor(XElement element, string packageId)
         => string.Equals(element.Attribute("Include")?.Value?.Trim(), packageId, StringComparison.OrdinalIgnoreCase)
             || string.Equals(element.Attribute("Update")?.Value?.Trim(), packageId, StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasXunitVersionOverride(XElement element)
+        => element.Attribute("VersionOverride") is not null
+            && GetPackageVersionId(element) is string packageId
+            && (string.Equals(packageId, "xunit", StringComparison.OrdinalIgnoreCase)
+                || packageId.StartsWith("xunit.", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsRoslynDiagnosticsAnalyzersReference(XElement element)
         => IsPackageReferenceFor(element, "Roslyn.Diagnostics.Analyzers")
