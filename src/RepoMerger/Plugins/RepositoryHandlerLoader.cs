@@ -24,7 +24,6 @@ internal static class RepositoryHandlerLoader
         Console.WriteLine($"Loaded '{Path.GetFileName(assemblyPath)}' for '{repositoryKey}'.");
 
         await handler.PrepareAsync(handlerContext).ConfigureAwait(false);
-        await handler.ValidateAsync(handlerContext).ConfigureAwait(false);
 
         return $"Ran {repositoryKey} handler successfully.";
     }

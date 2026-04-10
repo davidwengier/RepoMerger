@@ -98,24 +98,6 @@ public sealed class RazorRepositoryHandler : IRepositoryHandler
             Console.WriteLine($"Updated {updatedFileCount} solution/build file(s).");
     }
 
-    public async Task ValidateAsync(RepositoryHandlerContext context)
-    {
-        if (!Directory.Exists(context.SourceRoot))
-            throw new InvalidOperationException($"Source root '{context.SourceRoot}' does not exist.");
-
-        var buildScript = Path.Combine(context.SourceRoot, "build.cmd");
-        if (!File.Exists(buildScript))
-            throw new InvalidOperationException($"Expected '{buildScript}' to exist.");
-
-        Console.WriteLine($"Validating Razor source repo at '{context.SourceRoot}'.");
-        Console.WriteLine("> build.cmd");
-
-        var result = await ProcessRunner.RunProcessAsync("cmd.exe", ["/c", "build.cmd"], context.SourceRoot).ConfigureAwait(false);
-        ProcessRunner.EnsureCommandSucceeded(result, "build.cmd");
-
-        Console.WriteLine("Razor source repo validation completed successfully.");
-    }
-
     private static bool IsSourceTreeAlreadyNested(string sourceRoot, string targetRoot)
     {
         var sourceDirectory = Path.Combine(sourceRoot, "src");
