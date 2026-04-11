@@ -16,7 +16,9 @@ public static class ProcessRunner
     public static async Task<ProcessResult> RunProcessAsync(
         string fileName,
         IReadOnlyList<string> arguments,
-        string workingDirectory)
+        string workingDirectory,
+        IReadOnlyDictionary<string, string?>? environmentVariables = null,
+        bool logOutput = true)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -31,14 +33,25 @@ public static class ProcessRunner
         foreach (var argument in arguments)
             startInfo.ArgumentList.Add(argument);
 
+        if (environmentVariables is not null)
+        {
+            foreach (var (name, value) in environmentVariables)
+            {
+                if (value is null)
+                    startInfo.Environment.Remove(name);
+                else
+                    startInfo.Environment[name] = value;
+            }
+        }
+
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Failed to start '{fileName}'.");
 
-        var output = await ReadProcessOutputAsync(process).ConfigureAwait(false);
+        var output = await ReadProcessOutputAsync(process, logOutput).ConfigureAwait(false);
         return new ProcessResult(process.ExitCode, output);
     }
 
-    private static async Task<string> ReadProcessOutputAsync(Process process)
+    private static async Task<string> ReadProcessOutputAsync(Process process, bool logOutput)
     {
         var output = new List<string>();
 
@@ -49,7 +62,8 @@ public static class ProcessRunner
                 lock (output)
                     output.Add(line);
 
-                Console.WriteLine(line);
+                if (logOutput)
+                    Console.WriteLine(line);
             }
         });
 

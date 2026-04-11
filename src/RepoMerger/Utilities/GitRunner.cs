@@ -3,16 +3,27 @@ namespace RepoMerger;
 public static class GitRunner
 {
     private const string RepoMergerAttribution = "Prepared with RepoMerger, which was co-authored by Copilot.";
+    private const string PythonWingetPackageId = "Python.Python.3.12";
+    private static readonly PythonCommand[] PythonCommands =
+    [
+        new("python3", [], "python3"),
+        new("python", [], "python"),
+        new("py", ["-3"], "py -3"),
+        new("py", [], "py"),
+    ];
 
     public static bool IsRepository(string directory)
         => Directory.Exists(Path.Combine(directory, ".git")) || File.Exists(Path.Combine(directory, ".git"));
 
     public static async Task<string> RunGitAsync(string workingDirectory, params string[] arguments)
-        => await RunGitAsync(workingDirectory, (IReadOnlyList<string>)arguments).ConfigureAwait(false);
+        => await RunGitAsync(workingDirectory, (IReadOnlyList<string>)arguments, environmentVariables: null).ConfigureAwait(false);
 
-    public static async Task<string> RunGitAsync(string workingDirectory, IReadOnlyList<string> arguments)
+    public static async Task<string> RunGitAsync(
+        string workingDirectory,
+        IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string?>? environmentVariables = null)
     {
-        var result = await ProcessRunner.RunProcessAsync("git", arguments, workingDirectory).ConfigureAwait(false);
+        var result = await ProcessRunner.RunProcessAsync("git", arguments, workingDirectory, environmentVariables).ConfigureAwait(false);
         ProcessRunner.EnsureCommandSucceeded(result, $"git {string.Join(' ', arguments)}");
         return result.Output;
     }
@@ -158,18 +169,271 @@ public static class GitRunner
         return result.ExitCode == 0;
     }
 
-    public static async Task FilterBranchToSubdirectoryAsync(string repositoryDirectory, string path)
+    public static async Task<string> FilterToSubdirectoryAsync(string repositoryDirectory, string path)
     {
         var normalizedPath = path.Replace('\\', '/');
+        var filterRepoEnvironment = await EnsureFilterRepoAvailableAsync(repositoryDirectory).ConfigureAwait(false);
+
         await RunGitAsync(
             repositoryDirectory,
-            "filter-branch",
-            "--force",
-            "--prune-empty",
-            "--subdirectory-filter",
-            normalizedPath,
-            "--",
-            "HEAD").ConfigureAwait(false);
+            [
+                "filter-repo",
+                "--force",
+                "--refs",
+                "HEAD",
+                "--subdirectory-filter",
+                normalizedPath,
+            ],
+            filterRepoEnvironment).ConfigureAwait(false);
+
+        return "git filter-repo";
+    }
+
+    private static async Task<IReadOnlyDictionary<string, string?>?> EnsureFilterRepoAvailableAsync(string repositoryDirectory)
+    {
+        if (await IsFilterRepoAvailableAsync(repositoryDirectory, environmentVariables: null).ConfigureAwait(false))
+            return null;
+
+        var pythonCommand = await EnsurePythonAvailableAsync(repositoryDirectory).ConfigureAwait(false);
+        if (pythonCommand is not null)
+        {
+            Console.WriteLine($"Installing git-filter-repo via {pythonCommand.DisplayName}.");
+            if (await TryInstallFilterRepoAsync(repositoryDirectory, pythonCommand).ConfigureAwait(false))
+            {
+                var scriptsDirectory = await GetUserScriptsDirectoryAsync(repositoryDirectory, pythonCommand).ConfigureAwait(false);
+                var environmentVariables = string.IsNullOrWhiteSpace(scriptsDirectory)
+                    ? null
+                    : CreatePathEnvironmentVariables(scriptsDirectory);
+
+                if (await IsFilterRepoAvailableAsync(repositoryDirectory, environmentVariables).ConfigureAwait(false))
+                    return environmentVariables;
+            }
+        }
+
+        throw new InvalidOperationException(
+            "git filter-repo is required for source history filtering, but RepoMerger could not install it automatically. " +
+            "Ensure Python 3 and git-filter-repo are available, or allow winget-based Python installation on Windows.");
+    }
+
+    private static async Task<PythonCommand?> EnsurePythonAvailableAsync(string repositoryDirectory)
+    {
+        var existingPythonCommand = await FindPythonCommandAsync(repositoryDirectory).ConfigureAwait(false);
+        if (existingPythonCommand is not null)
+            return existingPythonCommand;
+
+        if (OperatingSystem.IsWindows())
+        {
+            _ = await TryInstallPythonWithWingetAsync(repositoryDirectory).ConfigureAwait(false);
+            return await FindPythonCommandAsync(repositoryDirectory).ConfigureAwait(false);
+        }
+
+        return null;
+    }
+
+    private static async Task<PythonCommand?> FindPythonCommandAsync(string repositoryDirectory)
+    {
+        foreach (var pythonCommand in GetCandidatePythonCommands())
+        {
+            if (await CanRunProcessAsync(repositoryDirectory, pythonCommand.FileName, pythonCommand.WithArguments("--version")).ConfigureAwait(false))
+                return pythonCommand;
+        }
+
+        return null;
+    }
+
+    private static async Task<bool> IsFilterRepoAvailableAsync(
+        string repositoryDirectory,
+        IReadOnlyDictionary<string, string?>? environmentVariables)
+    {
+        try
+        {
+            var result = await ProcessRunner.RunProcessAsync(
+                "git",
+                ["filter-repo", "-h"],
+                repositoryDirectory,
+                environmentVariables,
+                logOutput: false).ConfigureAwait(false);
+
+            return result.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> TryInstallPythonWithWingetAsync(string repositoryDirectory)
+    {
+        if (!await CanRunProcessAsync(repositoryDirectory, "winget", ["--version"]).ConfigureAwait(false))
+            return false;
+
+        Console.WriteLine($"Installing Python 3 via winget package '{PythonWingetPackageId}'.");
+
+        try
+        {
+            var result = await ProcessRunner.RunProcessAsync(
+                "winget",
+                [
+                    "install",
+                    "--id",
+                    PythonWingetPackageId,
+                    "--exact",
+                    "--source",
+                    "winget",
+                    "--scope",
+                    "user",
+                    "--silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--disable-interactivity",
+                ],
+                repositoryDirectory).ConfigureAwait(false);
+
+            return result.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> TryInstallFilterRepoAsync(string repositoryDirectory, PythonCommand pythonCommand)
+    {
+        var installArguments = pythonCommand.WithArguments(
+            "-m", "pip", "install", "--user", "--disable-pip-version-check", "--upgrade", "git-filter-repo");
+
+        try
+        {
+            var installResult = await ProcessRunner.RunProcessAsync(
+                pythonCommand.FileName,
+                installArguments,
+                repositoryDirectory).ConfigureAwait(false);
+            if (installResult.ExitCode == 0)
+                return true;
+
+            var ensurePipResult = await ProcessRunner.RunProcessAsync(
+                pythonCommand.FileName,
+                pythonCommand.WithArguments("-m", "ensurepip", "--user"),
+                repositoryDirectory).ConfigureAwait(false);
+            if (ensurePipResult.ExitCode != 0)
+                return false;
+
+            installResult = await ProcessRunner.RunProcessAsync(
+                pythonCommand.FileName,
+                installArguments,
+                repositoryDirectory).ConfigureAwait(false);
+            return installResult.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static IEnumerable<PythonCommand> GetCandidatePythonCommands()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var pythonCommand in PythonCommands)
+        {
+            var key = $"{pythonCommand.FileName}|{string.Join('\0', pythonCommand.PrefixArguments)}";
+            if (seen.Add(key))
+                yield return pythonCommand;
+        }
+
+        foreach (var executablePath in GetInstalledPythonExecutablePaths())
+        {
+            if (seen.Add(executablePath))
+                yield return new(executablePath, [], executablePath);
+        }
+    }
+
+    private static IEnumerable<string> GetInstalledPythonExecutablePaths()
+    {
+        foreach (var root in GetPythonInstallRoots())
+        {
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+                continue;
+
+            foreach (var directory in Directory.EnumerateDirectories(root, "Python*"))
+            {
+                var pythonExecutable = Path.Combine(directory, "python.exe");
+                if (File.Exists(pythonExecutable))
+                    yield return pythonExecutable;
+            }
+        }
+    }
+
+    private static IEnumerable<string> GetPythonInstallRoots()
+    {
+        yield return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs",
+            "Python");
+
+        yield return Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        if (!string.IsNullOrWhiteSpace(programFilesX86))
+            yield return programFilesX86;
+    }
+
+    private static async Task<string> GetUserScriptsDirectoryAsync(string repositoryDirectory, PythonCommand pythonCommand)
+    {
+        try
+        {
+            var result = await ProcessRunner.RunProcessAsync(
+                pythonCommand.FileName,
+                pythonCommand.WithArguments(
+                    "-c",
+                    "import os, site; print(os.path.join(site.USER_BASE, 'Scripts' if os.name == 'nt' else 'bin'))"),
+                repositoryDirectory,
+                logOutput: false).ConfigureAwait(false);
+
+            return result.ExitCode == 0
+                ? result.Output.Trim()
+                : string.Empty;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return string.Empty;
+        }
+    }
+
+    private static async Task<bool> CanRunProcessAsync(string repositoryDirectory, string fileName, IReadOnlyList<string> arguments)
+    {
+        try
+        {
+            var result = await ProcessRunner.RunProcessAsync(
+                fileName,
+                arguments,
+                repositoryDirectory,
+                logOutput: false).ConfigureAwait(false);
+            return result.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static IReadOnlyDictionary<string, string?> CreatePathEnvironmentVariables(string directoryToPrepend)
+    {
+        var currentPath = Environment.GetEnvironmentVariable("PATH");
+        var combinedPath = string.IsNullOrWhiteSpace(currentPath)
+            ? directoryToPrepend
+            : $"{directoryToPrepend}{Path.PathSeparator}{currentPath}";
+
+        return new Dictionary<string, string?>
+        {
+            ["PATH"] = combinedPath,
+        };
+    }
+
+    private sealed record PythonCommand(string FileName, string[] PrefixArguments, string DisplayName)
+    {
+        public string[] WithArguments(params string[] arguments)
+            => [.. PrefixArguments, .. arguments];
     }
 
     public static async Task<string> GetRemoteHeadBranchAsync(string repositoryDirectory, string remoteName)

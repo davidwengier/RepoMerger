@@ -20,11 +20,11 @@ internal static class SourceHistoryFilter
             return $"Source history is already filtered in place under '{normalizedTargetPath}' (HEAD {existingHeadCommit}).";
         }
 
-        await GitRunner.FilterBranchToSubdirectoryAsync(sourceCloneDirectory, normalizedTargetPath).ConfigureAwait(false);
+        var filterTool = await GitRunner.FilterToSubdirectoryAsync(sourceCloneDirectory, normalizedTargetPath).ConfigureAwait(false);
         await NestFilteredTreeUnderTargetPathAsync(sourceCloneDirectory, normalizedTargetPath).ConfigureAwait(false);
 
         var filteredHeadCommit = await GitRunner.GetHeadCommitAsync(sourceCloneDirectory).ConfigureAwait(false);
-        return $"Filtered source history in place under '{normalizedTargetPath}' (HEAD {filteredHeadCommit}).";
+        return $"Filtered source history in place under '{normalizedTargetPath}' with {filterTool} (HEAD {filteredHeadCommit}).";
     }
 
     private static async Task NestFilteredTreeUnderTargetPathAsync(string repositoryDirectory, string targetRelativePath)
