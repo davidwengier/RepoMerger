@@ -172,27 +172,27 @@ public static class GitRunner
     public static async Task<string> FilterToSubdirectoryAsync(string repositoryDirectory, string path)
     {
         var normalizedPath = path.Replace('\\', '/');
-        var filterRepoEnvironment = await EnsureFilterRepoAvailableAsync(repositoryDirectory).ConfigureAwait(false);
+        var filterRepoCommand = await EnsureFilterRepoAvailableAsync(repositoryDirectory).ConfigureAwait(false);
 
-        await RunGitAsync(
-            repositoryDirectory,
-            [
-                "filter-repo",
+        await RunRequiredProcessAsync(
+            filterRepoCommand.FileName,
+            filterRepoCommand.WithArguments(
                 "--force",
                 "--refs",
                 "HEAD",
                 "--subdirectory-filter",
-                normalizedPath,
-            ],
-            filterRepoEnvironment).ConfigureAwait(false);
+                normalizedPath),
+            repositoryDirectory,
+            filterRepoCommand.EnvironmentVariables).ConfigureAwait(false);
 
-        return "git filter-repo";
+        return filterRepoCommand.DisplayName;
     }
 
-    private static async Task<IReadOnlyDictionary<string, string?>?> EnsureFilterRepoAvailableAsync(string repositoryDirectory)
+    private static async Task<FilterRepoCommand> EnsureFilterRepoAvailableAsync(string repositoryDirectory)
     {
-        if (await IsFilterRepoAvailableAsync(repositoryDirectory, environmentVariables: null).ConfigureAwait(false))
-            return null;
+        var existingFilterRepoCommand = await FindFilterRepoCommandAsync(repositoryDirectory).ConfigureAwait(false);
+        if (existingFilterRepoCommand is not null)
+            return existingFilterRepoCommand;
 
         var pythonCommand = await EnsurePythonAvailableAsync(repositoryDirectory).ConfigureAwait(false);
         if (pythonCommand is not null)
@@ -200,13 +200,9 @@ public static class GitRunner
             Console.WriteLine($"Installing git-filter-repo via {pythonCommand.DisplayName}.");
             if (await TryInstallFilterRepoAsync(repositoryDirectory, pythonCommand).ConfigureAwait(false))
             {
-                var scriptsDirectory = await GetUserScriptsDirectoryAsync(repositoryDirectory, pythonCommand).ConfigureAwait(false);
-                var environmentVariables = string.IsNullOrWhiteSpace(scriptsDirectory)
-                    ? null
-                    : CreatePathEnvironmentVariables(scriptsDirectory);
-
-                if (await IsFilterRepoAvailableAsync(repositoryDirectory, environmentVariables).ConfigureAwait(false))
-                    return environmentVariables;
+                var installedFilterRepoCommand = await FindFilterRepoCommandAsync(repositoryDirectory, pythonCommand).ConfigureAwait(false);
+                if (installedFilterRepoCommand is not null)
+                    return installedFilterRepoCommand;
             }
         }
 
@@ -241,25 +237,34 @@ public static class GitRunner
         return null;
     }
 
-    private static async Task<bool> IsFilterRepoAvailableAsync(
+    private static async Task<FilterRepoCommand?> FindFilterRepoCommandAsync(
         string repositoryDirectory,
-        IReadOnlyDictionary<string, string?>? environmentVariables)
+        PythonCommand? preferredPythonCommand = null)
     {
-        try
+        if (await CanRunProcessAsync(repositoryDirectory, "git", ["filter-repo", "--version"]).ConfigureAwait(false))
         {
-            var result = await ProcessRunner.RunProcessAsync(
-                "git",
-                ["filter-repo", "-h"],
-                repositoryDirectory,
-                environmentVariables,
-                logOutput: false).ConfigureAwait(false);
+            return new FilterRepoCommand("git", ["filter-repo"], "git filter-repo");
+        }
 
-            return result.ExitCode == 0;
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        var pythonCommands = preferredPythonCommand is null
+            ? GetCandidatePythonCommands()
+            : [preferredPythonCommand];
+
+        foreach (var pythonCommand in pythonCommands)
         {
-            return false;
+            if (await CanRunProcessAsync(
+                repositoryDirectory,
+                pythonCommand.FileName,
+                pythonCommand.WithArguments("-m", "git_filter_repo", "--version")).ConfigureAwait(false))
+            {
+                return new FilterRepoCommand(
+                    pythonCommand.FileName,
+                    pythonCommand.WithArguments("-m", "git_filter_repo"),
+                    "git filter-repo");
+            }
         }
+
+        return null;
     }
 
     private static async Task<bool> TryInstallPythonWithWingetAsync(string repositoryDirectory)
@@ -295,6 +300,20 @@ public static class GitRunner
         {
             return false;
         }
+    }
+
+    private static async Task RunRequiredProcessAsync(
+        string fileName,
+        IReadOnlyList<string> arguments,
+        string workingDirectory,
+        IReadOnlyDictionary<string, string?>? environmentVariables = null)
+    {
+        var result = await ProcessRunner.RunProcessAsync(
+            fileName,
+            arguments,
+            workingDirectory,
+            environmentVariables).ConfigureAwait(false);
+        ProcessRunner.EnsureCommandSucceeded(result, $"{fileName} {string.Join(' ', arguments)}");
     }
 
     private static async Task<bool> TryInstallFilterRepoAsync(string repositoryDirectory, PythonCommand pythonCommand)
@@ -378,28 +397,6 @@ public static class GitRunner
             yield return programFilesX86;
     }
 
-    private static async Task<string> GetUserScriptsDirectoryAsync(string repositoryDirectory, PythonCommand pythonCommand)
-    {
-        try
-        {
-            var result = await ProcessRunner.RunProcessAsync(
-                pythonCommand.FileName,
-                pythonCommand.WithArguments(
-                    "-c",
-                    "import os, site; print(os.path.join(site.USER_BASE, 'Scripts' if os.name == 'nt' else 'bin'))"),
-                repositoryDirectory,
-                logOutput: false).ConfigureAwait(false);
-
-            return result.ExitCode == 0
-                ? result.Output.Trim()
-                : string.Empty;
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
-            return string.Empty;
-        }
-    }
-
     private static async Task<bool> CanRunProcessAsync(string repositoryDirectory, string fileName, IReadOnlyList<string> arguments)
     {
         try
@@ -417,20 +414,17 @@ public static class GitRunner
         }
     }
 
-    private static IReadOnlyDictionary<string, string?> CreatePathEnvironmentVariables(string directoryToPrepend)
+    private sealed record PythonCommand(string FileName, string[] PrefixArguments, string DisplayName)
     {
-        var currentPath = Environment.GetEnvironmentVariable("PATH");
-        var combinedPath = string.IsNullOrWhiteSpace(currentPath)
-            ? directoryToPrepend
-            : $"{directoryToPrepend}{Path.PathSeparator}{currentPath}";
-
-        return new Dictionary<string, string?>
-        {
-            ["PATH"] = combinedPath,
-        };
+        public string[] WithArguments(params string[] arguments)
+            => [.. PrefixArguments, .. arguments];
     }
 
-    private sealed record PythonCommand(string FileName, string[] PrefixArguments, string DisplayName)
+    private sealed record FilterRepoCommand(
+        string FileName,
+        string[] PrefixArguments,
+        string DisplayName,
+        IReadOnlyDictionary<string, string?>? EnvironmentVariables = null)
     {
         public string[] WithArguments(params string[] arguments)
             => [.. PrefixArguments, .. arguments];
