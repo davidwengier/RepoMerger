@@ -13,6 +13,11 @@ internal static class PostMergeCleanupRunner
             "Remove Razor Common.targets import",
             RemoveCommonTargetsImportAsync),
         new(
+            "copy-razor-services-props",
+            "Copy Razor's Services.props into the target eng folder and rewrite Razor references to it.",
+            "Copy Razor Services.props into Roslyn eng",
+            CopyRazorServicesPropsAsync),
+        new(
             "rewrite-directory-build-imports",
             "Rewrite Razor Directory.Build.props/targets to import the repo-root Directory.Build files.",
             "Rewrite Razor Directory.Build imports",
@@ -61,8 +66,7 @@ internal static class PostMergeCleanupRunner
 
     public static async Task<string> RunAsync(StageContext context)
     {
-        var targetRelativePath = PathHelper.NormalizeRelativeTargetPath(context.Settings.TargetPath, "Post-merge cleanup");
-        var targetRoot = PathHelper.GetAbsolutePath(context.TargetRepoRoot, targetRelativePath);
+        var targetRoot = context.TargetRoot;
 
         if (context.Settings.DryRun)
         {
@@ -80,7 +84,7 @@ internal static class PostMergeCleanupRunner
         var summaries = new List<string>();
         foreach (var step in Steps)
         {
-            var stepSummary = await step.ExecuteAsync(context.TargetRepoRoot, targetRoot).ConfigureAwait(false);
+            var stepSummary = await step.ExecuteAsync(context).ConfigureAwait(false);
             var committed = await GitRunner.CommitTrackedChangesAsync(context.TargetRepoRoot, step.CommitMessage).ConfigureAwait(false);
             if (committed)
             {
@@ -93,11 +97,55 @@ internal static class PostMergeCleanupRunner
             }
         }
 
-        return $"Applied post-merge cleanup stage. {string.Join(" ", summaries)}";
+        return $"Applied post-merge cleanup stage.{Environment.NewLine}- {string.Join($"{Environment.NewLine}- ", summaries)}";
     }
 
-    private static async Task<string> RemoveCommonTargetsImportAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> CopyRazorServicesPropsAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var sourceServicesPropsPath = Path.Combine(context.State.SourceCloneDirectory, "eng", "targets", "Services.props");
+        if (!File.Exists(sourceServicesPropsPath))
+        {
+            throw new InvalidOperationException(
+                $"Expected Razor Services.props at '{sourceServicesPropsPath}', but it was not found in the preserved source checkout.");
+        }
+
+        var targetServicesPropsPath = Path.Combine(targetRepoRoot, "eng", "targets", "RazorServices.props");
+        Directory.CreateDirectory(Path.GetDirectoryName(targetServicesPropsPath)!);
+
+        var sourceContent = await File.ReadAllTextAsync(sourceServicesPropsPath).ConfigureAwait(false);
+        var targetContent = File.Exists(targetServicesPropsPath)
+            ? await File.ReadAllTextAsync(targetServicesPropsPath).ConfigureAwait(false)
+            : null;
+
+        var copiedTargetFile = !string.Equals(sourceContent, targetContent, StringComparison.Ordinal);
+        if (copiedTargetFile)
+        {
+            File.Copy(sourceServicesPropsPath, targetServicesPropsPath, overwrite: true);
+            await GitRunner.RunGitAsync(
+                targetRepoRoot,
+                "add",
+                "--",
+                Path.GetRelativePath(targetRepoRoot, targetServicesPropsPath)).ConfigureAwait(false);
+        }
+
+        var changedFiles = await RewriteRazorServicesPropsReferencesAsync(context).ConfigureAwait(false);
+        if (!copiedTargetFile && changedFiles.Count == 0)
+            return "No Razor Services.props copy or reference rewrites were needed.";
+
+        var actions = new List<string>();
+        if (copiedTargetFile)
+            actions.Add($@"Copied Razor eng\targets\Services.props to '{Path.GetRelativePath(targetRepoRoot, targetServicesPropsPath)}'.");
+        if (changedFiles.Count > 0)
+            actions.Add($"Updated Razor Services.props references in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.");
+
+        return string.Join(" ", actions);
+    }
+
+    private static async Task<string> RemoveCommonTargetsImportAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         var changedFiles = new List<string>();
 
         foreach (var path in EnumerateMsBuildFiles(targetRoot))
@@ -116,8 +164,10 @@ internal static class PostMergeCleanupRunner
             : $@"Removed Razor imports of $(RepositoryEngineeringDir)targets\Common.targets from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
-    private static async Task<string> RewriteDirectoryBuildImportsAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> RewriteDirectoryBuildImportsAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         var changedFiles = new List<string>();
 
         foreach (var file in DirectoryBuildImportFiles)
@@ -140,8 +190,10 @@ internal static class PostMergeCleanupRunner
             : $"Rewrote Razor Directory.Build imports in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
-    private static async Task<string> RewriteDirectoryPackagesPropsAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> RewriteDirectoryPackagesPropsAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         var razorPackagesPath = Path.Combine(targetRoot, "Directory.Packages.props");
         if (!File.Exists(razorPackagesPath))
             return "No Razor Directory.Packages.props file was found.";
@@ -199,8 +251,10 @@ internal static class PostMergeCleanupRunner
             $"and removed {duplicatePackageVersions.Count} duplicate PackageVersion item(s).";
     }
 
-    private static async Task<string> NormalizeObjectPoolPackageVersionAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> NormalizeObjectPoolPackageVersionAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         var razorPackagesPath = Path.Combine(targetRoot, "Directory.Packages.props");
         if (!File.Exists(razorPackagesPath))
             return "No Razor Directory.Packages.props file was found for ObjectPool version normalization.";
@@ -235,8 +289,10 @@ internal static class PostMergeCleanupRunner
             $"in '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use $(_MicrosoftExtensionsPackageVersion).";
     }
 
-    private static async Task<string> NormalizeSdkRazorPackageVersionAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> NormalizeSdkRazorPackageVersionAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         var razorPackagesPath = Path.Combine(targetRoot, "Directory.Packages.props");
         if (!File.Exists(razorPackagesPath))
             return "No Razor Directory.Packages.props file was found for Microsoft.NET.Sdk.Razor version normalization.";
@@ -271,8 +327,10 @@ internal static class PostMergeCleanupRunner
             $"in '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use {RazorSdkPackageVersion}.";
     }
 
-    private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         var changedFiles = new List<string>();
         var removedReferenceCount = 0;
 
@@ -307,8 +365,10 @@ internal static class PostMergeCleanupRunner
             : $"Removed {removedReferenceCount} Roslyn.Diagnostics.Analyzers reference(s) from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
-    private static async Task<string> RemoveXunitExecutionPackageReferencesAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> RemoveXunitExecutionPackageReferencesAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         var changedFiles = new List<string>();
         var removedReferenceCount = 0;
 
@@ -343,8 +403,10 @@ internal static class PostMergeCleanupRunner
             : $"Removed {removedReferenceCount} explicit xunit.extensibility.execution reference(s) from {changedFiles.Count} Razor project(s): {string.Join(", ", changedFiles)}.";
     }
 
-    private static async Task<string> RemoveProjectSystemSdkPackageReferencesAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> RemoveProjectSystemSdkPackageReferencesAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         if (!Directory.Exists(targetRoot))
             return "No Razor target tree was found for ProjectSystem.SDK cleanup.";
 
@@ -409,8 +471,10 @@ internal static class PostMergeCleanupRunner
             : $"Removed {removedEntryCount} Razor Microsoft.VisualStudio.ProjectSystem.SDK entr{(removedEntryCount == 1 ? "y" : "ies")} from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
-    private static async Task<string> RemoveXunitVersionOverridesAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> RemoveXunitVersionOverridesAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         if (!Directory.Exists(targetRoot))
             return "No Razor target tree was found for xUnit version override cleanup.";
 
@@ -444,8 +508,10 @@ internal static class PostMergeCleanupRunner
             : $"Removed {removedOverrideCount} Razor xUnit VersionOverride attribute(s) from {changedFiles.Count} project(s): {string.Join(", ", changedFiles)}.";
     }
 
-    private static async Task<string> ConvertRoslynPackageReferencesAsync(string targetRepoRoot, string targetRoot)
+    private static async Task<string> ConvertRoslynPackageReferencesAsync(StageContext context)
     {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
         var roslynProjectMap = await BuildRoslynProjectMapAsync(targetRepoRoot, targetRoot).ConfigureAwait(false);
         if (roslynProjectMap.Count == 0)
             return "No Roslyn package references were found to convert.";
@@ -468,6 +534,26 @@ internal static class PostMergeCleanupRunner
             : $"Converted {convertedReferenceCount} Roslyn package reference(s) to project references in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<List<string>> RewriteRazorServicesPropsReferencesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        foreach (var path in EnumerateRazorServicesReferenceFiles(targetRoot))
+        {
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = RewriteRazorServicesPropsReferenceContent(originalContent);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await File.WriteAllTextAsync(path, updatedContent).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles;
+    }
+
     private static IEnumerable<string> EnumerateMsBuildFiles(string root)
         => Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories)
             .Where(static path =>
@@ -475,6 +561,31 @@ internal static class PostMergeCleanupRunner
                 path.EndsWith(".targets", StringComparison.OrdinalIgnoreCase) ||
                 path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
                 path.EndsWith(".vbproj", StringComparison.OrdinalIgnoreCase));
+
+    private static IEnumerable<string> EnumerateRazorServicesReferenceFiles(string root)
+        => Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories)
+            .Where(static path =>
+                path.EndsWith(".props", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".targets", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".vbproj", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase));
+
+    private static string RewriteRazorServicesPropsReferenceContent(string content)
+    {
+        var updatedContent = RepositoryEngineeringServicesPropsPattern.Replace(
+            content,
+            "$(RepositoryEngineeringDir)targets\\RazorServices.props");
+        updatedContent = EngTargetsServicesPropsPattern.Replace(
+            updatedContent,
+            match => $"eng{match.Groups["separator"].Value}targets{match.Groups["separator"].Value}RazorServices.props");
+        updatedContent = PathCombineServicesPropsPattern.Replace(
+            updatedContent,
+            "\"eng\", \"targets\", \"RazorServices.props\"");
+
+        return updatedContent;
+    }
 
     private static async Task<Dictionary<string, string>> BuildRoslynProjectMapAsync(string targetRepoRoot, string targetRoot)
     {
@@ -764,6 +875,18 @@ internal static class PostMergeCleanupRunner
         @"^[ \t]*<Import\s+Project=""\$\(RepositoryEngineeringDir\)targets(?:\\|/)Common\.targets""\s*/>\r?\n?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
+    private static readonly Regex RepositoryEngineeringServicesPropsPattern = new(
+        Regex.Escape("$(RepositoryEngineeringDir)") + @"targets(?:\\|/)Services\.props",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex EngTargetsServicesPropsPattern = new(
+        @"eng(?<separator>[\\/])targets\k<separator>Services\.props",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex PathCombineServicesPropsPattern = new(
+        @"""eng""\s*,\s*""targets""\s*,\s*""Services\.props""",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
         RegexOptions.CultureInvariant);
@@ -792,7 +915,7 @@ internal static class PostMergeCleanupRunner
         string Name,
         string Description,
         string CommitMessage,
-        Func<string, string, Task<string>> ExecuteAsync);
+        Func<StageContext, Task<string>> ExecuteAsync);
 
     private sealed record ProjectCandidate(string Path, string ProjectFileName, string? ExplicitPackageId);
 

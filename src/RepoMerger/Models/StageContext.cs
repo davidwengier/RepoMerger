@@ -5,4 +5,10 @@ internal readonly record struct StageContext(
     string ToolRoot,
     string TargetRepoRoot,
     string RunDirectory,
-    RunState State);
+    RunState State)
+{
+    public string TargetRoot
+        => PathHelper.GetAbsolutePath(
+            TargetRepoRoot,
+            PathHelper.NormalizeRelativeTargetPath(Settings.TargetPath, "Stage execution"));
+}
