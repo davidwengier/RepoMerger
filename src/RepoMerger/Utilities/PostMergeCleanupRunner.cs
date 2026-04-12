@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
@@ -17,6 +19,11 @@ internal static class PostMergeCleanupRunner
             "Copy Razor's Services.props into the target eng folder and rewrite Razor references to it.",
             "Copy Razor Services.props into Roslyn eng",
             CopyRazorServicesPropsAsync),
+        new(
+            "merge-msbuild-sdks",
+            "Merge missing Razor msbuild-sdks entries from source global.json into the target repo global.json.",
+            "Merge Razor msbuild-sdks into global.json",
+            MergeMsbuildSdksAsync),
         new(
             "rewrite-brokered-services-pkgdef",
             "Rewrite Razor's brokered services pkgdef integration to use Roslyn's existing GeneratePkgDef support.",
@@ -145,6 +152,48 @@ internal static class PostMergeCleanupRunner
             actions.Add($"Updated Razor Services.props references in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.");
 
         return string.Join(" ", actions);
+    }
+
+    private static async Task<string> MergeMsbuildSdksAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var sourceGlobalJsonPath = Path.Combine(context.State.SourceCloneDirectory, "global.json");
+        if (!File.Exists(sourceGlobalJsonPath))
+            return "No Razor global.json file was found for msbuild-sdks merge.";
+
+        var targetGlobalJsonPath = Path.Combine(targetRepoRoot, "global.json");
+        if (!File.Exists(targetGlobalJsonPath))
+            return "No repo-root global.json file was found for msbuild-sdks merge.";
+
+        var sourceGlobalJson = await LoadJsonObjectAsync(sourceGlobalJsonPath).ConfigureAwait(false);
+        var sourceMsbuildSdks = sourceGlobalJson["msbuild-sdks"] as JsonObject;
+        if (sourceMsbuildSdks is null || sourceMsbuildSdks.Count == 0)
+            return "No Razor msbuild-sdks entries were found in source global.json.";
+
+        var targetGlobalJson = await LoadJsonObjectAsync(targetGlobalJsonPath).ConfigureAwait(false);
+        if (targetGlobalJson["msbuild-sdks"] is not JsonObject targetMsbuildSdks)
+        {
+            targetMsbuildSdks = [];
+            targetGlobalJson["msbuild-sdks"] = targetMsbuildSdks;
+        }
+
+        var addedSdkEntries = new List<string>();
+        foreach (var sdkEntry in sourceMsbuildSdks)
+        {
+            if (targetMsbuildSdks.ContainsKey(sdkEntry.Key))
+                continue;
+
+            targetMsbuildSdks[sdkEntry.Key] = sdkEntry.Value?.DeepClone();
+            addedSdkEntries.Add($"{sdkEntry.Key}={sdkEntry.Value?.ToJsonString() ?? "null"}");
+        }
+
+        if (addedSdkEntries.Count == 0)
+            return "No missing Razor msbuild-sdks entries were found to merge into global.json.";
+
+        await SaveJsonAsync(targetGlobalJson, targetGlobalJsonPath).ConfigureAwait(false);
+        return
+            $"Added {addedSdkEntries.Count} missing Razor msbuild-sdks entr{(addedSdkEntries.Count == 1 ? "y" : "ies")} " +
+            $"to '{Path.GetRelativePath(targetRepoRoot, targetGlobalJsonPath)}': {string.Join(", ", addedSdkEntries)}.";
     }
 
     private static async Task<string> RemoveCommonTargetsImportAsync(StageContext context)
@@ -900,6 +949,19 @@ internal static class PostMergeCleanupRunner
     {
         await using var stream = File.Create(path);
         await document.SaveAsync(stream, SaveOptions.None, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private static async Task<JsonObject> LoadJsonObjectAsync(string path)
+    {
+        var content = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+        return JsonNode.Parse(content) as JsonObject
+            ?? throw new InvalidOperationException($"The file '{path}' does not contain a root JSON object.");
+    }
+
+    private static async Task SaveJsonAsync(JsonObject jsonObject, string path)
+    {
+        var content = jsonObject.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine;
+        await File.WriteAllTextAsync(path, content).ConfigureAwait(false);
     }
 
     private static readonly Regex CommonTargetsImportPattern = new(
