@@ -36,7 +36,7 @@ Avoid fixing the issue by changing Roslyn's central infrastructure unless the us
 1. Run `build.cmd -restore` in `D:\Code\repo-merge-work\razor\target`.
 2. Choose **one** warning or error to address.
 3. Identify the root cause by searching under `src\Razor` and comparing it to Roslyn's root-level build/test/package infrastructure.
-4. Implement the fix in `src\RepoMerger\Utilities\PostMergeCleanupRunner.cs` as a new or updated post-merge cleanup step.
+4. Implement the fix in `Utilities\PostMergeCleanupRunner.cs` as a new or updated post-merge cleanup step.
 5. Keep the cleanup:
    - idempotent
    - focused on a single root cause
@@ -50,7 +50,7 @@ Avoid fixing the issue by changing Roslyn's central infrastructure unless the us
 7. Apply the cleanup against the existing worktree:
 
    ```powershell
-   dotnet run --project src\RepoMerger\RepoMerger.csproj -- --run-name razor --post-merge-cleanup-only
+   dotnet run -- --run-name razor --post-merge-cleanup-only
    ```
 
 8. Re-run:
