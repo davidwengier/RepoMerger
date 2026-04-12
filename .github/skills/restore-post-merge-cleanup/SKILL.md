@@ -1,16 +1,16 @@
 ---
 name: restore-post-merge-cleanup
-description: Investigate one restore warning or error in the merged Razor worktree and fix it by adding a post-merge cleanup step in RepoMerger. Use this when asked to debug restore.cmd issues after merging src\Razor into Roslyn.
+description: Investigate one restore warning or error in the merged Razor worktree and fix it by adding a post-merge cleanup step in RepoMerger. Use this when asked to debug build.cmd -restore issues after merging src\Razor into Roslyn.
 ---
 
 Use this skill for the recurring Razor-on-Roslyn cleanup loop:
 
-- run `restore.cmd`
+- run `build.cmd -restore`
 - pick one warning or error
 - find the Razor-specific cause
 - add a post-merge cleanup step in RepoMerger
 - rerun restore to validate the issue is gone
-- commit the cleanup with a rationale
+- ensure the rationale is attached to the Roslyn cleanup commit, not the RepoMerger repo commit
 
 Unless the user says otherwise, use the existing merged worktree here:
 
@@ -33,7 +33,7 @@ Avoid fixing the issue by changing Roslyn's central infrastructure unless the us
 
 ## Workflow
 
-1. Run `restore.cmd` in `D:\Code\repo-merge-work\razor\target`.
+1. Run `build.cmd -restore` in `D:\Code\repo-merge-work\razor\target`.
 2. Choose **one** warning or error to address.
 3. Identify the root cause by searching under `src\Razor` and comparing it to Roslyn's root-level build/test/package infrastructure.
 4. Implement the fix in `src\RepoMerger\Utilities\PostMergeCleanupRunner.cs` as a new or updated post-merge cleanup step.
@@ -56,7 +56,7 @@ Avoid fixing the issue by changing Roslyn's central infrastructure unless the us
 8. Re-run:
 
    ```powershell
-   .\restore.cmd
+   .\build.cmd -restore
    ```
 
    Confirm that the specific issue you chose is gone or that restore has moved on to the next issue in the queue.
@@ -65,10 +65,12 @@ Avoid fixing the issue by changing Roslyn's central infrastructure unless the us
 
 ## Commit message guidance
 
-The commit body should explain **why** the cleanup is correct in Roslyn, for example:
+If the cleanup produces or requires a commit in the **Roslyn target worktree**, that commit body should explain **why** the cleanup is correct in Roslyn, for example:
 
 - `Razor doesn't need to specify xunit.extensibility.execution because Roslyn already adds it in eng\targets\XUnit.targets.`
 - `Razor should use Roslyn's shared Microsoft.Extensions versioning instead of carrying its own ObjectPool version entry.`
+
+If you also commit the RepoMerger change in **this** repository, keep that commit focused on the tool change itself. Do not put the Roslyn-specific rationale body on the RepoMerger repo commit unless the user explicitly asks for that.
 
 ## Final response
 
@@ -77,6 +79,6 @@ Summarize:
 - the warning or error you selected
 - the root cause
 - the cleanup step you implemented
-- the result of re-running `restore.cmd`
+- the result of re-running `build.cmd -restore`
 
 Stop after that summary.
