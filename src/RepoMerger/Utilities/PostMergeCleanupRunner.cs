@@ -18,6 +18,11 @@ internal static class PostMergeCleanupRunner
             "Copy Razor Services.props into Roslyn eng",
             CopyRazorServicesPropsAsync),
         new(
+            "rewrite-brokered-services-pkgdef",
+            "Rewrite Razor's brokered services pkgdef integration to use Roslyn's existing GeneratePkgDef support.",
+            "Rewrite Razor brokered services pkgdef imports",
+            RewriteBrokeredServicesPkgDefAsync),
+        new(
             "rewrite-directory-build-imports",
             "Rewrite Razor Directory.Build.props/targets to import the repo-root Directory.Build files.",
             "Rewrite Razor Directory.Build imports",
@@ -162,6 +167,32 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? @"No Razor imports of $(RepositoryEngineeringDir)targets\Common.targets were found."
             : $@"Removed Razor imports of $(RepositoryEngineeringDir)targets\Common.targets from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> RewriteBrokeredServicesPkgDefAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        foreach (var path in Directory.EnumerateFiles(targetRoot, "*.targets", SearchOption.AllDirectories))
+        {
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = BrokeredServicesBeforeTargetsPattern.Replace(
+                originalContent,
+                @"BeforeTargets=""GeneratePkgDef""");
+            updatedContent = BrokeredServicesImportPattern.Replace(updatedContent, string.Empty);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await File.WriteAllTextAsync(path, updatedContent).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor brokered services pkgdef rewrites were needed."
+            : $"Updated Razor brokered services pkgdef integration in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RewriteDirectoryBuildImportsAsync(StageContext context)
@@ -886,6 +917,14 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex PathCombineServicesPropsPattern = new(
         @"""eng""\s*,\s*""targets""\s*,\s*""Services\.props""",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex BrokeredServicesBeforeTargetsPattern = new(
+        @"BeforeTargets=""GenerateBrokeredServicesPkgDef""",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex BrokeredServicesImportPattern = new(
+        @"^[ \t]*<Import\s+Project=""\$\(RepositoryEngineeringDir\)targets(?:\\|/)GenerateBrokeredServicesPkgDef\.targets""\s*/>\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
