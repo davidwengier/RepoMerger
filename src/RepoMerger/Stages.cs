@@ -146,7 +146,7 @@ internal static class Stages
         {
             return
                 $"Dry run: would run the repository handler against '{context.State.SourceCloneDirectory}' " +
-                "and snapshot the source solution if present.";
+                "before continuing with merge preparation.";
         }
 
         if (!Directory.Exists(context.State.SourceCloneDirectory))
@@ -172,7 +172,6 @@ internal static class Stages
         }
 
         var summary = await RepositoryPreparer.RunAsync(context).ConfigureAwait(false);
-        await SnapshotSourceSolutionAsync(context).ConfigureAwait(false);
         context.State.SourceHeadCommit = await GitRunner.GetHeadCommitAsync(context.State.SourceCloneDirectory).ConfigureAwait(false);
         return $"{summary} Prepared source HEAD is '{context.State.SourceHeadCommit}'.";
     }
@@ -190,7 +189,6 @@ internal static class Stages
                 $"from '{context.State.SourceCloneDirectory}' that retains only history for '{targetRelativePath}'.";
         }
 
-        await SnapshotSourceSolutionAsync(context).ConfigureAwait(false);
         var summary = await SourceHistoryFilter.CreateFilteredCloneAsync(
             context.State.SourceCloneDirectory,
             context.State.FilteredSourceCloneDirectory,
@@ -226,7 +224,10 @@ internal static class Stages
                 "Run the clone-target stage first.");
         }
 
-        var sourceSolutionContent = await LoadSourceSolutionContentAsync(context).ConfigureAwait(false);
+        var sourceSolutionPath = GetSourceSolutionPath(context.State.SourceCloneDirectory);
+        var sourceSolutionContent = sourceSolutionPath is null
+            ? string.Empty
+            : await File.ReadAllTextAsync(sourceSolutionPath).ConfigureAwait(false);
 
         var filterSummary = context.Settings.SkipHistoryFilter
             ? "Skipped history filtering (--skip-history-filter)."
@@ -414,29 +415,6 @@ internal static class Stages
     private static string GetTargetMergeBranchName(string runName)
         => $"repo-merge/{runName}";
 
-    private static async Task SnapshotSourceSolutionAsync(StageContext context)
-    {
-        var sourceSolutionPath = GetSourceSolutionPath(context.State.SourceCloneDirectory);
-        if (sourceSolutionPath is null)
-            return;
-
-        var snapshotPath = GetSourceSolutionSnapshotPath(context.RunDirectory);
-        var sourceSolutionContent = await File.ReadAllTextAsync(sourceSolutionPath).ConfigureAwait(false);
-        await File.WriteAllTextAsync(snapshotPath, sourceSolutionContent).ConfigureAwait(false);
-    }
-
-    private static async Task<string> LoadSourceSolutionContentAsync(StageContext context)
-    {
-        var sourceSolutionPath = GetSourceSolutionPath(context.State.SourceCloneDirectory);
-        if (sourceSolutionPath is not null)
-            return await File.ReadAllTextAsync(sourceSolutionPath).ConfigureAwait(false);
-
-        var snapshotPath = GetSourceSolutionSnapshotPath(context.RunDirectory);
-        return File.Exists(snapshotPath)
-            ? await File.ReadAllTextAsync(snapshotPath).ConfigureAwait(false)
-            : string.Empty;
-    }
-
     private static async Task<string> SyncTargetSolutionAsync(StageContext context, string sourceSolutionContent)
     {
         var targetSolutionPath = Directory.GetFiles(context.TargetRepoRoot, "*.slnx", SearchOption.TopDirectoryOnly)
@@ -458,7 +436,4 @@ internal static class Stages
             .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault();
     }
-
-    private static string GetSourceSolutionSnapshotPath(string runDirectory)
-        => Path.Combine(runDirectory, "source-solution.slnx");
 }
