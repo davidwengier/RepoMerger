@@ -1,6 +1,6 @@
 ---
-name: restore-post-merge-cleanup
-description: Investigate one restore warning or error in the merged Razor worktree and fix it by adding a post-merge cleanup step in RepoMerger. Use this when asked to debug build.cmd -restore issues after merging src\Razor into Roslyn.
+name: post-merge-cleanup
+description: Investigate one build warning or error in the merged Razor worktree and fix it by adding a post-merge cleanup step in RepoMerger. Use this when asked to debug build.cmd -restore issues after merging src\Razor into Roslyn.
 ---
 
 Use this skill for the recurring Razor-on-Roslyn cleanup loop:
