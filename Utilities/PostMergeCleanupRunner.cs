@@ -41,9 +41,9 @@ internal static class PostMergeCleanupRunner
             RewriteDirectoryBuildImportsAsync),
         new(
             "remove-duplicate-globalconfig-imports",
-            "Remove Razor-local Common/Shipping/NonShipping globalconfig imports that Roslyn already adds centrally.",
+            "Remove Razor-local Common/Shipping/NonShipping globalconfig imports and their stale comments when they re-import Roslyn's shared files.",
             "Remove Razor duplicate globalconfig imports",
-            "Roslyn already imports the shared Common, Shipping, and NonShipping global analyzer configs through eng\\targets\\Imports.targets, so Razor should not add the same EditorConfigFiles entries again in the merged tree.",
+            "After the merge, those Razor Directory.Build.targets entries point at Roslyn's shared eng\\config\\globalconfigs files and end up importing the same global analyzer configs twice, so they should be removed surgically without disturbing the rest of the file.",
             RemoveDuplicateGlobalConfigImportsAsync),
         new(
             "rewrite-directory-packages-props",
@@ -300,28 +300,19 @@ internal static class PostMergeCleanupRunner
         if (!File.Exists(directoryBuildTargetsPath))
             return "No Razor Directory.Build.targets file was found for duplicate globalconfig cleanup.";
 
-        var document = await LoadXmlAsync(directoryBuildTargetsPath, preserveWhitespace: true).ConfigureAwait(false);
-        var duplicateImports = document
-            .Descendants()
-            .Where(static element => element.Name.LocalName == "EditorConfigFiles")
-            .Where(IsDuplicateGlobalConfigImport)
-            .ToList();
+        var originalContent = await File.ReadAllTextAsync(directoryBuildTargetsPath).ConfigureAwait(false);
+        var removedCount =
+            CommonGlobalConfigImportBlockPattern.Matches(originalContent).Count +
+            ShippingGlobalConfigImportBlockPattern.Matches(originalContent).Count +
+            NonShippingGlobalConfigImportBlockPattern.Matches(originalContent).Count;
 
-        if (duplicateImports.Count == 0)
+        if (removedCount == 0)
             return "No duplicate Razor globalconfig imports were found.";
 
-        foreach (var duplicateImport in duplicateImports)
-            duplicateImport.Remove();
-
-        foreach (var itemGroup in document.Descendants().Where(static element => element.Name.LocalName == "ItemGroup").ToList())
-        {
-            if (!itemGroup.Elements().Any())
-                itemGroup.Remove();
-        }
-
-        await SaveXmlAsync(document, directoryBuildTargetsPath).ConfigureAwait(false);
+        var updatedContent = RemoveDuplicateGlobalConfigImportContent(originalContent);
+        await File.WriteAllTextAsync(directoryBuildTargetsPath, updatedContent).ConfigureAwait(false);
         return
-            $"Removed {duplicateImports.Count} duplicate Razor globalconfig import entr{(duplicateImports.Count == 1 ? "y" : "ies")} " +
+            $"Removed {removedCount} duplicate Razor globalconfig import entr{(removedCount == 1 ? "y" : "ies")} " +
             $"from '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}'.";
     }
 
@@ -861,16 +852,18 @@ internal static class PostMergeCleanupRunner
         => element.Name.LocalName == "Import"
             && (element.Attribute("Project")?.Value?.Contains("GetPathOfFileAbove('Directory.Packages.props'", StringComparison.Ordinal) ?? false);
 
-    private static bool IsDuplicateGlobalConfigImport(XElement element)
-        => element.Attribute("Include")?.Value?.Trim() is string include
-            && (string.Equals(include, @"$(RepositoryEngineeringDir)config\globalconfigs\Common.globalconfig", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(include, @"$(RepositoryEngineeringDir)config\globalconfigs\Shipping.globalconfig", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(include, @"$(RepositoryEngineeringDir)config\globalconfigs\NonShipping.globalconfig", StringComparison.OrdinalIgnoreCase));
-
     private static XElement CreateRootDirectoryImport(XNamespace xmlNamespace, string fileName)
         => new(
             xmlNamespace + "Import",
             new XAttribute("Project", $@"$([MSBuild]::GetPathOfFileAbove('{fileName}', '$(MSBuildThisFileDirectory)../'))"));
+
+    private static string RemoveDuplicateGlobalConfigImportContent(string content)
+    {
+        var updatedContent = CommonGlobalConfigImportBlockPattern.Replace(content, string.Empty);
+        updatedContent = ShippingGlobalConfigImportBlockPattern.Replace(updatedContent, string.Empty);
+        updatedContent = NonShippingGlobalConfigImportBlockPattern.Replace(updatedContent, string.Empty);
+        return updatedContent;
+    }
 
     private static string RewriteDirectoryBuildImportContent(string content, DirectoryBuildImportFile file)
     {
@@ -1047,6 +1040,18 @@ internal static class PostMergeCleanupRunner
 
     private static readonly Regex BrokeredServicesImportPattern = new(
         @"^[ \t]*<Import\s+Project=""\$\(RepositoryEngineeringDir\)targets(?:\\|/)GenerateBrokeredServicesPkgDef\.targets""\s*/>\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex CommonGlobalConfigImportBlockPattern = new(
+        @"^[ \t]*<!-- Always include Common\.globalconfig -->\r?\n[ \t]*<EditorConfigFiles Include=""\$\(RepositoryEngineeringDir\)config\\globalconfigs\\Common\.globalconfig""\s*/>\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex ShippingGlobalConfigImportBlockPattern = new(
+        @"^[ \t]*<!-- Include Shipping\.globalconfig for shipping projects -->\r?\n[ \t]*<EditorConfigFiles Condition=""'\$\(IsShipping\)' == 'true'"" Include=""\$\(RepositoryEngineeringDir\)config\\globalconfigs\\Shipping\.globalconfig""\s*/>\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex NonShippingGlobalConfigImportBlockPattern = new(
+        @"^[ \t]*<!-- Include NonShipping\.globalconfig for non-shipping projects, except for API shims -->\r?\n[ \t]*<EditorConfigFiles Condition=""'\$\(IsShipping\)' != 'true' AND '\$\(IsApiShim\)' != 'true'"" Include=""\$\(RepositoryEngineeringDir\)config\\globalconfigs\\NonShipping\.globalconfig""\s*/>\r?\n?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex ProjectOpenPattern = new(
