@@ -40,6 +40,12 @@ internal static class PostMergeCleanupRunner
             "Once Razor is nested under src\\Razor, its Directory.Build files should import the repo-root Directory.Build files so the merged tree inherits Roslyn's central build behavior.",
             RewriteDirectoryBuildImportsAsync),
         new(
+            "remove-duplicate-globalconfig-imports",
+            "Remove Razor-local Common/Shipping/NonShipping globalconfig imports that Roslyn already adds centrally.",
+            "Remove Razor duplicate globalconfig imports",
+            "Roslyn already imports the shared Common, Shipping, and NonShipping global analyzer configs through eng\\targets\\Imports.targets, so Razor should not add the same EditorConfigFiles entries again in the merged tree.",
+            RemoveDuplicateGlobalConfigImportsAsync),
+        new(
             "rewrite-directory-packages-props",
             "Rewrite Razor Directory.Packages.props to import the repo-root file and remove duplicate package versions.",
             "Rewrite Razor Directory.Packages.props",
@@ -284,6 +290,39 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor Directory.Build import rewrites were needed."
             : $"Rewrote Razor Directory.Build imports in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> RemoveDuplicateGlobalConfigImportsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var directoryBuildTargetsPath = Path.Combine(targetRoot, "Directory.Build.targets");
+        if (!File.Exists(directoryBuildTargetsPath))
+            return "No Razor Directory.Build.targets file was found for duplicate globalconfig cleanup.";
+
+        var document = await LoadXmlAsync(directoryBuildTargetsPath, preserveWhitespace: true).ConfigureAwait(false);
+        var duplicateImports = document
+            .Descendants()
+            .Where(static element => element.Name.LocalName == "EditorConfigFiles")
+            .Where(IsDuplicateGlobalConfigImport)
+            .ToList();
+
+        if (duplicateImports.Count == 0)
+            return "No duplicate Razor globalconfig imports were found.";
+
+        foreach (var duplicateImport in duplicateImports)
+            duplicateImport.Remove();
+
+        foreach (var itemGroup in document.Descendants().Where(static element => element.Name.LocalName == "ItemGroup").ToList())
+        {
+            if (!itemGroup.Elements().Any())
+                itemGroup.Remove();
+        }
+
+        await SaveXmlAsync(document, directoryBuildTargetsPath).ConfigureAwait(false);
+        return
+            $"Removed {duplicateImports.Count} duplicate Razor globalconfig import entr{(duplicateImports.Count == 1 ? "y" : "ies")} " +
+            $"from '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}'.";
     }
 
     private static async Task<string> RewriteDirectoryPackagesPropsAsync(StageContext context)
@@ -821,6 +860,12 @@ internal static class PostMergeCleanupRunner
     private static bool IsRootDirectoryPackagesImport(XElement element)
         => element.Name.LocalName == "Import"
             && (element.Attribute("Project")?.Value?.Contains("GetPathOfFileAbove('Directory.Packages.props'", StringComparison.Ordinal) ?? false);
+
+    private static bool IsDuplicateGlobalConfigImport(XElement element)
+        => element.Attribute("Include")?.Value?.Trim() is string include
+            && (string.Equals(include, @"$(RepositoryEngineeringDir)config\globalconfigs\Common.globalconfig", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(include, @"$(RepositoryEngineeringDir)config\globalconfigs\Shipping.globalconfig", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(include, @"$(RepositoryEngineeringDir)config\globalconfigs\NonShipping.globalconfig", StringComparison.OrdinalIgnoreCase));
 
     private static XElement CreateRootDirectoryImport(XNamespace xmlNamespace, string fileName)
         => new(
