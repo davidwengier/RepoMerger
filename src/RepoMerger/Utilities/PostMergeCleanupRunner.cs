@@ -13,66 +13,79 @@ internal static class PostMergeCleanupRunner
             "remove-common-targets-import",
             @"Remove Razor imports of $(RepositoryEngineeringDir)targets\Common.targets.",
             "Remove Razor Common.targets import",
+            @"Razor should rely on Roslyn's shared repository engineering targets instead of carrying an extra Common.targets import in the merged tree.",
             RemoveCommonTargetsImportAsync),
         new(
             "copy-razor-services-props",
             "Copy Razor's Services.props into the target eng folder and rewrite Razor references to it.",
             "Copy Razor Services.props into Roslyn eng",
+            "Roslyn does not carry Razor's service registrations, so the merged Razor tree needs its own imported Services.props file alongside Roslyn's existing eng\\targets services infrastructure.",
             CopyRazorServicesPropsAsync),
         new(
             "merge-msbuild-sdks",
             "Merge missing Razor msbuild-sdks entries from source global.json into the target repo global.json.",
             "Merge Razor msbuild-sdks into global.json",
+            "Razor uses additional MSBuild SDKs such as Microsoft.Build.NoTargets that are not declared in Roslyn's global.json, so adding only the missing entries allows restore without disturbing Roslyn's existing toolchain versions.",
             MergeMsbuildSdksAsync),
         new(
             "rewrite-brokered-services-pkgdef",
             "Rewrite Razor's brokered services pkgdef integration to use Roslyn's existing GeneratePkgDef support.",
             "Rewrite Razor brokered services pkgdef imports",
+            "Roslyn's GeneratePkgDef.targets already understands PkgDefBrokeredService items, so Razor should integrate with that shared pipeline instead of importing a repository-local target that does not exist in Roslyn.",
             RewriteBrokeredServicesPkgDefAsync),
         new(
             "rewrite-directory-build-imports",
             "Rewrite Razor Directory.Build.props/targets to import the repo-root Directory.Build files.",
             "Rewrite Razor Directory.Build imports",
+            "Once Razor is nested under src\\Razor, its Directory.Build files should import the repo-root Directory.Build files so the merged tree inherits Roslyn's central build behavior.",
             RewriteDirectoryBuildImportsAsync),
         new(
             "rewrite-directory-packages-props",
             "Rewrite Razor Directory.Packages.props to import the repo-root file and remove duplicate package versions.",
             "Rewrite Razor Directory.Packages.props",
+            "Razor should import Roslyn's root Directory.Packages.props and remove duplicate package version declarations so central package management stays authoritative after the merge.",
             RewriteDirectoryPackagesPropsAsync),
         new(
             "normalize-sdk-razor-package-version",
             "Replace Razor's missing Microsoft.NET.Sdk.Razor version property with the source repo's explicit lower-bound package version.",
-            "Normalize Razor Microsoft.NET.Sdk.Razor version\n\nRoslyn does not define $(MicrosoftNETSdkRazorPackageVersion), so the merged Razor Directory.Packages.props should carry the source repo's explicit lower bound for Microsoft.NET.Sdk.Razor instead of restoring without a version.",
+            "Normalize Razor Microsoft.NET.Sdk.Razor version",
+            "Roslyn does not define $(MicrosoftNETSdkRazorPackageVersion), so the merged Razor Directory.Packages.props should carry the source repo's explicit lower bound for Microsoft.NET.Sdk.Razor instead of restoring without a version.",
             NormalizeSdkRazorPackageVersionAsync),
         new(
             "normalize-objectpool-package-version",
             "Rewrite Razor's Microsoft.Extensions.ObjectPool package version to use the shared Microsoft.Extensions version.",
             "Normalize Razor ObjectPool package version",
+            "Razor should use Roslyn's shared Microsoft.Extensions versioning instead of carrying its own ObjectPool package version entry in the merged repository.",
             NormalizeObjectPoolPackageVersionAsync),
         new(
             "remove-roslyn-diagnostics-analyzers",
             "Remove Roslyn.Diagnostics.Analyzers package references from Razor Directory.Build.props files.",
             "Remove Roslyn.Diagnostics.Analyzers refs",
+            "Roslyn already manages Roslyn.Diagnostics.Analyzers centrally, so the merged Razor tree should not add duplicate local analyzer references.",
             RemoveRoslynDiagnosticsAnalyzersAsync),
         new(
             "remove-xunit-execution-package-refs",
             "Remove explicit xunit.extensibility.execution package refs from Razor test projects and defer to Roslyn's XUnit.targets.",
             "Remove Razor xunit.extensibility.execution refs",
+            "Razor does not need to reference xunit.extensibility.execution explicitly because Roslyn already supplies the required xUnit test infrastructure through eng\\targets\\XUnit.targets.",
             RemoveXunitExecutionPackageReferencesAsync),
         new(
             "remove-projectsystem-sdk-package-refs",
             "Remove Razor's Microsoft.VisualStudio.ProjectSystem.SDK package usage and defer to Roslyn's existing ProjectSystem infrastructure.",
-            "Remove Razor ProjectSystem.SDK refs\n\nMicrosoft.VisualStudio.LanguageServices.Razor already checks in its generated ProjectSystem rule files for Core MSBuild, so the merged Roslyn tree does not need Razor's local Microsoft.VisualStudio.ProjectSystem.SDK package or its pinned 17.14.143 version.",
+            "Remove Razor ProjectSystem.SDK refs",
+            "Microsoft.VisualStudio.LanguageServices.Razor already checks in its generated ProjectSystem rule files for Core MSBuild, so the merged Roslyn tree does not need Razor's local Microsoft.VisualStudio.ProjectSystem.SDK package or its pinned 17.14.143 version.",
             RemoveProjectSystemSdkPackageReferencesAsync),
         new(
             "remove-xunit-version-overrides",
             "Remove Razor-local xUnit VersionOverride pins and defer to Roslyn's centrally managed package versions.",
-            "Remove Razor xUnit version overrides\n\nRazor should use Roslyn's centrally managed xUnit package versions instead of overriding xunit.assert and xunit.analyzers locally.",
+            "Remove Razor xUnit version overrides",
+            "Razor should use Roslyn's centrally managed xUnit package versions instead of overriding xunit.assert and xunit.analyzers locally.",
             RemoveXunitVersionOverridesAsync),
         new(
             "convert-roslyn-package-references",
             "Convert Roslyn PackageReference items into ProjectReference items.",
             "Convert Roslyn package references to project references",
+            "Inside the merged Roslyn tree, Razor should reference Roslyn projects directly instead of consuming Roslyn NuGet packages that duplicate the in-repo source.",
             ConvertRoslynPackageReferencesAsync),
     ];
 
@@ -97,7 +110,10 @@ internal static class PostMergeCleanupRunner
         foreach (var step in Steps)
         {
             var stepSummary = await step.ExecuteAsync(context).ConfigureAwait(false);
-            var committed = await GitRunner.CommitTrackedChangesAsync(context.TargetRepoRoot, step.CommitMessage).ConfigureAwait(false);
+            var committed = await GitRunner.CommitTrackedChangesAsync(
+                context.TargetRepoRoot,
+                step.CommitMessage,
+                step.CommitRationale).ConfigureAwait(false);
             if (committed)
             {
                 context.State.TargetHeadCommit = await GitRunner.GetHeadCommitAsync(context.TargetRepoRoot).ConfigureAwait(false);
@@ -1016,6 +1032,7 @@ internal static class PostMergeCleanupRunner
         string Name,
         string Description,
         string CommitMessage,
+        string CommitRationale,
         Func<StageContext, Task<string>> ExecuteAsync);
 
     private sealed record ProjectCandidate(string Path, string ProjectFileName, string? ExplicitPackageId);
