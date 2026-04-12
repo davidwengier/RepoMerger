@@ -26,7 +26,7 @@ internal static class Stages
             PrepareSourceAsync),
         new(
             "filter-source-history",
-            "Rewrite the prepared source history so only the import path remains.",
+            "Create a separate filtered source clone so only the import path remains for merging.",
             FilterSourceHistoryAsync),
         new(
             "merge-into-target",
@@ -106,6 +106,7 @@ internal static class Stages
     {
         Directory.CreateDirectory(context.State.WorkDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(context.State.SourceCloneDirectory)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(context.State.FilteredSourceCloneDirectory)!);
         Directory.CreateDirectory(Path.GetDirectoryName(context.State.TargetRepoRoot)!);
 
         return $"Prepared fresh work area '{context.State.WorkDirectory}'.";
@@ -185,16 +186,17 @@ internal static class Stages
         if (context.Settings.DryRun)
         {
             return
-                $"Dry run: would filter '{context.State.SourceCloneDirectory}' in place " +
-                $"that retains only history for '{targetRelativePath}'.";
+                $"Dry run: would create a filtered clone at '{context.State.FilteredSourceCloneDirectory}' " +
+                $"from '{context.State.SourceCloneDirectory}' that retains only history for '{targetRelativePath}'.";
         }
 
         await SnapshotSourceSolutionAsync(context).ConfigureAwait(false);
-        var summary = await SourceHistoryFilter.FilterInPlaceAsync(
+        var summary = await SourceHistoryFilter.CreateFilteredCloneAsync(
             context.State.SourceCloneDirectory,
+            context.State.FilteredSourceCloneDirectory,
             targetRelativePath).ConfigureAwait(false);
 
-        context.State.SourceHeadCommit = await GitRunner.GetHeadCommitAsync(context.State.SourceCloneDirectory).ConfigureAwait(false);
+        context.State.SourceHeadCommit = await GitRunner.GetHeadCommitAsync(context.State.FilteredSourceCloneDirectory).ConfigureAwait(false);
         return $"{summary} Filtered source HEAD is '{context.State.SourceHeadCommit}'.";
     }
 
@@ -206,7 +208,7 @@ internal static class Stages
         if (context.Settings.DryRun)
         {
             return
-                $"Dry run: would optionally filter the prepared source clone in place for '{targetRelativePath}' " +
+                $"Dry run: would optionally create the filtered source clone for '{targetRelativePath}' " +
                 $"and merge it into '{fullTargetPath}' while preserving surviving file history.";
         }
 
@@ -229,7 +231,9 @@ internal static class Stages
         var filterSummary = context.Settings.SkipHistoryFilter
             ? "Skipped history filtering (--skip-history-filter)."
             : await FilterSourceHistoryAsync(context).ConfigureAwait(false);
-        var sourceRootForMerge = context.State.SourceCloneDirectory;
+        var sourceRootForMerge = context.Settings.SkipHistoryFilter
+            ? context.State.SourceCloneDirectory
+            : context.State.FilteredSourceCloneDirectory;
         var sourceHeadCommit = await GitRunner.GetHeadCommitAsync(sourceRootForMerge).ConfigureAwait(false);
         context.State.SourceHeadCommit = sourceHeadCommit;
 

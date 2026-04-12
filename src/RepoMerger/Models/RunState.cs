@@ -16,6 +16,7 @@ internal sealed class RunState
     public string SourceRemoteUri { get; set; } = string.Empty;
     public string TargetRemoteUri { get; set; } = string.Empty;
     public string SourceCloneDirectory { get; set; } = string.Empty;
+    public string FilteredSourceCloneDirectory { get; set; } = string.Empty;
     public string SourceHeadCommit { get; set; } = string.Empty;
     public string TargetHeadCommit { get; set; } = string.Empty;
     public bool DryRun { get; set; }

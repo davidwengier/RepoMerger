@@ -2,8 +2,9 @@ namespace RepoMerger;
 
 internal static class SourceHistoryFilter
 {
-    public static async Task<string> FilterInPlaceAsync(
+    public static async Task<string> CreateFilteredCloneAsync(
         string sourceCloneDirectory,
+        string filteredCloneDirectory,
         string targetPath)
     {
         var normalizedTargetPath = PathHelper.NormalizeRelativeTargetPath(targetPath, "Source history filtering");
@@ -14,17 +15,41 @@ internal static class SourceHistoryFilter
                 $"The source clone directory '{sourceCloneDirectory}' does not exist or is not a git repository.");
         }
 
-        if (IsFilteredInPlace(sourceCloneDirectory, normalizedTargetPath))
+        var fullSourceCloneDirectory = Path.GetFullPath(sourceCloneDirectory);
+        var fullFilteredCloneDirectory = Path.GetFullPath(filteredCloneDirectory);
+        if (string.Equals(fullSourceCloneDirectory, fullFilteredCloneDirectory, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The filtered source clone directory must be different from the prepared source clone.");
+
+        if (Directory.Exists(filteredCloneDirectory) && IsFilteredInPlace(filteredCloneDirectory, normalizedTargetPath))
         {
-            var existingHeadCommit = await GitRunner.GetHeadCommitAsync(sourceCloneDirectory).ConfigureAwait(false);
-            return $"Source history is already filtered in place under '{normalizedTargetPath}' (HEAD {existingHeadCommit}).";
+            var existingHeadCommit = await GitRunner.GetHeadCommitAsync(filteredCloneDirectory).ConfigureAwait(false);
+            return
+                $"Filtered source clone at '{filteredCloneDirectory}' already contains only '{normalizedTargetPath}' " +
+                $"(HEAD {existingHeadCommit}).";
         }
 
-        var filterTool = await GitRunner.FilterToSubdirectoryAsync(sourceCloneDirectory, normalizedTargetPath).ConfigureAwait(false);
-        await NestFilteredTreeUnderTargetPathAsync(sourceCloneDirectory, normalizedTargetPath).ConfigureAwait(false);
+        if (Directory.Exists(filteredCloneDirectory))
+            Directory.Delete(filteredCloneDirectory, recursive: true);
 
-        var filteredHeadCommit = await GitRunner.GetHeadCommitAsync(sourceCloneDirectory).ConfigureAwait(false);
-        return $"Filtered source history in place under '{normalizedTargetPath}' with {filterTool} (HEAD {filteredHeadCommit}).";
+        var filteredCloneParentDirectory = Path.GetDirectoryName(filteredCloneDirectory);
+        if (string.IsNullOrWhiteSpace(filteredCloneParentDirectory))
+            throw new InvalidOperationException($"Could not determine the parent directory for '{filteredCloneDirectory}'.");
+
+        Directory.CreateDirectory(filteredCloneParentDirectory);
+        await GitRunner.CloneAsync(
+            workingDirectory: filteredCloneParentDirectory,
+            remoteName: "source",
+            remoteUri: sourceCloneDirectory,
+            cloneDirectory: filteredCloneDirectory,
+            noHardlinks: true).ConfigureAwait(false);
+
+        var filterTool = await GitRunner.FilterToSubdirectoryAsync(filteredCloneDirectory, normalizedTargetPath).ConfigureAwait(false);
+        await NestFilteredTreeUnderTargetPathAsync(filteredCloneDirectory, normalizedTargetPath).ConfigureAwait(false);
+
+        var filteredHeadCommit = await GitRunner.GetHeadCommitAsync(filteredCloneDirectory).ConfigureAwait(false);
+        return
+            $"Created filtered source clone at '{filteredCloneDirectory}' under '{normalizedTargetPath}' " +
+            $"with {filterTool} (HEAD {filteredHeadCommit}).";
     }
 
     private static async Task NestFilteredTreeUnderTargetPathAsync(string repositoryDirectory, string targetRelativePath)
