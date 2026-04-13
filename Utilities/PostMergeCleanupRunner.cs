@@ -84,9 +84,9 @@ internal static class PostMergeCleanupRunner
             NormalizeRazorBenchmarkDotNetApisAsync),
         new(
             "normalize-razor-unit-test-detection",
-            "Keep real Razor test projects on Roslyn's xUnit infrastructure while opting the microbenchmark generator helper out of Roslyn's unit-test naming checks.",
+            "Keep real Razor test projects on Roslyn's xUnit infrastructure and normalize their output naming for Roslyn's test runner.",
             "Align Razor test infrastructure with Roslyn",
-            "Razor projects in the merged Roslyn tree should get Roslyn's required test utility references when they participate in xUnit infrastructure, while the microbenchmark generator helper should not be treated as a Roslyn UnitTests assembly.",
+            "Razor test projects in the merged Roslyn tree should get Roslyn's required test utility references and produce *.UnitTests.dll outputs so they match Roslyn's test-runner conventions, while the microbenchmark generator helper should not be treated as a Roslyn UnitTests assembly.",
             NormalizeRazorUnitTestDetectionAsync),
         new(
             "remove-roslyn-diagnostics-analyzers",
@@ -1513,6 +1513,7 @@ internal static class PostMergeCleanupRunner
             "  <PropertyGroup Condition=\"'$(IsUnitTestProject)' == ''\">",
             "    <IsUnitTestProject>false</IsUnitTestProject>",
             "    <IsUnitTestProject Condition=\"$(MSBuildProjectName.EndsWith('.Test'))\">true</IsUnitTestProject>",
+            "    <TargetFileName Condition=\"'$(IsUnitTestProject)' == 'true' AND !$(TargetFileName.EndsWith('.UnitTests.dll'))\">$([System.String]::Copy('$(MSBuildProjectName)').Replace('.Test', '.UnitTests')).dll</TargetFileName>",
             "  </PropertyGroup>",
         ]) + Environment.NewLine;
 
