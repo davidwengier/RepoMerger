@@ -35,6 +35,12 @@ internal static class PostMergeCleanupRunner
             "Roslyn's GeneratePkgDef.targets already understands PkgDefBrokeredService items, so Razor should integrate with that shared pipeline instead of importing a repository-local target that does not exist in Roslyn.",
             RewriteBrokeredServicesPkgDefAsync),
         new(
+            "disable-empty-razorextension-dependencies-pkgdef",
+            "Disable pkgdef generation for Razor's dependencies-only VSIX project when it produces no pkgdef entries.",
+            "Disable empty Razor dependencies pkgdef generation",
+            "Microsoft.VisualStudio.RazorExtension.Dependencies is a deployment helper project and does not contribute any PkgDef items in the merged Roslyn build, so leaving GeneratePkgDefFile enabled only trips Roslyn's shared GeneratePkgDef validation.",
+            DisableEmptyRazorDependenciesPkgDefAsync),
+        new(
             "rewrite-directory-build-imports",
             "Rewrite Razor Directory.Build.props/targets to import the repo-root Directory.Build files.",
             "Rewrite Razor Directory.Build imports",
@@ -265,6 +271,29 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor brokered services pkgdef rewrites were needed."
             : $"Updated Razor brokered services pkgdef integration in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> DisableEmptyRazorDependenciesPkgDefAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var projectPath = Directory
+            .EnumerateFiles(targetRepoRoot, "Microsoft.VisualStudio.RazorExtension.Dependencies.csproj", SearchOption.AllDirectories)
+            .FirstOrDefault();
+
+        if (string.IsNullOrWhiteSpace(projectPath))
+            return "No RazorExtension.Dependencies project was found for pkgdef cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+        var updatedContent = GeneratePkgDefFileTruePattern.Replace(
+            originalContent,
+            "<GeneratePkgDefFile>false</GeneratePkgDefFile>",
+            1);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "RazorExtension.Dependencies pkgdef generation was already disabled or did not need cleanup.";
+
+        await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
+        return $"Disabled empty pkgdef generation in '{Path.GetRelativePath(targetRepoRoot, projectPath)}'.";
     }
 
     private static async Task<string> RewriteDirectoryBuildImportsAsync(StageContext context)
@@ -954,8 +983,6 @@ internal static class PostMergeCleanupRunner
         if (retainedBlocks.Count > 0)
         {
             builder.AppendLine();
-            builder.AppendLine("[*.cs]");
-            builder.AppendLine();
             builder.Append(string.Join($"{Environment.NewLine}{Environment.NewLine}", retainedBlocks));
             builder.AppendLine();
         }
@@ -1228,6 +1255,10 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex GlobalConfigSettingPattern = new(
         @"^\s*(?<key>[^#][^=]*?)\s*=\s*(?<value>.*?)\s*$",
         RegexOptions.CultureInvariant);
+
+    private static readonly Regex GeneratePkgDefFileTruePattern = new(
+        @"<GeneratePkgDefFile>\s*true\s*</GeneratePkgDefFile>",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
