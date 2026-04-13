@@ -621,15 +621,10 @@ internal static class PostMergeCleanupRunner
         if (File.Exists(analyzerTestProjectPath))
         {
             var originalContent = await File.ReadAllTextAsync(analyzerTestProjectPath).ConfigureAwait(false);
-            var updatedContent = originalContent;
-
-            if (!updatedContent.Contains("Microsoft.CodeAnalysis.Test.Utilities.csproj", StringComparison.OrdinalIgnoreCase))
-            {
-                updatedContent = RazorAnalyzerTestingPackageReferencePattern.Replace(
-                    updatedContent,
-                    match => match.Value + @"    <ProjectReference Include=""..\..\..\..\Compilers\Test\Core\Microsoft.CodeAnalysis.Test.Utilities.csproj"" />" + Environment.NewLine,
-                    1);
-            }
+            var updatedContent = EnsureProjectReferenceAfterPackageReference(
+                originalContent,
+                "Microsoft.CodeAnalysis.CSharp.Analyzer.Testing",
+                @"..\..\..\..\Compilers\Test\Core\Microsoft.CodeAnalysis.Test.Utilities.csproj");
 
             if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
             {
@@ -648,27 +643,12 @@ internal static class PostMergeCleanupRunner
         if (File.Exists(microbenchmarkGeneratorProjectPath))
         {
             var originalContent = await File.ReadAllTextAsync(microbenchmarkGeneratorProjectPath).ConfigureAwait(false);
-            var updatedContent = RazorMicrobenchmarkGeneratorTestProjectPattern.Replace(
+            var updatedContent = EnsureProjectReferenceAfterPackageReference(
                 originalContent,
-                "    <IsTestProject>true</IsTestProject>");
-
-            if (!updatedContent.Contains("Microsoft.CodeAnalysis.Test.Utilities.csproj", StringComparison.OrdinalIgnoreCase))
-            {
-                updatedContent = RazorMicrobenchmarkGeneratorSupportPackageReferencePattern.Replace(
-                    updatedContent,
-                    match => match.Value + @"    <ProjectReference Include=""..\..\..\..\..\Compilers\Test\Core\Microsoft.CodeAnalysis.Test.Utilities.csproj"" />" + Environment.NewLine,
-                    1);
-            }
-
-            updatedContent = RazorMicrobenchmarkGeneratorUnitTestPattern.Replace(
-                updatedContent,
-                "    <IsUnitTestProject>false</IsUnitTestProject>");
-            updatedContent = RazorCollapsedIsUnitTestProjectPattern.Replace(
-                updatedContent,
-                "</IsTestProject>" + Environment.NewLine + "    <IsUnitTestProject>");
-            updatedContent = RazorCollapsedGenerateProgramFilePattern.Replace(
-                updatedContent,
-                "</IsUnitTestProject>" + Environment.NewLine + "    <GenerateProgramFile>");
+                "System.Security.Cryptography.Xml",
+                @"..\..\..\..\..\Compilers\Test\Core\Microsoft.CodeAnalysis.Test.Utilities.csproj");
+            updatedContent = SetBooleanPropertyValue(updatedContent, "IsTestProject", true);
+            updatedContent = SetBooleanPropertyValue(updatedContent, "IsUnitTestProject", false);
 
             if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
             {
@@ -1239,6 +1219,38 @@ internal static class PostMergeCleanupRunner
             Directory.Delete(path);
     }
 
+    private static string EnsureProjectReferenceAfterPackageReference(string content, string packageId, string projectReferencePath)
+    {
+        var canonicalProjectReferenceLine = $"    <ProjectReference Include=\"{projectReferencePath}\" />{Environment.NewLine}";
+        var existingProjectReferencePattern = new Regex(
+            $@"^[ \t]*<ProjectReference Include=""{Regex.Escape(projectReferencePath)}""\s*/>[ \t]*\r?\n?",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+        if (existingProjectReferencePattern.IsMatch(content))
+            return existingProjectReferencePattern.Replace(content, canonicalProjectReferenceLine, 1);
+
+        var pattern = new Regex(
+            $@"^(?<indent>[ \t]*)<PackageReference Include=""{Regex.Escape(packageId)}""(?:\s+[^>]*)?/>\r?\n",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+        return pattern.Replace(
+            content,
+            match => $"{match.Value}{canonicalProjectReferenceLine}",
+            1);
+    }
+
+    private static string SetBooleanPropertyValue(string content, string propertyName, bool value)
+    {
+        var pattern = new Regex(
+            $@"^(?<indent>[ \t]*)<{Regex.Escape(propertyName)}>\s*(?:true|false)\s*</{Regex.Escape(propertyName)}>\s*$",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+        return pattern.Replace(
+            content,
+            $"    <{propertyName}>{value.ToString().ToLowerInvariant()}</{propertyName}>",
+            1);
+    }
+
     private static string RewriteRazorGlobalConfigImportContent(string content)
         => GlobalAnalyzerConfigItemGroupPattern.IsMatch(content)
             ? GlobalAnalyzerConfigItemGroupPattern.Replace(content, $"$1{RazorGlobalConfigItemGroupBlock}", 1)
@@ -1477,30 +1489,6 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex RazorUnitTestPropertyGroupPattern = new(
         @"(?:^[ \t]*<!--\r?\n[ \t]*We don't follow Arcade conventions for project naming\.\r?\n[ \t]*-->\r?\n)?^[ \t]*<PropertyGroup Condition=""'\$\(IsUnitTestProject\)' == ''"">\r?\n.*?^[ \t]*</PropertyGroup>\r?\n",
         RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.CultureInvariant);
-
-    private static readonly Regex RazorAnalyzerTestingPackageReferencePattern = new(
-        @"^[ \t]*<PackageReference Include=""Microsoft\.CodeAnalysis\.CSharp\.Analyzer\.Testing""\s*/>\r?\n",
-        RegexOptions.Multiline | RegexOptions.CultureInvariant);
-
-    private static readonly Regex RazorMicrobenchmarkGeneratorTestProjectPattern = new(
-        @"<IsTestProject>\s*(?:true|false)\s*</IsTestProject>",
-        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
-
-    private static readonly Regex RazorMicrobenchmarkGeneratorSupportPackageReferencePattern = new(
-        @"^[ \t]*<PackageReference Include=""System\.Security\.Cryptography\.Xml""\s*/>\r?\n",
-        RegexOptions.Multiline | RegexOptions.CultureInvariant);
-
-    private static readonly Regex RazorMicrobenchmarkGeneratorUnitTestPattern = new(
-        @"<IsUnitTestProject>\s*(?:true|false)\s*</IsUnitTestProject>",
-        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
-
-    private static readonly Regex RazorCollapsedIsUnitTestProjectPattern = new(
-        @"</IsTestProject>[ \t]*<IsUnitTestProject>",
-        RegexOptions.CultureInvariant);
-
-    private static readonly Regex RazorCollapsedGenerateProgramFilePattern = new(
-        @"</IsUnitTestProject>[ \t]*<GenerateProgramFile>",
-        RegexOptions.CultureInvariant);
 
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
