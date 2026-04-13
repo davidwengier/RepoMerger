@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -40,11 +41,11 @@ internal static class PostMergeCleanupRunner
             "Once Razor is nested under src\\Razor, its Directory.Build files should import the repo-root Directory.Build files so the merged tree inherits Roslyn's central build behavior.",
             RewriteDirectoryBuildImportsAsync),
         new(
-            "remove-duplicate-globalconfig-imports",
-            "Remove Razor-local Common/Shipping/NonShipping globalconfig imports and their stale comments when they re-import Roslyn's shared files.",
-            "Remove Razor duplicate globalconfig imports",
-            "After the merge, those Razor Directory.Build.targets entries point at Roslyn's shared eng\\config\\globalconfigs files and end up importing the same global analyzer configs twice, so they should be removed surgically without disturbing the rest of the file.",
-            RemoveDuplicateGlobalConfigImportsAsync),
+            "overlay-razor-globalconfigs",
+            "Copy Razor globalconfigs into src\\Razor and keep only Razor-specific analyzer settings.",
+            "Overlay Razor globalconfigs",
+            "After the merge, Razor should import local copies of its globalconfigs from src\\Razor so Razor-specific analyzer settings are preserved, while trimming entries already supplied by Roslyn avoids duplicate key warnings.",
+            OverlayRazorGlobalConfigsAsync),
         new(
             "rewrite-directory-packages-props",
             "Rewrite Razor Directory.Packages.props to import the repo-root file and remove duplicate package versions.",
@@ -292,28 +293,73 @@ internal static class PostMergeCleanupRunner
             : $"Rewrote Razor Directory.Build imports in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
-    private static async Task<string> RemoveDuplicateGlobalConfigImportsAsync(StageContext context)
+    private static async Task<string> OverlayRazorGlobalConfigsAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
         var targetRoot = context.TargetRoot;
+        var sourceGlobalConfigsRoot = Path.Combine(context.State.SourceCloneDirectory, "eng", "config", "globalconfigs");
         var directoryBuildTargetsPath = Path.Combine(targetRoot, "Directory.Build.targets");
-        if (!File.Exists(directoryBuildTargetsPath))
-            return "No Razor Directory.Build.targets file was found for duplicate globalconfig cleanup.";
+        if (!Directory.Exists(sourceGlobalConfigsRoot))
+            return "No Razor globalconfigs directory was found for overlay cleanup.";
 
-        var originalContent = await File.ReadAllTextAsync(directoryBuildTargetsPath).ConfigureAwait(false);
-        var removedCount =
-            CommonGlobalConfigImportBlockPattern.Matches(originalContent).Count +
-            ShippingGlobalConfigImportBlockPattern.Matches(originalContent).Count +
-            NonShippingGlobalConfigImportBlockPattern.Matches(originalContent).Count;
+        var targetGlobalConfigsRoot = Path.Combine(targetRoot, "eng", "config", "globalconfigs");
+        Directory.CreateDirectory(targetGlobalConfigsRoot);
 
-        if (removedCount == 0)
-            return "No duplicate Razor globalconfig imports were found.";
+        var updatedOverlayFiles = new List<string>();
+        foreach (var fileName in RazorGlobalConfigFileNames)
+        {
+            var sourcePath = Path.Combine(sourceGlobalConfigsRoot, fileName);
+            if (!File.Exists(sourcePath))
+                continue;
 
-        var updatedContent = RemoveDuplicateGlobalConfigImportContent(originalContent);
-        await File.WriteAllTextAsync(directoryBuildTargetsPath, updatedContent).ConfigureAwait(false);
-        return
-            $"Removed {removedCount} duplicate Razor globalconfig import entr{(removedCount == 1 ? "y" : "ies")} " +
-            $"from '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}'.";
+            var roslynPath = Path.Combine(targetRepoRoot, "eng", "config", "globalconfigs", fileName);
+            var overlayContent = await BuildRazorGlobalConfigOverlayContentAsync(sourcePath, roslynPath).ConfigureAwait(false);
+            var targetPath = Path.Combine(targetGlobalConfigsRoot, fileName);
+            var existingContent = File.Exists(targetPath)
+                ? await File.ReadAllTextAsync(targetPath).ConfigureAwait(false)
+                : null;
+
+            if (string.Equals(existingContent, overlayContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(targetPath, overlayContent, templatePath: sourcePath).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(
+                targetRepoRoot,
+                "add",
+                "--",
+                Path.GetRelativePath(targetRepoRoot, targetPath)).ConfigureAwait(false);
+            updatedOverlayFiles.Add(Path.GetRelativePath(targetRepoRoot, targetPath));
+        }
+
+        var importsUpdated = false;
+        if (File.Exists(directoryBuildTargetsPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(directoryBuildTargetsPath).ConfigureAwait(false);
+            var updatedContent = RewriteRazorGlobalConfigImportContent(originalContent);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(directoryBuildTargetsPath, updatedContent, templatePath: directoryBuildTargetsPath).ConfigureAwait(false);
+                importsUpdated = true;
+            }
+        }
+
+        if (updatedOverlayFiles.Count == 0 && !importsUpdated)
+            return "No Razor globalconfig overlay changes were needed.";
+
+        var summaryParts = new List<string>();
+        if (updatedOverlayFiles.Count > 0)
+        {
+            summaryParts.Add(
+                $"Copied or updated {updatedOverlayFiles.Count} Razor-local globalconfig file(s): {string.Join(", ", updatedOverlayFiles)}.");
+        }
+
+        if (importsUpdated)
+        {
+            summaryParts.Add(
+                $"Updated '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}' to import the Razor-local globalconfig overlay.");
+        }
+
+        return string.Join(" ", summaryParts);
     }
 
     private static async Task<string> RewriteDirectoryPackagesPropsAsync(StageContext context)
@@ -857,13 +903,93 @@ internal static class PostMergeCleanupRunner
             xmlNamespace + "Import",
             new XAttribute("Project", $@"$([MSBuild]::GetPathOfFileAbove('{fileName}', '$(MSBuildThisFileDirectory)../'))"));
 
-    private static string RemoveDuplicateGlobalConfigImportContent(string content)
+    private static async Task<string> BuildRazorGlobalConfigOverlayContentAsync(string sourcePath, string roslynPath)
     {
-        var updatedContent = CommonGlobalConfigImportBlockPattern.Replace(content, string.Empty);
-        updatedContent = ShippingGlobalConfigImportBlockPattern.Replace(updatedContent, string.Empty);
-        updatedContent = NonShippingGlobalConfigImportBlockPattern.Replace(updatedContent, string.Empty);
-        return updatedContent;
+        var roslynSettings = await CollectGlobalConfigSettingsAsync(roslynPath).ConfigureAwait(false);
+        var sourceLines = await File.ReadAllLinesAsync(sourcePath).ConfigureAwait(false);
+        var retainedBlocks = new List<string>();
+        var pendingComments = new List<string>();
+
+        foreach (var rawLine in sourceLines)
+        {
+            var line = rawLine.TrimEnd();
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+
+            if (TryParseGlobalConfigSetting(line, out var key, out var value))
+            {
+                if (!roslynSettings.TryGetValue(key, out var roslynValue)
+                    || !string.Equals(value, roslynValue, StringComparison.OrdinalIgnoreCase))
+                {
+                    var blockLines = pendingComments
+                        .Where(static comment => !string.IsNullOrWhiteSpace(comment))
+                        .ToList();
+                    blockLines.Add(line.TrimStart('\uFEFF'));
+                    retainedBlocks.Add(string.Join(Environment.NewLine, blockLines));
+                }
+
+                pendingComments.Clear();
+                continue;
+            }
+
+            if (line.TrimStart().StartsWith("#", StringComparison.Ordinal))
+            {
+                pendingComments.Add(line.TrimStart('\uFEFF'));
+                continue;
+            }
+
+            pendingComments.Clear();
+        }
+
+        var builder = new StringBuilder();
+        builder.AppendLine("is_global = true");
+
+        if (retainedBlocks.Count > 0)
+        {
+            builder.AppendLine();
+            builder.AppendLine("[*.cs]");
+            builder.AppendLine();
+            builder.Append(string.Join($"{Environment.NewLine}{Environment.NewLine}", retainedBlocks));
+            builder.AppendLine();
+        }
+
+        return builder.ToString();
     }
+
+    private static async Task<Dictionary<string, string>> CollectGlobalConfigSettingsAsync(string path)
+    {
+        var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(path))
+            return settings;
+
+        foreach (var line in await File.ReadAllLinesAsync(path).ConfigureAwait(false))
+        {
+            if (TryParseGlobalConfigSetting(line, out var key, out var value))
+                settings[key] = value;
+        }
+
+        return settings;
+    }
+
+    private static bool TryParseGlobalConfigSetting(string line, out string key, out string value)
+    {
+        var match = GlobalConfigSettingPattern.Match(line);
+        if (!match.Success)
+        {
+            key = string.Empty;
+            value = string.Empty;
+            return false;
+        }
+
+        key = match.Groups["key"].Value.Trim().TrimStart('\uFEFF');
+        value = match.Groups["value"].Value.Trim();
+        return !string.Equals(key, "is_global", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string RewriteRazorGlobalConfigImportContent(string content)
+        => GlobalAnalyzerConfigItemGroupPattern.IsMatch(content)
+            ? GlobalAnalyzerConfigItemGroupPattern.Replace(content, $"$1{RazorGlobalConfigItemGroupBlock}", 1)
+            : content;
 
     private static string RewriteDirectoryBuildImportContent(string content, DirectoryBuildImportFile file)
     {
@@ -1018,6 +1144,23 @@ internal static class PostMergeCleanupRunner
         await File.WriteAllTextAsync(path, content).ConfigureAwait(false);
     }
 
+    private static async Task WriteTextPreservingUtf8BomAsync(string path, string content, string templatePath)
+    {
+        var emitBom = File.Exists(templatePath) && HasUtf8Bom(templatePath);
+        await File.WriteAllTextAsync(path, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: emitBom)).ConfigureAwait(false);
+    }
+
+    private static bool HasUtf8Bom(string path)
+    {
+        using var stream = File.OpenRead(path);
+        Span<byte> prefix = stackalloc byte[3];
+        var bytesRead = stream.Read(prefix);
+        return bytesRead >= 3
+            && prefix[0] == 0xEF
+            && prefix[1] == 0xBB
+            && prefix[2] == 0xBF;
+    }
+
     private static readonly Regex CommonTargetsImportPattern = new(
         @"^[ \t]*<Import\s+Project=""\$\(RepositoryEngineeringDir\)targets(?:\\|/)Common\.targets""\s*/>\r?\n?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
@@ -1042,23 +1185,42 @@ internal static class PostMergeCleanupRunner
         @"^[ \t]*<Import\s+Project=""\$\(RepositoryEngineeringDir\)targets(?:\\|/)GenerateBrokeredServicesPkgDef\.targets""\s*/>\r?\n?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
-    private static readonly Regex CommonGlobalConfigImportBlockPattern = new(
-        @"^[ \t]*<!-- Always include Common\.globalconfig -->\r?\n[ \t]*<EditorConfigFiles Include=""\$\(RepositoryEngineeringDir\)config\\globalconfigs\\Common\.globalconfig""\s*/>\r?\n?",
-        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+    private static readonly Regex GlobalAnalyzerConfigItemGroupPattern = new(
+        @"(^[ \t]*<!-- Global Analyzer Config -->\r?\n)[ \t]*<ItemGroup>\r?\n.*?^[ \t]*</ItemGroup>\r?\n",
+        RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
-    private static readonly Regex ShippingGlobalConfigImportBlockPattern = new(
-        @"^[ \t]*<!-- Include Shipping\.globalconfig for shipping projects -->\r?\n[ \t]*<EditorConfigFiles Condition=""'\$\(IsShipping\)' == 'true'"" Include=""\$\(RepositoryEngineeringDir\)config\\globalconfigs\\Shipping\.globalconfig""\s*/>\r?\n?",
-        RegexOptions.Multiline | RegexOptions.CultureInvariant);
-
-    private static readonly Regex NonShippingGlobalConfigImportBlockPattern = new(
-        @"^[ \t]*<!-- Include NonShipping\.globalconfig for non-shipping projects, except for API shims -->\r?\n[ \t]*<EditorConfigFiles Condition=""'\$\(IsShipping\)' != 'true' AND '\$\(IsApiShim\)' != 'true'"" Include=""\$\(RepositoryEngineeringDir\)config\\globalconfigs\\NonShipping\.globalconfig""\s*/>\r?\n?",
-        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+    private static readonly Regex GlobalConfigSettingPattern = new(
+        @"^\s*(?<key>[^#][^=]*?)\s*=\s*(?<value>.*?)\s*$",
+        RegexOptions.CultureInvariant);
 
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
         RegexOptions.CultureInvariant);
 
     private const string RazorSdkPackageVersion = "6.0.0-alpha.1.21072.5";
+
+    private static readonly string[] RazorGlobalConfigFileNames =
+    [
+        "Common.globalconfig",
+        "Shipping.globalconfig",
+        "NonShipping.globalconfig",
+        "ApiShim.globalconfig",
+    ];
+
+    private static readonly string RazorGlobalConfigItemGroupBlock = string.Join(
+        Environment.NewLine,
+        [
+            "  <ItemGroup>",
+            "    <!-- Always include Common.globalconfig -->",
+            @"    <EditorConfigFiles Include=""$(MSBuildThisFileDirectory)eng\config\globalconfigs\Common.globalconfig"" />",
+            "    <!-- Include Shipping.globalconfig for shipping projects -->",
+            @"    <EditorConfigFiles Condition=""'$(IsShipping)' == 'true'"" Include=""$(MSBuildThisFileDirectory)eng\config\globalconfigs\Shipping.globalconfig"" />",
+            "    <!-- Include NonShipping.globalconfig for non-shipping projects, except for API shims -->",
+            @"    <EditorConfigFiles Condition=""'$(IsShipping)' != 'true' AND '$(IsApiShim)' != 'true'"" Include=""$(MSBuildThisFileDirectory)eng\config\globalconfigs\NonShipping.globalconfig"" />",
+            "    <!-- Include ApiShim.globalconfig for API shim projects -->",
+            @"    <EditorConfigFiles Condition=""'$(IsApiShim)' == 'true'"" Include=""$(MSBuildThisFileDirectory)eng\config\globalconfigs\ApiShim.globalconfig"" />",
+            "  </ItemGroup>",
+        ]) + Environment.NewLine;
 
     private static readonly Regex GetPathOfFileAbovePattern = new(
         @"GetPathOfFileAbove\('(?<fileName>[^']+)'(?:,\s*'\$\(MSBuildThisFileDirectory\)(?<relativeStart>[^']*)')?\)",
