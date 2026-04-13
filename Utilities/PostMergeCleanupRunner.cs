@@ -119,6 +119,12 @@ internal static class PostMergeCleanupRunner
             "The merged Roslyn tree already carries an older Microsoft.VisualStudio.ProjectSystem package, so Razor should drop its unused IActiveConfigurationGroupSubscriptionService plumbing instead of depending on newer CPS API surface that Roslyn does not expose.",
             NormalizeRazorProjectSystemApisAsync),
         new(
+            "normalize-razor-vs-service-lookups",
+            "Rewrite Razor Visual Studio service lookups to use Roslyn's existing Shell.Package helper pattern.",
+            "Normalize Razor VS service lookups",
+            "Inside the merged Roslyn tree, Razor should use the same Shell.Package.GetGlobalService pattern as Roslyn's existing Visual Studio code instead of relying on an ambiguous Package.GetGlobalService reference.",
+            NormalizeRazorVisualStudioServiceLookupsAsync),
+        new(
             "remove-xunit-version-overrides",
             "Remove Razor-local xUnit VersionOverride pins and defer to Roslyn's centrally managed package versions.",
             "Remove Razor xUnit version overrides",
@@ -926,6 +932,35 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor ProjectSystem API compatibility rewrites were needed."
             : $"Removed Razor's unused newer CPS subscription service dependency from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorVisualStudioServiceLookupsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        foreach (var path in Directory.EnumerateFiles(targetRoot, "*.cs", SearchOption.AllDirectories))
+        {
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            if (!originalContent.Contains("Package.GetGlobalService(", StringComparison.Ordinal))
+                continue;
+
+            var updatedContent = originalContent.Replace(
+                "Package.GetGlobalService(",
+                "Shell.Package.GetGlobalService(",
+                StringComparison.Ordinal);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor Visual Studio service lookup rewrites were needed."
+            : $"Normalized Razor Visual Studio service lookups in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveXunitVersionOverridesAsync(StageContext context)
