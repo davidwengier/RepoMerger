@@ -102,9 +102,9 @@ internal static class PostMergeCleanupRunner
             RemoveXunitExecutionPackageReferencesAsync),
         new(
             "remove-projectsystem-sdk-package-refs",
-            "Remove Razor's Microsoft.VisualStudio.ProjectSystem.SDK package usage and defer to Roslyn's existing ProjectSystem infrastructure.",
-            "Remove Razor ProjectSystem.SDK refs",
-            "Microsoft.VisualStudio.LanguageServices.Razor already checks in its generated ProjectSystem rule files for Core MSBuild, so the merged Roslyn tree does not need Razor's local Microsoft.VisualStudio.ProjectSystem.SDK package or its pinned 17.14.143 version.",
+            "Replace Razor's Microsoft.VisualStudio.ProjectSystem.SDK usage with Roslyn's shared Microsoft.VisualStudio.ProjectSystem package.",
+            "Normalize Razor ProjectSystem package refs",
+            "Microsoft.VisualStudio.LanguageServices.Razor still uses Microsoft.VisualStudio.ProjectSystem APIs, but in the merged Roslyn tree it should consume Roslyn's shared Microsoft.VisualStudio.ProjectSystem package instead of keeping Razor's separate ProjectSystem.SDK reference.",
             RemoveProjectSystemSdkPackageReferencesAsync),
         new(
             "remove-xunit-version-overrides",
@@ -810,68 +810,54 @@ internal static class PostMergeCleanupRunner
     {
         var targetRepoRoot = context.TargetRepoRoot;
         var targetRoot = context.TargetRoot;
+        var sourceRazorRoot = Path.Combine(context.State.SourceCloneDirectory, "src", "Razor");
         if (!Directory.Exists(targetRoot))
             return "No Razor target tree was found for ProjectSystem.SDK cleanup.";
 
         var changedFiles = new List<string>();
-        var removedEntryCount = 0;
+        var normalizedEntryCount = 0;
+        var sourceProjectsWithSdkReference = Directory.Exists(sourceRazorRoot)
+            ? await GetSourceProjectsWithExplicitPackageReferenceAsync(sourceRazorRoot, "Microsoft.VisualStudio.ProjectSystem.SDK").ConfigureAwait(false)
+            : [];
 
         var packagesPropsPath = Path.Combine(targetRoot, "Directory.Packages.props");
         if (File.Exists(packagesPropsPath))
         {
-            var document = await LoadXmlAsync(packagesPropsPath, preserveWhitespace: true).ConfigureAwait(false);
-            var packageVersions = document
-                .Descendants()
-                .Where(static element => element.Name.LocalName == "PackageVersion")
-                .Where(static element => IsPackageReferenceFor(element, "Microsoft.VisualStudio.ProjectSystem.SDK"))
-                .ToList();
-
-            if (packageVersions.Count > 0)
+            var originalContent = await File.ReadAllTextAsync(packagesPropsPath).ConfigureAwait(false);
+            var updatedContent = RemovePackageVersionEntries(originalContent, "Microsoft.VisualStudio.ProjectSystem.SDK");
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
             {
-                removedEntryCount += packageVersions.Count;
-                foreach (var packageVersion in packageVersions)
-                    packageVersion.Remove();
-
-                foreach (var itemGroup in document.Descendants().Where(static element => element.Name.LocalName == "ItemGroup").ToList())
-                {
-                    if (!itemGroup.Elements().Any())
-                        itemGroup.Remove();
-                }
-
-                await SaveXmlAsync(document, packagesPropsPath).ConfigureAwait(false);
+                normalizedEntryCount++;
+                await WriteTextPreservingUtf8BomAsync(packagesPropsPath, updatedContent, templatePath: packagesPropsPath).ConfigureAwait(false);
                 changedFiles.Add(Path.GetRelativePath(targetRepoRoot, packagesPropsPath));
             }
         }
 
         foreach (var projectPath in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
         {
-            var document = await LoadXmlAsync(projectPath, preserveWhitespace: true).ConfigureAwait(false);
-            var packageReferences = document
-                .Descendants()
-                .Where(static element => element.Name.LocalName == "PackageReference")
-                .Where(static element => IsPackageReferenceFor(element, "Microsoft.VisualStudio.ProjectSystem.SDK"))
-                .ToList();
+            var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+            var updatedContent = RemovePackageReferenceEntries(originalContent, "Microsoft.VisualStudio.ProjectSystem.SDK");
 
-            if (packageReferences.Count == 0)
-                continue;
-
-            removedEntryCount += packageReferences.Count;
-            foreach (var packageReference in packageReferences)
-                packageReference.Remove();
-
-            foreach (var itemGroup in document.Descendants().Where(static element => element.Name.LocalName == "ItemGroup").ToList())
+            var relativeProjectPath = NormalizeRelativePath(Path.GetRelativePath(targetRoot, projectPath));
+            if (sourceProjectsWithSdkReference.Contains(relativeProjectPath))
             {
-                if (!itemGroup.Elements().Any())
-                    itemGroup.Remove();
+                updatedContent = EnsurePackageReferenceAfterPackageReference(
+                    updatedContent,
+                    "Microsoft.VisualStudio.Editor",
+                    "Microsoft.VisualStudio.ProjectSystem");
             }
 
-            await SaveXmlAsync(document, projectPath).ConfigureAwait(false);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            normalizedEntryCount++;
+            await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
         }
 
-        return removedEntryCount == 0
-            ? "No Razor Microsoft.VisualStudio.ProjectSystem.SDK entries were found."
-            : $"Removed {removedEntryCount} Razor Microsoft.VisualStudio.ProjectSystem.SDK entr{(removedEntryCount == 1 ? "y" : "ies")} from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+        return normalizedEntryCount == 0
+            ? "No Razor ProjectSystem package cleanup changes were needed."
+            : $"Normalized Razor ProjectSystem package references in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveXunitVersionOverridesAsync(StageContext context)
@@ -1327,6 +1313,22 @@ internal static class PostMergeCleanupRunner
             content,
             match => $"{match.Value}{match.Groups["indent"].Value}<PackageReference Include=\"{requiredPackageId}\" />{Environment.NewLine}",
             1);
+    }
+
+    private static string RemovePackageReferenceEntries(string content, string packageId)
+    {
+        var pattern = new Regex(
+            $@"^[ \t]*<PackageReference Include=""{Regex.Escape(packageId)}""(?:\s+[^>]*)?/>\r?\n?",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        return pattern.Replace(content, string.Empty);
+    }
+
+    private static string RemovePackageVersionEntries(string content, string packageId)
+    {
+        var pattern = new Regex(
+            $@"^[ \t]*<PackageVersion Include=""{Regex.Escape(packageId)}""(?:\s+[^>]*)?/>\r?\n?",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        return pattern.Replace(content, string.Empty);
     }
 
     private static string NormalizeAdjacentMsBuildItemFormatting(string content)
