@@ -83,6 +83,12 @@ internal static class PostMergeCleanupRunner
             "Razor's microbenchmark runner programs should compile against Roslyn's centrally managed BenchmarkDotNet package instead of depending on newer API surface that Roslyn does not carry.",
             NormalizeRazorBenchmarkDotNetApisAsync),
         new(
+            "normalize-razor-unit-test-detection",
+            "Keep real Razor test projects on Roslyn's xUnit infrastructure while opting the microbenchmark generator helper out of Roslyn's unit-test naming checks.",
+            "Align Razor test infrastructure with Roslyn",
+            "Razor projects in the merged Roslyn tree should get Roslyn's required test utility references when they participate in xUnit infrastructure, while the microbenchmark generator helper should not be treated as a Roslyn UnitTests assembly.",
+            NormalizeRazorUnitTestDetectionAsync),
+        new(
             "remove-roslyn-diagnostics-analyzers",
             "Remove Roslyn.Diagnostics.Analyzers package references from Razor Directory.Build.props files.",
             "Remove Roslyn.Diagnostics.Analyzers refs",
@@ -585,6 +591,95 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor BenchmarkDotNet compatibility rewrites were needed."
             : $"Rewrote Razor BenchmarkDotNet runner configuration in {changedFiles.Count} file(s) to stay compatible with Roslyn's shared package version: {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        var directoryBuildPropsPath = Path.Combine(targetRoot, "Directory.Build.props");
+        if (File.Exists(directoryBuildPropsPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(directoryBuildPropsPath).ConfigureAwait(false);
+            var updatedContent = RazorUnitTestPropertyGroupPattern.Replace(originalContent, RazorUnitTestPropertyGroupBlock, 1);
+
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(directoryBuildPropsPath, updatedContent, templatePath: directoryBuildPropsPath).ConfigureAwait(false);
+                changedFiles.Add(Path.GetRelativePath(targetRepoRoot, directoryBuildPropsPath));
+            }
+        }
+
+        var analyzerTestProjectPath = Path.Combine(
+            targetRoot,
+            "src",
+            "Analyzers",
+            "Razor.Diagnostics.Analyzers.Test",
+            "Razor.Diagnostics.Analyzers.Test.csproj");
+        if (File.Exists(analyzerTestProjectPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(analyzerTestProjectPath).ConfigureAwait(false);
+            var updatedContent = originalContent;
+
+            if (!updatedContent.Contains("Microsoft.CodeAnalysis.Test.Utilities.csproj", StringComparison.OrdinalIgnoreCase))
+            {
+                updatedContent = RazorAnalyzerTestingPackageReferencePattern.Replace(
+                    updatedContent,
+                    match => match.Value + @"    <ProjectReference Include=""..\..\..\..\Compilers\Test\Core\Microsoft.CodeAnalysis.Test.Utilities.csproj"" />" + Environment.NewLine,
+                    1);
+            }
+
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(analyzerTestProjectPath, updatedContent, templatePath: analyzerTestProjectPath).ConfigureAwait(false);
+                changedFiles.Add(Path.GetRelativePath(targetRepoRoot, analyzerTestProjectPath));
+            }
+        }
+
+        var microbenchmarkGeneratorProjectPath = Path.Combine(
+            targetRoot,
+            "src",
+            "Compiler",
+            "perf",
+            "Microsoft.AspNetCore.Razor.Microbenchmarks.Generator",
+            "Microsoft.AspNetCore.Razor.Microbenchmarks.Generator.csproj");
+        if (File.Exists(microbenchmarkGeneratorProjectPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(microbenchmarkGeneratorProjectPath).ConfigureAwait(false);
+            var updatedContent = RazorMicrobenchmarkGeneratorTestProjectPattern.Replace(
+                originalContent,
+                "    <IsTestProject>true</IsTestProject>");
+
+            if (!updatedContent.Contains("Microsoft.CodeAnalysis.Test.Utilities.csproj", StringComparison.OrdinalIgnoreCase))
+            {
+                updatedContent = RazorMicrobenchmarkGeneratorSupportPackageReferencePattern.Replace(
+                    updatedContent,
+                    match => match.Value + @"    <ProjectReference Include=""..\..\..\..\..\Compilers\Test\Core\Microsoft.CodeAnalysis.Test.Utilities.csproj"" />" + Environment.NewLine,
+                    1);
+            }
+
+            updatedContent = RazorMicrobenchmarkGeneratorUnitTestPattern.Replace(
+                updatedContent,
+                "    <IsUnitTestProject>false</IsUnitTestProject>");
+            updatedContent = RazorCollapsedIsUnitTestProjectPattern.Replace(
+                updatedContent,
+                "</IsTestProject>" + Environment.NewLine + "    <IsUnitTestProject>");
+            updatedContent = RazorCollapsedGenerateProgramFilePattern.Replace(
+                updatedContent,
+                "</IsUnitTestProject>" + Environment.NewLine + "    <GenerateProgramFile>");
+
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(microbenchmarkGeneratorProjectPath, updatedContent, templatePath: microbenchmarkGeneratorProjectPath).ConfigureAwait(false);
+                changedFiles.Add(Path.GetRelativePath(targetRepoRoot, microbenchmarkGeneratorProjectPath));
+            }
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor unit test detection cleanup was needed."
+            : $"Normalized Razor unit test detection in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> NormalizeSdkRazorPackageVersionAsync(StageContext context)
@@ -1379,6 +1474,34 @@ internal static class PostMergeCleanupRunner
         @"^[ \t]*syntax:\s*DisassemblySyntax\.Masm,\s*(?://.*)?\r?\n",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
+    private static readonly Regex RazorUnitTestPropertyGroupPattern = new(
+        @"(?:^[ \t]*<!--\r?\n[ \t]*We don't follow Arcade conventions for project naming\.\r?\n[ \t]*-->\r?\n)?^[ \t]*<PropertyGroup Condition=""'\$\(IsUnitTestProject\)' == ''"">\r?\n.*?^[ \t]*</PropertyGroup>\r?\n",
+        RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorAnalyzerTestingPackageReferencePattern = new(
+        @"^[ \t]*<PackageReference Include=""Microsoft\.CodeAnalysis\.CSharp\.Analyzer\.Testing""\s*/>\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorMicrobenchmarkGeneratorTestProjectPattern = new(
+        @"<IsTestProject>\s*(?:true|false)\s*</IsTestProject>",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex RazorMicrobenchmarkGeneratorSupportPackageReferencePattern = new(
+        @"^[ \t]*<PackageReference Include=""System\.Security\.Cryptography\.Xml""\s*/>\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorMicrobenchmarkGeneratorUnitTestPattern = new(
+        @"<IsUnitTestProject>\s*(?:true|false)\s*</IsUnitTestProject>",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex RazorCollapsedIsUnitTestProjectPattern = new(
+        @"</IsTestProject>[ \t]*<IsUnitTestProject>",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorCollapsedGenerateProgramFilePattern = new(
+        @"</IsUnitTestProject>[ \t]*<GenerateProgramFile>",
+        RegexOptions.CultureInvariant);
+
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
         RegexOptions.CultureInvariant);
@@ -1392,6 +1515,18 @@ internal static class PostMergeCleanupRunner
         "NonShipping.globalconfig",
         "ApiShim.globalconfig",
     ];
+
+    private static readonly string RazorUnitTestPropertyGroupBlock = string.Join(
+        Environment.NewLine,
+        [
+            "  <!--",
+            "    We don't follow Arcade conventions for project naming.",
+            "  -->",
+            "  <PropertyGroup Condition=\"'$(IsUnitTestProject)' == ''\">",
+            "    <IsUnitTestProject>false</IsUnitTestProject>",
+            "    <IsUnitTestProject Condition=\"$(MSBuildProjectName.EndsWith('.Test'))\">true</IsUnitTestProject>",
+            "  </PropertyGroup>",
+        ]) + Environment.NewLine;
 
     private static readonly string RazorGlobalConfigItemGroupBlock = string.Join(
         Environment.NewLine,
