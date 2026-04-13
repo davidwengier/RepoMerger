@@ -338,6 +338,12 @@ internal static class PostMergeCleanupRunner
             return "No Razor globalconfigs directory was found for overlay cleanup.";
 
         var targetGlobalConfigsRoot = targetRoot;
+        var inheritedRoslynKeys = await CollectGlobalConfigKeysAsync(
+            Directory.EnumerateFiles(
+                Path.Combine(targetRepoRoot, "eng", "config", "globalconfigs"),
+                "*.globalconfig",
+                SearchOption.TopDirectoryOnly)).ConfigureAwait(false);
+        var retainedOverlayKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var updatedOverlayFiles = new List<string>();
         foreach (var fileName in RazorGlobalConfigFileNames)
@@ -346,8 +352,10 @@ internal static class PostMergeCleanupRunner
             if (!File.Exists(sourcePath))
                 continue;
 
-            var roslynPath = Path.Combine(targetRepoRoot, "eng", "config", "globalconfigs", fileName);
-            var overlayContent = await BuildRazorGlobalConfigOverlayContentAsync(sourcePath, roslynPath).ConfigureAwait(false);
+            var overlayContent = await BuildRazorGlobalConfigOverlayContentAsync(
+                sourcePath,
+                inheritedRoslynKeys,
+                retainedOverlayKeys).ConfigureAwait(false);
             var targetPath = Path.Combine(targetGlobalConfigsRoot, fileName);
             var existingContent = File.Exists(targetPath)
                 ? await File.ReadAllTextAsync(targetPath).ConfigureAwait(false)
@@ -979,9 +987,11 @@ internal static class PostMergeCleanupRunner
             xmlNamespace + "Import",
             new XAttribute("Project", $@"$([MSBuild]::GetPathOfFileAbove('{fileName}', '$(MSBuildThisFileDirectory)../'))"));
 
-    private static async Task<string> BuildRazorGlobalConfigOverlayContentAsync(string sourcePath, string roslynPath)
+    private static async Task<string> BuildRazorGlobalConfigOverlayContentAsync(
+        string sourcePath,
+        ISet<string> inheritedRoslynKeys,
+        ISet<string> retainedOverlayKeys)
     {
-        var roslynSettings = await CollectGlobalConfigSettingsAsync(roslynPath).ConfigureAwait(false);
         var sourceLines = await File.ReadAllLinesAsync(sourcePath).ConfigureAwait(false);
         var retainedBlocks = new List<string>();
         var pendingComments = new List<string>();
@@ -992,10 +1002,9 @@ internal static class PostMergeCleanupRunner
             if (string.IsNullOrWhiteSpace(line))
                 continue;
 
-            if (TryParseGlobalConfigSetting(line, out var key, out var value))
+            if (TryParseGlobalConfigSetting(line, out var key, out _))
             {
-                if (!roslynSettings.TryGetValue(key, out var roslynValue)
-                    || !string.Equals(value, roslynValue, StringComparison.OrdinalIgnoreCase))
+                if (!inheritedRoslynKeys.Contains(key) && retainedOverlayKeys.Add(key))
                 {
                     var blockLines = pendingComments
                         .Where(static comment => !string.IsNullOrWhiteSpace(comment))
@@ -1030,19 +1039,23 @@ internal static class PostMergeCleanupRunner
         return builder.ToString();
     }
 
-    private static async Task<Dictionary<string, string>> CollectGlobalConfigSettingsAsync(string path)
+    private static async Task<HashSet<string>> CollectGlobalConfigKeysAsync(IEnumerable<string> paths)
     {
-        var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (!File.Exists(path))
-            return settings;
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var line in await File.ReadAllLinesAsync(path).ConfigureAwait(false))
+        foreach (var path in paths)
         {
-            if (TryParseGlobalConfigSetting(line, out var key, out var value))
-                settings[key] = value;
+            if (!File.Exists(path))
+                continue;
+
+            foreach (var line in await File.ReadAllLinesAsync(path).ConfigureAwait(false))
+            {
+                if (TryParseGlobalConfigSetting(line, out var key, out _))
+                    keys.Add(key);
+            }
         }
 
-        return settings;
+        return keys;
     }
 
     private static bool TryParseGlobalConfigSetting(string line, out string key, out string value)
