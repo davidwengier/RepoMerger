@@ -766,29 +766,21 @@ internal static class PostMergeCleanupRunner
 
             if (shouldKeepExplicitReference)
             {
-                if (packageReferences.Count > 0)
-                    continue;
+                var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+                var updatedContent = EnsurePackageReferenceAfterPackageReference(
+                    originalContent,
+                    "xunit.analyzers",
+                    "xunit.extensibility.execution");
 
-                var packageReference = new XElement(
-                    (document.Root?.Name.Namespace ?? XNamespace.None) + "PackageReference",
-                    new XAttribute("Include", "xunit.extensibility.execution"));
-
-                var xunitAnalyzersReference = document
-                    .Descendants()
-                    .FirstOrDefault(static element => element.Name.LocalName == "PackageReference" && IsPackageReferenceFor(element, "xunit.analyzers"));
-
-                if (xunitAnalyzersReference is not null)
+                if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
                 {
-                    xunitAnalyzersReference.AddAfterSelf(packageReference);
-                }
-                else
-                {
-                    GetOrCreatePackageReferenceItemGroup(document).Add(packageReference);
+                    if (packageReferences.Count == 0)
+                        restoredReferenceCount++;
+
+                    await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
+                    changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
                 }
 
-                restoredReferenceCount++;
-                await SaveXmlAsync(document, projectPath).ConfigureAwait(false);
-                changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
                 continue;
             }
 
@@ -809,7 +801,7 @@ internal static class PostMergeCleanupRunner
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
         }
 
-        return removedReferenceCount == 0 && restoredReferenceCount == 0
+        return removedReferenceCount == 0 && restoredReferenceCount == 0 && changedFiles.Count == 0
             ? "No xunit.extensibility.execution cleanup changes were needed in Razor projects."
             : $"Normalized xunit.extensibility.execution references in {changedFiles.Count} Razor project(s): removed {removedReferenceCount} redundant reference(s) and restored {restoredReferenceCount} required reference(s): {string.Join(", ", changedFiles)}.";
     }
@@ -1172,25 +1164,6 @@ internal static class PostMergeCleanupRunner
         return projects;
     }
 
-    private static XElement GetOrCreatePackageReferenceItemGroup(XDocument document)
-    {
-        var root = document.Root
-            ?? throw new InvalidOperationException("Project file does not contain a root element.");
-
-        var existingItemGroup = root
-            .Elements()
-            .FirstOrDefault(static element =>
-                element.Name.LocalName == "ItemGroup"
-                && element.Elements().Any(static child => child.Name.LocalName == "PackageReference"));
-
-        if (existingItemGroup is not null)
-            return existingItemGroup;
-
-        var itemGroup = new XElement(root.Name.Namespace + "ItemGroup");
-        root.Add(itemGroup);
-        return itemGroup;
-    }
-
     private static string NormalizeRelativePath(string path)
         => path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
 
@@ -1316,6 +1289,8 @@ internal static class PostMergeCleanupRunner
 
     private static string EnsureProjectReferenceAfterPackageReference(string content, string packageId, string projectReferencePath)
     {
+        content = NormalizeAdjacentMsBuildItemFormatting(content);
+
         var canonicalProjectReferenceLine = $"    <ProjectReference Include=\"{projectReferencePath}\" />{Environment.NewLine}";
         var existingProjectReferencePattern = new Regex(
             $@"^[ \t]*<ProjectReference Include=""{Regex.Escape(projectReferencePath)}""\s*/>[ \t]*\r?\n?",
@@ -1332,6 +1307,41 @@ internal static class PostMergeCleanupRunner
             content,
             match => $"{match.Value}{canonicalProjectReferenceLine}",
             1);
+    }
+
+    private static string EnsurePackageReferenceAfterPackageReference(string content, string packageId, string requiredPackageId)
+    {
+        content = NormalizeAdjacentMsBuildItemFormatting(content);
+
+        var existingPackageReferencePattern = new Regex(
+            $@"^[ \t]*<PackageReference Include=""{Regex.Escape(requiredPackageId)}""(?:\s+[^>]*)?/>\s*$",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        if (existingPackageReferencePattern.IsMatch(content))
+            return content;
+
+        var pattern = new Regex(
+            $@"^(?<indent>[ \t]*)<PackageReference Include=""{Regex.Escape(packageId)}""(?:\s+[^>]*)?/>\r?\n",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+        return pattern.Replace(
+            content,
+            match => $"{match.Value}{match.Groups["indent"].Value}<PackageReference Include=\"{requiredPackageId}\" />{Environment.NewLine}",
+            1);
+    }
+
+    private static string NormalizeAdjacentMsBuildItemFormatting(string content)
+    {
+        string previous;
+        do
+        {
+            previous = content;
+            content = AdjacentMsBuildItemPattern.Replace(
+                content,
+                match => $"{match.Groups["indent"].Value}{match.Groups["first"].Value}{Environment.NewLine}{match.Groups["indent"].Value}{match.Groups["second"].Value}");
+        }
+        while (!string.Equals(previous, content, StringComparison.Ordinal));
+
+        return content;
     }
 
     private static string SetBooleanPropertyValue(string content, string propertyName, bool value)
@@ -1587,6 +1597,10 @@ internal static class PostMergeCleanupRunner
 
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex AdjacentMsBuildItemPattern = new(
+        @"(?m)^(?<indent>[ \t]*)(?<first><(?:PackageReference|ProjectReference)\b[^>]*/>)[ \t]*(?<second><(?:PackageReference|ProjectReference)\b[^>]*/>)",
         RegexOptions.CultureInvariant);
 
     private const string RazorSdkPackageVersion = "6.0.0-alpha.1.21072.5";
