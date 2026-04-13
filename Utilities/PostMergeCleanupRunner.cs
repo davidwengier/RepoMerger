@@ -89,6 +89,12 @@ internal static class PostMergeCleanupRunner
             "Razor test projects in the merged Roslyn tree should get Roslyn's required test utility references and produce *.UnitTests.dll outputs so they match Roslyn's test-runner conventions, while the microbenchmark generator helper should not be treated as a Roslyn UnitTests assembly.",
             NormalizeRazorUnitTestDetectionAsync),
         new(
+            "normalize-razor-vs-test-harness-refs",
+            "Rewrite Razor Visual Studio integration test source-generator references to use Roslyn's analyzer-style project reference metadata.",
+            "Normalize Razor VS test harness refs",
+            "When Razor's Visual Studio integration tests reference Roslyn's in-repo Microsoft.VisualStudio.Extensibility.Testing.SourceGenerator project, the reference must stay an Analyzer project reference so TestService and AbstractIdeIntegrationTest sources are generated during build.",
+            NormalizeRazorVisualStudioTestHarnessReferencesAsync),
+        new(
             "normalize-razor-moq-apis",
             "Rewrite Razor test Moq usage to stay compatible with Roslyn's shared Moq package version.",
             "Normalize Razor Moq APIs",
@@ -747,6 +753,45 @@ internal static class PostMergeCleanupRunner
             : $"Normalized Razor Moq API usage in {changedFiles.Count} file(s) to stay compatible with Roslyn's shared package version: {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> NormalizeRazorVisualStudioTestHarnessReferencesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        foreach (var projectPath in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
+        {
+            var document = await LoadXmlAsync(projectPath, preserveWhitespace: true).ConfigureAwait(false);
+            var sourceGeneratorReferences = document
+                .Descendants()
+                .Where(static element => element.Name.LocalName == "ProjectReference")
+                .Where(element =>
+                    element.Attribute("Include")?.Value.Contains(
+                        "Microsoft.VisualStudio.Extensibility.Testing.SourceGenerator.csproj",
+                        StringComparison.OrdinalIgnoreCase) ?? false)
+                .ToList();
+
+            var changed = false;
+            foreach (var sourceGeneratorReference in sourceGeneratorReferences)
+            {
+                changed |= EnsureProjectReferenceAttributeValue(sourceGeneratorReference, "OutputItemType", "Analyzer");
+                changed |= EnsureProjectReferenceAttributeValue(sourceGeneratorReference, "ReferenceOutputAssembly", "false");
+                changed |= EnsureProjectReferenceAttributeValue(sourceGeneratorReference, "SetTargetFramework", "TargetFramework=netstandard2.0");
+                changed |= EnsureProjectReferenceAttributeValue(sourceGeneratorReference, "SkipGetTargetFrameworkProperties", "true");
+            }
+
+            if (!changed)
+                continue;
+
+            await SaveXmlAsync(document, projectPath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor Visual Studio test harness project reference cleanup was needed."
+            : $"Normalized Razor Visual Studio test harness project references in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
     private static async Task<string> NormalizeSdkRazorPackageVersionAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -1258,6 +1303,8 @@ internal static class PostMergeCleanupRunner
                     projectReference.Add(new XElement(child));
             }
 
+            ApplySpecialProjectReferenceMetadata(packageId, projectReference);
+
             packageReference.ReplaceWith(projectReference);
             existingProjectReferences.Add(normalizedProjectPath);
             convertedCount++;
@@ -1702,10 +1749,31 @@ internal static class PostMergeCleanupRunner
     }
 
     private static bool ShouldKeepProjectReferenceAttribute(string localName)
-        => localName is "Condition" or "PrivateAssets" or "ReferenceOutputAssembly" or "OutputItemType" or "Aliases";
+        => localName is "Condition" or "PrivateAssets" or "ReferenceOutputAssembly" or "OutputItemType" or "Aliases" or "SetTargetFramework" or "SkipGetTargetFrameworkProperties";
 
     private static bool ShouldKeepProjectReferenceElement(string localName)
-        => localName is "Condition" or "PrivateAssets" or "ReferenceOutputAssembly" or "OutputItemType" or "Aliases" or "SetTargetFramework";
+        => localName is "Condition" or "PrivateAssets" or "ReferenceOutputAssembly" or "OutputItemType" or "Aliases" or "SetTargetFramework" or "SkipGetTargetFrameworkProperties";
+
+    private static void ApplySpecialProjectReferenceMetadata(string packageId, XElement projectReference)
+    {
+        if (!string.Equals(packageId, "Microsoft.VisualStudio.Extensibility.Testing.SourceGenerator", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        projectReference.SetAttributeValue("OutputItemType", "Analyzer");
+        projectReference.SetAttributeValue("ReferenceOutputAssembly", "false");
+        projectReference.SetAttributeValue("SetTargetFramework", "TargetFramework=netstandard2.0");
+        projectReference.SetAttributeValue("SkipGetTargetFrameworkProperties", "true");
+    }
+
+    private static bool EnsureProjectReferenceAttributeValue(XElement projectReference, string attributeName, string expectedValue)
+    {
+        var attribute = projectReference.Attribute(attributeName);
+        if (string.Equals(attribute?.Value, expectedValue, StringComparison.Ordinal))
+            return false;
+
+        projectReference.SetAttributeValue(attributeName, expectedValue);
+        return true;
+    }
 
     private static async Task<HashSet<string>> CollectPackageVersionIdsAsync(string projectFilePath)
     {
