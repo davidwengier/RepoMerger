@@ -125,6 +125,12 @@ internal static class PostMergeCleanupRunner
             "Inside the merged Roslyn tree, Razor should use the same Shell.Package.GetGlobalService pattern as Roslyn's existing Visual Studio code instead of relying on an ambiguous Package.GetGlobalService reference.",
             NormalizeRazorVisualStudioServiceLookupsAsync),
         new(
+            "normalize-razor-vs-workspace-refs",
+            "Add explicit Roslyn workspace references for Razor's Visual Studio extension code that directly uses VisualStudioWorkspace APIs.",
+            "Normalize Razor VS workspace refs",
+            "Razor's syntax visualizer and related Visual Studio extension code should reference Roslyn's in-repo Microsoft.VisualStudio.LanguageServices and Workspaces projects explicitly when building inside the merged Roslyn tree.",
+            NormalizeRazorVisualStudioWorkspaceReferencesAsync),
+        new(
             "remove-xunit-version-overrides",
             "Remove Razor-local xUnit VersionOverride pins and defer to Roslyn's centrally managed package versions.",
             "Remove Razor xUnit version overrides",
@@ -447,6 +453,7 @@ internal static class PostMergeCleanupRunner
         var targetRepoRoot = context.TargetRepoRoot;
         var targetRoot = context.TargetRoot;
         var changedFiles = new List<string>();
+        var summaryParts = new List<string>();
 
         var candidateFiles = new[]
         {
@@ -471,9 +478,28 @@ internal static class PostMergeCleanupRunner
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
         }
 
-        return changedFiles.Count == 0
-            ? "No Razor repository metadata overrides were found."
-            : $"Removed Razor-specific PackageProjectUrl/RepositoryUrl overrides from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+        if (changedFiles.Count > 0)
+        {
+            summaryParts.Add(
+                $"Removed Razor-specific PackageProjectUrl/RepositoryUrl overrides from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.");
+        }
+
+        var settingsPropsPath = Path.Combine(targetRepoRoot, "eng", "targets", "Settings.props");
+        if (File.Exists(settingsPropsPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(settingsPropsPath).ConfigureAwait(false);
+            var updatedContent = EnsureRepositoryUrlFallback(originalContent);
+
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(settingsPropsPath, updatedContent, templatePath: settingsPropsPath).ConfigureAwait(false);
+                summaryParts.Add("Ensured Roslyn eng\\targets\\Settings.props provides a RepositoryUrl fallback from PackageProjectUrl for packable projects.");
+            }
+        }
+
+        return summaryParts.Count == 0
+            ? "No Razor repository metadata cleanup was needed."
+            : string.Join(" ", summaryParts);
     }
 
     private static async Task<string> RewriteDirectoryPackagesPropsAsync(StageContext context)
@@ -672,6 +698,24 @@ internal static class PostMergeCleanupRunner
             {
                 await WriteTextPreservingUtf8BomAsync(microbenchmarkGeneratorProjectPath, updatedContent, templatePath: microbenchmarkGeneratorProjectPath).ConfigureAwait(false);
                 changedFiles.Add(Path.GetRelativePath(targetRepoRoot, microbenchmarkGeneratorProjectPath));
+            }
+        }
+
+        foreach (var integrationTestProjectPath in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
+        {
+            var projectName = Path.GetFileNameWithoutExtension(integrationTestProjectPath);
+            if (!projectName.EndsWith(".IntegrationTests", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(integrationTestProjectPath).ConfigureAwait(false);
+            var updatedContent = SetBooleanPropertyValue(originalContent, "IsTestProject", true);
+            updatedContent = SetBooleanPropertyValue(updatedContent, "IsUnitTestProject", false);
+            updatedContent = SetBooleanPropertyValue(updatedContent, "IsIntegrationTestProject", true);
+
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(integrationTestProjectPath, updatedContent, templatePath: integrationTestProjectPath).ConfigureAwait(false);
+                changedFiles.Add(Path.GetRelativePath(targetRepoRoot, integrationTestProjectPath));
             }
         }
 
@@ -946,10 +990,7 @@ internal static class PostMergeCleanupRunner
             if (!originalContent.Contains("Package.GetGlobalService(", StringComparison.Ordinal))
                 continue;
 
-            var updatedContent = originalContent.Replace(
-                "Package.GetGlobalService(",
-                "Shell.Package.GetGlobalService(",
-                StringComparison.Ordinal);
+            var updatedContent = NormalizeVisualStudioGetGlobalServiceCalls(originalContent);
 
             if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
                 continue;
@@ -961,6 +1002,48 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor Visual Studio service lookup rewrites were needed."
             : $"Normalized Razor Visual Studio service lookups in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorVisualStudioWorkspaceReferencesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        var projectPath = Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension", "Microsoft.VisualStudio.RazorExtension.csproj");
+        if (!File.Exists(projectPath))
+            return "No Razor Visual Studio extension project was found for workspace reference cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+        var updatedContent = originalContent;
+        var anchorBlock =
+            "    <ProjectReference Include=\"..\\Microsoft.VisualStudio.LanguageServices.Razor\\Microsoft.VisualStudio.LanguageServices.Razor.csproj\">" + Environment.NewLine +
+            "      <NgenPriority>2</NgenPriority>" + Environment.NewLine +
+            "    </ProjectReference>" + Environment.NewLine;
+        var workspaceReferenceBlock =
+            "    <ProjectReference Include=\"..\\..\\..\\..\\..\\VisualStudio\\Core\\Def\\Microsoft.VisualStudio.LanguageServices.csproj\" />" + Environment.NewLine +
+            "    <ProjectReference Include=\"..\\..\\..\\..\\..\\Workspaces\\Core\\Portable\\Microsoft.CodeAnalysis.Workspaces.csproj\" />" + Environment.NewLine;
+
+        if (!updatedContent.Contains("..\\..\\..\\..\\..\\VisualStudio\\Core\\Def\\Microsoft.VisualStudio.LanguageServices.csproj", StringComparison.Ordinal))
+        {
+            updatedContent = updatedContent.Replace(anchorBlock, anchorBlock + workspaceReferenceBlock, StringComparison.Ordinal);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                var compilerReferenceAnchor = "    <ProjectReference Include=\"..\\..\\..\\Compiler\\Microsoft.CodeAnalysis.Razor.Compiler\\src\\Microsoft.CodeAnalysis.Razor.Compiler.csproj\">";
+                updatedContent = updatedContent.Replace(
+                    compilerReferenceAnchor,
+                    workspaceReferenceBlock + compilerReferenceAnchor,
+                    StringComparison.Ordinal);
+            }
+        }
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor Visual Studio workspace reference rewrites were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
+        changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
+        return $"Added explicit Roslyn workspace references for Razor's Visual Studio extension project: {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveXunitVersionOverridesAsync(StageContext context)
@@ -1398,6 +1481,40 @@ internal static class PostMergeCleanupRunner
             1);
     }
 
+    private static string EnsureProjectReferenceAfterProjectReference(string content, string anchorProjectReferencePath, string newProjectReferencePath)
+    {
+        content = NormalizeAdjacentMsBuildItemFormatting(content);
+
+        var canonicalProjectReferenceLine = $"    <ProjectReference Include=\"{newProjectReferencePath}\" />{Environment.NewLine}";
+        var existingProjectReferencePattern = new Regex(
+            $@"^[ \t]*<ProjectReference Include=""{Regex.Escape(newProjectReferencePath)}""(?:\s+[^>]*)?.*$",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+        if (existingProjectReferencePattern.IsMatch(content))
+            return content;
+
+        var blockAnchorPattern = new Regex(
+            $@"(?<anchor>^[ \t]*<ProjectReference Include=""{Regex.Escape(anchorProjectReferencePath)}""(?:\s+[^>]*)?>.*?^[ \t]*</ProjectReference>\r?\n)",
+            RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+
+        if (blockAnchorPattern.IsMatch(content))
+        {
+            return blockAnchorPattern.Replace(
+                content,
+                match => $"{match.Groups["anchor"].Value}{canonicalProjectReferenceLine}",
+                1);
+        }
+
+        var selfClosingAnchorPattern = new Regex(
+            $@"(?<anchor>^[ \t]*<ProjectReference Include=""{Regex.Escape(anchorProjectReferencePath)}""\s*/>[ \t]*\r?\n)",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+        return selfClosingAnchorPattern.Replace(
+            content,
+            match => $"{match.Groups["anchor"].Value}{canonicalProjectReferenceLine}",
+            1);
+    }
+
     private static string EnsurePackageReferenceAfterPackageReference(string content, string packageId, string requiredPackageId)
     {
         content = NormalizeAdjacentMsBuildItemFormatting(content);
@@ -1436,12 +1553,15 @@ internal static class PostMergeCleanupRunner
 
     private static string NormalizeStrictMoqCalls(string content)
     {
+        content = BrokenQualifiedStrictMockPattern.Replace(content, "StrictMock.Of<");
+        content = QualifiedStrictMockPattern.Replace(content, "StrictMock.Of<");
+
         content = StrictMoqOfWithPredicatePattern.Replace(
             content,
-            "global::Microsoft.AspNetCore.Razor.Test.Common.StrictMock.Of<${type}>(${predicate})");
+            "StrictMock.Of<${type}>(${predicate})");
         content = StrictMoqOfPattern.Replace(
             content,
-            "global::Microsoft.AspNetCore.Razor.Test.Common.StrictMock.Of<${type}>()");
+            "StrictMock.Of<${type}>()");
 
         if (content.Contains("public static class StrictMock", StringComparison.Ordinal))
         {
@@ -1472,12 +1592,28 @@ internal static class PostMergeCleanupRunner
         content = ActiveConfigurationGroupNullCheckPattern.Replace(content, string.Empty);
         content = ActiveConfigurationGroupAssignmentPattern.Replace(content, string.Empty);
         content = ActiveConfigurationGroupPropertyPattern.Replace(content, string.Empty);
+        content = ResidualActiveConfigurationGroupBlockPattern.Replace(content, Environment.NewLine);
         content = TestActiveConfigurationGroupInitializationPattern.Replace(content, string.Empty);
         content = TestActiveConfigurationGroupPropertyPattern.Replace(content, string.Empty);
         content = TestActiveConfigurationGroupInterfaceImplementationPattern.Replace(content, string.Empty);
         content = TestActiveConfigurationGroupClassPattern.Replace(content, string.Empty);
 
         return content;
+    }
+
+    private static string NormalizeVisualStudioGetGlobalServiceCalls(string content)
+    {
+        const string replacementToken = "__REPO_MERGER_GET_GLOBAL_SERVICE__";
+
+        content = WeirdShellQualifiedGetGlobalServicePattern.Replace(content, replacementToken);
+        content = ShellQualifiedGetGlobalServicePattern.Replace(content, replacementToken);
+        content = DoubleQualifiedGetGlobalServicePattern.Replace(content, replacementToken);
+        content = BareGetGlobalServicePattern.Replace(content, replacementToken);
+
+        return content.Replace(
+            replacementToken,
+            "Microsoft.VisualStudio.Shell.Package.GetGlobalService(",
+            StringComparison.Ordinal);
     }
 
     private static string NormalizeAdjacentMsBuildItemFormatting(string content)
@@ -1504,6 +1640,17 @@ internal static class PostMergeCleanupRunner
         return pattern.Replace(
             content,
             $"    <{propertyName}>{value.ToString().ToLowerInvariant()}</{propertyName}>",
+            1);
+    }
+
+    private static string EnsureRepositoryUrlFallback(string content)
+    {
+        if (content.Contains("<RepositoryUrl", StringComparison.OrdinalIgnoreCase))
+            return content;
+
+        return PackageProjectUrlElementPattern.Replace(
+            content,
+            match => $"{match.Value}{Environment.NewLine}{match.Groups["indent"].Value}<RepositoryUrl Condition=\"'$(RepositoryUrl)' == ''\">$(PackageProjectUrl)</RepositoryUrl>",
             1);
     }
 
@@ -1730,6 +1877,10 @@ internal static class PostMergeCleanupRunner
         @"<GeneratePkgDefFile>\s*true\s*</GeneratePkgDefFile>",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
+    private static readonly Regex PackageProjectUrlElementPattern = new(
+        @"^(?<indent>[ \t]*)<PackageProjectUrl>\s*[^<]+\s*</PackageProjectUrl>\s*$",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
     private static readonly Regex BenchmarkDotNetBuildTimeoutPattern = new(
         @"^[ \t]*\.WithBuildTimeout\(TimeSpan\.FromMinutes\(15\)\)\s*(?://.*)?\r?\n",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
@@ -1755,11 +1906,19 @@ internal static class PostMergeCleanupRunner
         RegexOptions.CultureInvariant);
 
     private static readonly Regex StrictMoqOfPattern = new(
-        @"Mock\.Of<(?<type>.+?)>\(\s*MockBehavior\.Strict\s*\)",
+        @"(?<![\w:.])Mock\.Of<(?<type>[^>]+)>\(\s*MockBehavior\.Strict\s*\)",
         RegexOptions.CultureInvariant);
 
     private static readonly Regex StrictMoqOfWithPredicatePattern = new(
-        @"Mock\.Of<(?<type>.+?)>\((?<predicate>.+?),\s*MockBehavior\.Strict\s*\)",
+        @"(?<![\w:.])Mock\.Of<(?<type>[^>]+)>\((?<predicate>[\s\S]*?),\s*MockBehavior\.Strict\s*\)",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex QualifiedStrictMockPattern = new(
+        @"global::Microsoft\.AspNetCore\.Razor\.Test\.Common\.StrictMock\.Of<",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex BrokenQualifiedStrictMockPattern = new(
+        @"global::Microsoft\.AspNetCore\.Razor\.Test\.Common\.Strictglobal::Microsoft\.AspNetCore\.Razor\.Test\.Common\.StrictMock\.Of<",
         RegexOptions.CultureInvariant);
 
     private static readonly Regex StrictMockNoPredicateImplementationPattern = new(
@@ -1798,6 +1957,26 @@ internal static class PostMergeCleanupRunner
         @"\r?\n[ \t]*public class TestActiveConfigurationGroupSubscriptionService : IActiveConfigurationGroupSubscriptionService\r?\n[ \t]*\{.*?^[ \t]*\}\r?\n",
         RegexOptions.Singleline | RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
+    private static readonly Regex ResidualActiveConfigurationGroupBlockPattern = new(
+        @"\r?\n[ \t]*public BufferBlock<IProjectVersionedValue<ConfigurationSubscriptionSources>> SourceBlock \{ get; \}\r?\n(?:[ \t]*\r?\n)?[ \t]*ConfigurationSubscriptionSources IActiveConfigurationGroupSubscriptionService\.Current \{ get; \}\r?\n(?:[ \t]*\r?\n)?[ \t]*IReceivableSourceBlock<IProjectVersionedValue<ConfigurationSubscriptionSources>> IProjectValueDataSource<ConfigurationSubscriptionSources>\.SourceBlock => SourceBlock;\r?\n(?:[ \t]*\r?\n)?[ \t]*ISourceBlock<IProjectVersionedValue<object>> IProjectValueDataSource\.SourceBlock => SourceBlock;\r?\n(?:[ \t]*\r?\n)?[ \t]*NamedIdentity IProjectValueDataSource\.DataSourceKey \{ get; \}\r?\n(?:[ \t]*\r?\n)?[ \t]*IComparable IProjectValueDataSource\.DataSourceVersion \{ get; \}\r?\n(?:[ \t]*\r?\n)?[ \t]*IDisposable IJoinableProjectValueDataSource\.Join\(\) => null;\r?\n[ \t]*\}\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex DoubleQualifiedGetGlobalServicePattern = new(
+        @"Microsoft\.VisualStudio\.Shell\.Microsoft\.VisualStudio\.Shell\.Package\.GetGlobalService\(",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex WeirdShellQualifiedGetGlobalServicePattern = new(
+        @"Shell\.Microsoft\.VisualStudio\.Shell\.Package\.GetGlobalService\(",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex ShellQualifiedGetGlobalServicePattern = new(
+        @"(?<![\w.])Shell\.Package\.GetGlobalService\(",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex BareGetGlobalServicePattern = new(
+        @"(?<![\w.])Package\.GetGlobalService\(",
+        RegexOptions.CultureInvariant);
+
     private const string RazorSdkPackageVersion = "6.0.0-alpha.1.21072.5";
 
     private static readonly string[] RazorGlobalConfigFileNames =
@@ -1814,9 +1993,11 @@ internal static class PostMergeCleanupRunner
             "  <!--",
             "    We don't follow Arcade conventions for project naming.",
             "  -->",
-            "  <PropertyGroup Condition=\"'$(IsUnitTestProject)' == ''\">",
+            "  <PropertyGroup Condition=\"'$(IsUnitTestProject)' == '' OR '$(IsIntegrationTestProject)' == ''\">",
             "    <IsUnitTestProject>false</IsUnitTestProject>",
             "    <IsUnitTestProject Condition=\"$(MSBuildProjectName.EndsWith('.Test'))\">true</IsUnitTestProject>",
+            "    <IsIntegrationTestProject>false</IsIntegrationTestProject>",
+            "    <IsIntegrationTestProject Condition=\"$(MSBuildProjectName.EndsWith('.IntegrationTests'))\">true</IsIntegrationTestProject>",
             "    <TargetFileName Condition=\"'$(IsUnitTestProject)' == 'true' AND !$(TargetFileName.EndsWith('.UnitTests.dll'))\">$([System.String]::Copy('$(MSBuildProjectName)').Replace('.Test', '.UnitTests')).dll</TargetFileName>",
             "  </PropertyGroup>",
         ]) + Environment.NewLine;
