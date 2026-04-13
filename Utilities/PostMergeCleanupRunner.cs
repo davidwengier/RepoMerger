@@ -11,6 +11,12 @@ internal static class PostMergeCleanupRunner
     private static readonly CleanupStep[] Steps =
     [
         new(
+            "commit-pending-solution-updates",
+            "Stage pending root solution file updates for a dedicated commit before other post-merge cleanup runs.",
+            "Commit merged solution updates",
+            "Merged Razor solution membership updates should land in their own commit so Roslyn solution-file churn stays isolated from later cleanup steps and easier to review.",
+            CommitPendingSolutionUpdatesAsync),
+        new(
             "remove-common-targets-import",
             @"Remove Razor imports of $(RepositoryEngineeringDir)targets\Common.targets.",
             "Remove Razor Common.targets import",
@@ -187,6 +193,29 @@ internal static class PostMergeCleanupRunner
         }
 
         return $"Applied post-merge cleanup stage.{Environment.NewLine}- {string.Join($"{Environment.NewLine}- ", summaries)}";
+    }
+
+    private static async Task<string> CommitPendingSolutionUpdatesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var stagedFiles = new List<string>();
+
+        foreach (var path in Directory.EnumerateFiles(targetRepoRoot, "*.sln*", SearchOption.TopDirectoryOnly))
+        {
+            var relativePath = Path.GetRelativePath(targetRepoRoot, path);
+            var pendingDiff = (await GitRunner.RunGitAsync(targetRepoRoot, "diff", "--name-only", "--", relativePath).ConfigureAwait(false)).Trim();
+            var pendingCachedDiff = (await GitRunner.RunGitAsync(targetRepoRoot, "diff", "--cached", "--name-only", "--", relativePath).ConfigureAwait(false)).Trim();
+
+            if (string.IsNullOrWhiteSpace(pendingDiff) && string.IsNullOrWhiteSpace(pendingCachedDiff))
+                continue;
+
+            await GitRunner.RunGitAsync(targetRepoRoot, "add", "--", relativePath).ConfigureAwait(false);
+            stagedFiles.Add(relativePath);
+        }
+
+        return stagedFiles.Count == 0
+            ? "No pending root solution file changes were found."
+            : $"Staged {stagedFiles.Count} root solution file change(s) for a dedicated commit: {string.Join(", ", stagedFiles)}.";
     }
 
     private static async Task<string> CopyRazorServicesPropsAsync(StageContext context)
@@ -1600,9 +1629,25 @@ internal static class PostMergeCleanupRunner
 
     private static string NormalizeStrictMoqCalls(string content)
     {
+        if (content.Contains("public static class StrictMock", StringComparison.Ordinal))
+        {
+            content = StrictMockNoPredicateImplementationPattern.Replace(
+                content,
+                "        => new Mock<T>(MockBehavior.Strict).Object;");
+            content = StrictMockPredicateImplementationPattern.Replace(
+                content,
+                "        => new MockRepository(MockBehavior.Strict).OneOf<T>(predicate);");
+        }
+
         content = BrokenQualifiedStrictMockPattern.Replace(content, "StrictMock.Of<");
         content = QualifiedStrictMockPattern.Replace(content, "StrictMock.Of<");
 
+        content = StrictMockOfWithPredicatePattern.Replace(
+            content,
+            "StrictMock.Of<${type}>(${predicate})");
+        content = StrictMockOfPattern.Replace(
+            content,
+            "StrictMock.Of<${type}>()");
         content = StrictMoqOfWithPredicatePattern.Replace(
             content,
             "StrictMock.Of<${type}>(${predicate})");
@@ -1617,7 +1662,7 @@ internal static class PostMergeCleanupRunner
                 "        => new Mock<T>(MockBehavior.Strict).Object;");
             content = StrictMockPredicateImplementationPattern.Replace(
                 content,
-                "        => Mock.Of(predicate);");
+                "        => new MockRepository(MockBehavior.Strict).OneOf<T>(predicate);");
         }
 
         return content;
@@ -1883,8 +1928,33 @@ internal static class PostMergeCleanupRunner
     private static async Task WriteTextPreservingUtf8BomAsync(string path, string content, string templatePath)
     {
         var emitBom = File.Exists(templatePath) && HasUtf8Bom(templatePath);
+        var lineEnding = File.Exists(templatePath)
+            ? GetPreferredLineEnding(templatePath)
+            : Environment.NewLine;
+        content = NormalizeLineEndings(content, lineEnding);
         await File.WriteAllTextAsync(path, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: emitBom)).ConfigureAwait(false);
     }
+
+    private static string GetPreferredLineEnding(string path)
+    {
+        using var stream = File.OpenRead(path);
+        using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true);
+        var content = reader.ReadToEnd();
+
+        var newLineIndex = content.IndexOf('\n');
+        if (newLineIndex < 0)
+            return Environment.NewLine;
+
+        return newLineIndex > 0 && content[newLineIndex - 1] == '\r'
+            ? "\r\n"
+            : "\n";
+    }
+
+    private static string NormalizeLineEndings(string content, string lineEnding)
+        => content
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\r", "\n", StringComparison.Ordinal)
+            .Replace("\n", lineEnding, StringComparison.Ordinal);
 
     private static bool HasUtf8Bom(string path)
     {
@@ -1981,6 +2051,14 @@ internal static class PostMergeCleanupRunner
         @"(?<![\w:.])Mock\.Of<(?<type>[^>]+)>\((?<predicate>[\s\S]*?),\s*MockBehavior\.Strict\s*\)",
         RegexOptions.CultureInvariant);
 
+    private static readonly Regex StrictMockOfPattern = new(
+        @"(?<![\w:.])StrictMock\.Of<(?<type>[^>]+)>\(\s*MockBehavior\.Strict\s*\)",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex StrictMockOfWithPredicatePattern = new(
+        @"(?<![\w:.])StrictMock\.Of<(?<type>[^>]+)>\((?<predicate>[\s\S]*?),\s*MockBehavior\.Strict\s*\)",
+        RegexOptions.CultureInvariant);
+
     private static readonly Regex QualifiedStrictMockPattern = new(
         @"global::Microsoft\.AspNetCore\.Razor\.Test\.Common\.StrictMock\.Of<",
         RegexOptions.CultureInvariant);
@@ -1990,11 +2068,11 @@ internal static class PostMergeCleanupRunner
         RegexOptions.CultureInvariant);
 
     private static readonly Regex StrictMockNoPredicateImplementationPattern = new(
-        @"^[ \t]*=>\s*Mock\.Of<T>\(MockBehavior\.Strict\);\s*$",
+        @"^[ \t]*=>\s*(?:Mock\.Of<T>\(MockBehavior\.Strict\)|StrictMock\.Of<T>\(MockBehavior\.Strict\))\s*;\s*$",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex StrictMockPredicateImplementationPattern = new(
-        @"^[ \t]*=>\s*Mock\.Of<T>\(predicate,\s*MockBehavior\.Strict\);\s*$",
+        @"^[ \t]*=>\s*(?:Mock\.Of<T>\(predicate,\s*MockBehavior\.Strict\)|StrictMock\.Of<T>\(predicate\))\s*;\s*$",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex ActiveConfigurationGroupNullCheckPattern = new(

@@ -31,14 +31,22 @@ public static class GitRunner
     public static async Task<string> GetShortStatusAsync(string repositoryDirectory)
         => (await RunGitAsync(repositoryDirectory, "status", "--short", "--untracked-files=no").ConfigureAwait(false)).Trim();
 
+    public static async Task<string> GetStagedStatusAsync(string repositoryDirectory)
+        => (await RunGitAsync(repositoryDirectory, "diff", "--cached", "--name-status").ConfigureAwait(false)).Trim();
+
     public static async Task<bool> CommitTrackedChangesAsync(string repositoryDirectory, string message, params string[] additionalParagraphs)
     {
         var status = await GetShortStatusAsync(repositoryDirectory).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(status))
             return false;
 
-        await RunGitAsync(repositoryDirectory, "add", "--update", "--", ".").ConfigureAwait(false);
-        var stagedStatus = await GetShortStatusAsync(repositoryDirectory).ConfigureAwait(false);
+        var stagedStatus = await GetStagedStatusAsync(repositoryDirectory).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(stagedStatus))
+        {
+            await RunGitAsync(repositoryDirectory, "add", "--update", "--", ".").ConfigureAwait(false);
+            stagedStatus = await GetStagedStatusAsync(repositoryDirectory).ConfigureAwait(false);
+        }
+
         if (string.IsNullOrWhiteSpace(stagedStatus))
             return false;
 
