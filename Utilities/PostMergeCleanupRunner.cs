@@ -113,6 +113,12 @@ internal static class PostMergeCleanupRunner
             "Microsoft.VisualStudio.LanguageServices.Razor still uses Microsoft.VisualStudio.ProjectSystem APIs, but in the merged Roslyn tree it should consume Roslyn's shared Microsoft.VisualStudio.ProjectSystem package instead of keeping Razor's separate ProjectSystem.SDK reference.",
             RemoveProjectSystemSdkPackageReferencesAsync),
         new(
+            "normalize-razor-projectsystem-apis",
+            "Remove Razor's unused dependency on newer CPS subscription service APIs that Roslyn's shared ProjectSystem package does not provide.",
+            "Normalize Razor ProjectSystem APIs",
+            "The merged Roslyn tree already carries an older Microsoft.VisualStudio.ProjectSystem package, so Razor should drop its unused IActiveConfigurationGroupSubscriptionService plumbing instead of depending on newer CPS API surface that Roslyn does not expose.",
+            NormalizeRazorProjectSystemApisAsync),
+        new(
             "remove-xunit-version-overrides",
             "Remove Razor-local xUnit VersionOverride pins and defer to Roslyn's centrally managed package versions.",
             "Remove Razor xUnit version overrides",
@@ -889,6 +895,39 @@ internal static class PostMergeCleanupRunner
             : $"Normalized Razor ProjectSystem package references in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> NormalizeRazorProjectSystemApisAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        var candidateFiles = new[]
+        {
+            Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "ProjectSystem", "IUnconfiguredProjectCommonServices.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "ProjectSystem", "UnconfiguredProjectCommonServices.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "ProjectSystem", "TestProjectSystemServices.cs"),
+        };
+
+        foreach (var path in candidateFiles)
+        {
+            if (!File.Exists(path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = RemoveUnusedProjectSystemSubscriptionService(originalContent);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor ProjectSystem API compatibility rewrites were needed."
+            : $"Removed Razor's unused newer CPS subscription service dependency from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
     private static async Task<string> RemoveXunitVersionOverridesAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -1382,6 +1421,30 @@ internal static class PostMergeCleanupRunner
         return content;
     }
 
+    private static string RemoveUnusedProjectSystemSubscriptionService(string content)
+    {
+        content = content.Replace(
+            "    IActiveConfigurationGroupSubscriptionService ActiveConfigurationGroupSubscriptionService { get; }" + Environment.NewLine,
+            string.Empty,
+            StringComparison.Ordinal);
+
+        content = content.Replace(
+            "        IProjectFaultHandlerService faultHandlerService," + Environment.NewLine +
+            "        IActiveConfigurationGroupSubscriptionService activeConfigurationGroupSubscriptionService)" + Environment.NewLine,
+            "        IProjectFaultHandlerService faultHandlerService)" + Environment.NewLine,
+            StringComparison.Ordinal);
+
+        content = ActiveConfigurationGroupNullCheckPattern.Replace(content, string.Empty);
+        content = ActiveConfigurationGroupAssignmentPattern.Replace(content, string.Empty);
+        content = ActiveConfigurationGroupPropertyPattern.Replace(content, string.Empty);
+        content = TestActiveConfigurationGroupInitializationPattern.Replace(content, string.Empty);
+        content = TestActiveConfigurationGroupPropertyPattern.Replace(content, string.Empty);
+        content = TestActiveConfigurationGroupInterfaceImplementationPattern.Replace(content, string.Empty);
+        content = TestActiveConfigurationGroupClassPattern.Replace(content, string.Empty);
+
+        return content;
+    }
+
     private static string NormalizeAdjacentMsBuildItemFormatting(string content)
     {
         string previous;
@@ -1671,6 +1734,34 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex StrictMockPredicateImplementationPattern = new(
         @"^[ \t]*=>\s*Mock\.Of<T>\(predicate,\s*MockBehavior\.Strict\);\s*$",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex ActiveConfigurationGroupNullCheckPattern = new(
+        @"\r?\n[ \t]*if \(activeConfigurationGroupSubscriptionService is null\)\r?\n[ \t]*\{\r?\n[ \t]*throw new ArgumentNullException\(nameof\(activeConfigurationGroupSubscriptionService\)\);\r?\n[ \t]*\}\r?\n",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex ActiveConfigurationGroupAssignmentPattern = new(
+        @"^[ \t]*ActiveConfigurationGroupSubscriptionService = activeConfigurationGroupSubscriptionService;\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex ActiveConfigurationGroupPropertyPattern = new(
+        @"^[ \t]*public IActiveConfigurationGroupSubscriptionService ActiveConfigurationGroupSubscriptionService \{ get; \}\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex TestActiveConfigurationGroupInitializationPattern = new(
+        @"^[ \t]*ActiveConfigurationGroupSubscriptionService = new TestActiveConfigurationGroupSubscriptionService\(\);\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex TestActiveConfigurationGroupPropertyPattern = new(
+        @"^[ \t]*public TestActiveConfigurationGroupSubscriptionService ActiveConfigurationGroupSubscriptionService \{ get; \}\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex TestActiveConfigurationGroupInterfaceImplementationPattern = new(
+        @"^[ \t]*IActiveConfigurationGroupSubscriptionService IUnconfiguredProjectCommonServices\.ActiveConfigurationGroupSubscriptionService => ActiveConfigurationGroupSubscriptionService;\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex TestActiveConfigurationGroupClassPattern = new(
+        @"\r?\n[ \t]*public class TestActiveConfigurationGroupSubscriptionService : IActiveConfigurationGroupSubscriptionService\r?\n[ \t]*\{.*?^[ \t]*\}\r?\n",
+        RegexOptions.Singleline | RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private const string RazorSdkPackageVersion = "6.0.0-alpha.1.21072.5";
 
