@@ -423,6 +423,7 @@ internal static class PostMergeCleanupRunner
 
             var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
             var updatedContent = RazorPackageProjectUrlPattern.Replace(originalContent, string.Empty);
+            updatedContent = RazorPackageProjectUrlCommentPattern.Replace(updatedContent, string.Empty);
             updatedContent = RazorRepositoryUrlPattern.Replace(updatedContent, string.Empty);
 
             if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
@@ -1297,6 +1298,10 @@ internal static class PostMergeCleanupRunner
 
     private static readonly Regex RazorPackageProjectUrlPattern = new(
         @"(?:^[ \t]*<!--\s*When building in the VMR, we still want the package project url to point to this repo\s*-->\r?\n)?^[ \t]*<PackageProjectUrl>\s*https://github\.com/dotnet/razor\s*</PackageProjectUrl>\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex RazorPackageProjectUrlCommentPattern = new(
+        @"^[ \t]*<!--\s*When building in the VMR, we still want the package project url to point to this repo\s*-->\r?\n(?:^[ \t]*\r?\n)?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static readonly Regex RazorRepositoryUrlPattern = new(
