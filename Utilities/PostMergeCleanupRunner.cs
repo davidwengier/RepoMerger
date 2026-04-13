@@ -53,6 +53,12 @@ internal static class PostMergeCleanupRunner
             "After the merge, Razor should import local copies of its globalconfigs from src\\Razor so Razor-specific analyzer settings are preserved, while trimming entries already supplied by Roslyn avoids duplicate key warnings.",
             OverlayRazorGlobalConfigsAsync),
         new(
+            "remove-razor-repository-metadata-overrides",
+            "Remove Razor-local PackageProjectUrl and RepositoryUrl overrides so Roslyn's repo metadata stays authoritative.",
+            "Remove Razor repository metadata overrides",
+            "Inside the merged Roslyn tree, Razor packages and projects should inherit Roslyn's repository metadata instead of overriding it back to https://github.com/dotnet/razor, which can break shared packaging validation.",
+            RemoveRazorRepositoryMetadataOverridesAsync),
+        new(
             "rewrite-directory-packages-props",
             "Rewrite Razor Directory.Packages.props to import the repo-root file and remove duplicate package versions.",
             "Rewrite Razor Directory.Packages.props",
@@ -396,6 +402,39 @@ internal static class PostMergeCleanupRunner
         }
 
         return string.Join(" ", summaryParts);
+    }
+
+    private static async Task<string> RemoveRazorRepositoryMetadataOverridesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        var candidateFiles = new[]
+        {
+            Path.Combine(targetRoot, "Directory.Build.props"),
+            Path.Combine(targetRoot, "src", "Compiler", "Directory.Build.props"),
+        };
+
+        foreach (var path in candidateFiles)
+        {
+            if (!File.Exists(path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = RazorPackageProjectUrlPattern.Replace(originalContent, string.Empty);
+            updatedContent = RazorRepositoryUrlPattern.Replace(updatedContent, string.Empty);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor repository metadata overrides were found."
+            : $"Removed Razor-specific PackageProjectUrl/RepositoryUrl overrides from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RewriteDirectoryPackagesPropsAsync(StageContext context)
@@ -1255,6 +1294,14 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex GlobalConfigSettingPattern = new(
         @"^\s*(?<key>[^#][^=]*?)\s*=\s*(?<value>.*?)\s*$",
         RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageProjectUrlPattern = new(
+        @"(?:^[ \t]*<!--\s*When building in the VMR, we still want the package project url to point to this repo\s*-->\r?\n)?^[ \t]*<PackageProjectUrl>\s*https://github\.com/dotnet/razor\s*</PackageProjectUrl>\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex RazorRepositoryUrlPattern = new(
+        @"^[ \t]*<RepositoryUrl>\s*https://github\.com/dotnet/razor\s*</RepositoryUrl>\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static readonly Regex GeneratePkgDefFileTruePattern = new(
         @"<GeneratePkgDefFile>\s*true\s*</GeneratePkgDefFile>",
