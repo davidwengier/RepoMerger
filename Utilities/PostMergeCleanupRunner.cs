@@ -77,6 +77,12 @@ internal static class PostMergeCleanupRunner
             "Razor should use Roslyn's shared Microsoft.Extensions versioning instead of carrying its own ObjectPool package version entry in the merged repository.",
             NormalizeObjectPoolPackageVersionAsync),
         new(
+            "normalize-razor-benchmarkdotnet-apis",
+            "Rewrite Razor microbenchmark runners to avoid BenchmarkDotNet APIs newer than Roslyn's shared package version.",
+            "Normalize Razor BenchmarkDotNet runner APIs",
+            "Razor's microbenchmark runner programs should compile against Roslyn's centrally managed BenchmarkDotNet package instead of depending on newer API surface that Roslyn does not carry.",
+            NormalizeRazorBenchmarkDotNetApisAsync),
+        new(
             "remove-roslyn-diagnostics-analyzers",
             "Remove Roslyn.Diagnostics.Analyzers package references from Razor Directory.Build.props files.",
             "Remove Roslyn.Diagnostics.Analyzers refs",
@@ -543,6 +549,42 @@ internal static class PostMergeCleanupRunner
         return
             $"Updated {updatedCount} Razor Microsoft.Extensions.ObjectPool package version entr{(updatedCount == 1 ? "y" : "ies")} " +
             $"in '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use $(_MicrosoftExtensionsPackageVersion).";
+    }
+
+    private static async Task<string> NormalizeRazorBenchmarkDotNetApisAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        var candidateFiles = new[]
+        {
+            Path.Combine(targetRoot, "src", "Compiler", "perf", "Microbenchmarks", "Program.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "benchmarks", "Microsoft.AspNetCore.Razor.Microbenchmarks", "Program.cs"),
+        };
+
+        foreach (var path in candidateFiles)
+        {
+            if (!File.Exists(path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = BenchmarkDotNetBuildTimeoutPattern.Replace(originalContent, string.Empty);
+            updatedContent = BenchmarkDotNetNetCoreApp80JobPattern.Replace(
+                updatedContent,
+                "${indent}.AddJob(Job.Default.DontEnforcePowerPlan()) // use the current runtime with Roslyn's shared BenchmarkDotNet defaults" + Environment.NewLine);
+            updatedContent = BenchmarkDotNetDisassemblySyntaxPattern.Replace(updatedContent, string.Empty);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor BenchmarkDotNet compatibility rewrites were needed."
+            : $"Rewrote Razor BenchmarkDotNet runner configuration in {changedFiles.Count} file(s) to stay compatible with Roslyn's shared package version: {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> NormalizeSdkRazorPackageVersionAsync(StageContext context)
@@ -1324,6 +1366,18 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex GeneratePkgDefFileTruePattern = new(
         @"<GeneratePkgDefFile>\s*true\s*</GeneratePkgDefFile>",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex BenchmarkDotNetBuildTimeoutPattern = new(
+        @"^[ \t]*\.WithBuildTimeout\(TimeSpan\.FromMinutes\(15\)\)\s*(?://.*)?\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex BenchmarkDotNetNetCoreApp80JobPattern = new(
+        @"^(?<indent>[ \t]*)\.AddJob\(GetJob\(CsProjCoreToolchain\.NetCoreApp80\)\)\s*(?://.*)?\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex BenchmarkDotNetDisassemblySyntaxPattern = new(
+        @"^[ \t]*syntax:\s*DisassemblySyntax\.Masm,\s*(?://.*)?\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
