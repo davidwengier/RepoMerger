@@ -96,9 +96,9 @@ internal static class PostMergeCleanupRunner
             RemoveRoslynDiagnosticsAnalyzersAsync),
         new(
             "remove-xunit-execution-package-refs",
-            "Remove explicit xunit.extensibility.execution package refs from Razor test projects and defer to Roslyn's XUnit.targets.",
-            "Remove Razor xunit.extensibility.execution refs",
-            "Razor does not need to reference xunit.extensibility.execution explicitly because Roslyn already supplies the required xUnit test infrastructure through eng\\targets\\XUnit.targets.",
+            "Remove redundant xunit.extensibility.execution refs from Razor unit tests while preserving helper projects that still use xUnit discovery APIs.",
+            "Normalize Razor xunit.extensibility.execution refs",
+            "Roslyn's XUnit.targets already adds xunit.extensibility.execution for true unit test projects, but helper libraries like Microsoft.AspNetCore.Razor.Test.Common still need an explicit reference because they are not marked as IsUnitTestProject.",
             RemoveXunitExecutionPackageReferencesAsync),
         new(
             "remove-projectsystem-sdk-package-refs",
@@ -742,8 +742,13 @@ internal static class PostMergeCleanupRunner
     {
         var targetRepoRoot = context.TargetRepoRoot;
         var targetRoot = context.TargetRoot;
+        var sourceRazorRoot = Path.Combine(context.State.SourceCloneDirectory, "src", "Razor");
         var changedFiles = new List<string>();
         var removedReferenceCount = 0;
+        var restoredReferenceCount = 0;
+        var sourceProjectsWithExplicitReference = Directory.Exists(sourceRazorRoot)
+            ? await GetSourceProjectsWithExplicitPackageReferenceAsync(sourceRazorRoot, "xunit.extensibility.execution").ConfigureAwait(false)
+            : [];
 
         foreach (var projectPath in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
         {
@@ -753,6 +758,39 @@ internal static class PostMergeCleanupRunner
                 .Where(static element => element.Name.LocalName == "PackageReference")
                 .Where(static element => IsPackageReferenceFor(element, "xunit.extensibility.execution"))
                 .ToList();
+
+            var relativeProjectPath = NormalizeRelativePath(Path.GetRelativePath(targetRoot, projectPath));
+            var shouldKeepExplicitReference =
+                sourceProjectsWithExplicitReference.Contains(relativeProjectPath)
+                && !IsRoslynUnitTestProject(projectPath, document);
+
+            if (shouldKeepExplicitReference)
+            {
+                if (packageReferences.Count > 0)
+                    continue;
+
+                var packageReference = new XElement(
+                    (document.Root?.Name.Namespace ?? XNamespace.None) + "PackageReference",
+                    new XAttribute("Include", "xunit.extensibility.execution"));
+
+                var xunitAnalyzersReference = document
+                    .Descendants()
+                    .FirstOrDefault(static element => element.Name.LocalName == "PackageReference" && IsPackageReferenceFor(element, "xunit.analyzers"));
+
+                if (xunitAnalyzersReference is not null)
+                {
+                    xunitAnalyzersReference.AddAfterSelf(packageReference);
+                }
+                else
+                {
+                    GetOrCreatePackageReferenceItemGroup(document).Add(packageReference);
+                }
+
+                restoredReferenceCount++;
+                await SaveXmlAsync(document, projectPath).ConfigureAwait(false);
+                changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
+                continue;
+            }
 
             if (packageReferences.Count == 0)
                 continue;
@@ -771,9 +809,9 @@ internal static class PostMergeCleanupRunner
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
         }
 
-        return removedReferenceCount == 0
-            ? "No explicit xunit.extensibility.execution package references were found in Razor projects."
-            : $"Removed {removedReferenceCount} explicit xunit.extensibility.execution reference(s) from {changedFiles.Count} Razor project(s): {string.Join(", ", changedFiles)}.";
+        return removedReferenceCount == 0 && restoredReferenceCount == 0
+            ? "No xunit.extensibility.execution cleanup changes were needed in Razor projects."
+            : $"Normalized xunit.extensibility.execution references in {changedFiles.Count} Razor project(s): removed {removedReferenceCount} redundant reference(s) and restored {restoredReferenceCount} required reference(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveProjectSystemSdkPackageReferencesAsync(StageContext context)
@@ -1098,6 +1136,63 @@ internal static class PostMergeCleanupRunner
     private static bool IsRootDirectoryPackagesImport(XElement element)
         => element.Name.LocalName == "Import"
             && (element.Attribute("Project")?.Value?.Contains("GetPathOfFileAbove('Directory.Packages.props'", StringComparison.Ordinal) ?? false);
+
+    private static bool IsRoslynUnitTestProject(string projectPath, XDocument document)
+    {
+        var explicitIsUnitTestValues = document
+            .Descendants()
+            .Where(static element => element.Name.LocalName == "IsUnitTestProject")
+            .Select(static element => element.Value.Trim())
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .ToList();
+
+        if (explicitIsUnitTestValues.Any(static value => string.Equals(value, "false", StringComparison.OrdinalIgnoreCase)))
+            return false;
+
+        if (explicitIsUnitTestValues.Any(static value => string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        var projectName = Path.GetFileNameWithoutExtension(projectPath);
+        return projectName.EndsWith(".Test", StringComparison.OrdinalIgnoreCase)
+            || projectName.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase)
+            || projectName.EndsWith(".UnitTests", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<HashSet<string>> GetSourceProjectsWithExplicitPackageReferenceAsync(string sourceRoot, string packageId)
+    {
+        var projects = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var projectPath in Directory.EnumerateFiles(sourceRoot, "*.csproj", SearchOption.AllDirectories))
+        {
+            var document = await LoadXmlAsync(projectPath).ConfigureAwait(false);
+            if (document.Descendants().Any(element => element.Name.LocalName == "PackageReference" && IsPackageReferenceFor(element, packageId)))
+                projects.Add(NormalizeRelativePath(Path.GetRelativePath(sourceRoot, projectPath)));
+        }
+
+        return projects;
+    }
+
+    private static XElement GetOrCreatePackageReferenceItemGroup(XDocument document)
+    {
+        var root = document.Root
+            ?? throw new InvalidOperationException("Project file does not contain a root element.");
+
+        var existingItemGroup = root
+            .Elements()
+            .FirstOrDefault(static element =>
+                element.Name.LocalName == "ItemGroup"
+                && element.Elements().Any(static child => child.Name.LocalName == "PackageReference"));
+
+        if (existingItemGroup is not null)
+            return existingItemGroup;
+
+        var itemGroup = new XElement(root.Name.Namespace + "ItemGroup");
+        root.Add(itemGroup);
+        return itemGroup;
+    }
+
+    private static string NormalizeRelativePath(string path)
+        => path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
 
     private static XElement CreateRootDirectoryImport(XNamespace xmlNamespace, string fileName)
         => new(

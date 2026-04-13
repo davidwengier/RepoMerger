@@ -38,6 +38,10 @@ public static class GitRunner
             return false;
 
         await RunGitAsync(repositoryDirectory, "add", "--update", "--", ".").ConfigureAwait(false);
+        var stagedStatus = await GetShortStatusAsync(repositoryDirectory).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(stagedStatus))
+            return false;
+
         await CommitAsync(repositoryDirectory, message, additionalParagraphs).ConfigureAwait(false);
         return true;
     }
