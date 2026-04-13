@@ -42,7 +42,7 @@ internal static class PostMergeCleanupRunner
             RewriteDirectoryBuildImportsAsync),
         new(
             "overlay-razor-globalconfigs",
-            "Copy Razor globalconfigs into src\\Razor and keep only Razor-specific analyzer settings.",
+            "Copy Razor globalconfigs directly into src\\Razor and keep only Razor-specific analyzer settings.",
             "Overlay Razor globalconfigs",
             "After the merge, Razor should import local copies of its globalconfigs from src\\Razor so Razor-specific analyzer settings are preserved, while trimming entries already supplied by Roslyn avoids duplicate key warnings.",
             OverlayRazorGlobalConfigsAsync),
@@ -302,8 +302,7 @@ internal static class PostMergeCleanupRunner
         if (!Directory.Exists(sourceGlobalConfigsRoot))
             return "No Razor globalconfigs directory was found for overlay cleanup.";
 
-        var targetGlobalConfigsRoot = Path.Combine(targetRoot, "eng", "config", "globalconfigs");
-        Directory.CreateDirectory(targetGlobalConfigsRoot);
+        var targetGlobalConfigsRoot = targetRoot;
 
         var updatedOverlayFiles = new List<string>();
         foreach (var fileName in RazorGlobalConfigFileNames)
@@ -331,6 +330,8 @@ internal static class PostMergeCleanupRunner
             updatedOverlayFiles.Add(Path.GetRelativePath(targetRepoRoot, targetPath));
         }
 
+        var removedLegacyOverlayFiles = RemoveLegacyRazorGlobalConfigOverlayFiles(targetRoot);
+
         var importsUpdated = false;
         if (File.Exists(directoryBuildTargetsPath))
         {
@@ -343,7 +344,7 @@ internal static class PostMergeCleanupRunner
             }
         }
 
-        if (updatedOverlayFiles.Count == 0 && !importsUpdated)
+        if (updatedOverlayFiles.Count == 0 && removedLegacyOverlayFiles.Count == 0 && !importsUpdated)
             return "No Razor globalconfig overlay changes were needed.";
 
         var summaryParts = new List<string>();
@@ -357,6 +358,12 @@ internal static class PostMergeCleanupRunner
         {
             summaryParts.Add(
                 $"Updated '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}' to import the Razor-local globalconfig overlay.");
+        }
+
+        if (removedLegacyOverlayFiles.Count > 0)
+        {
+            summaryParts.Add(
+                $"Removed {removedLegacyOverlayFiles.Count} legacy Razor overlay file(s): {string.Join(", ", removedLegacyOverlayFiles)}.");
         }
 
         return string.Join(" ", summaryParts);
@@ -986,6 +993,35 @@ internal static class PostMergeCleanupRunner
         return !string.Equals(key, "is_global", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static List<string> RemoveLegacyRazorGlobalConfigOverlayFiles(string targetRoot)
+    {
+        var removedFiles = new List<string>();
+        var legacyRoot = Path.Combine(targetRoot, "eng", "config", "globalconfigs");
+        if (!Directory.Exists(legacyRoot))
+            return removedFiles;
+
+        foreach (var fileName in RazorGlobalConfigFileNames)
+        {
+            var legacyPath = Path.Combine(legacyRoot, fileName);
+            if (!File.Exists(legacyPath))
+                continue;
+
+            File.Delete(legacyPath);
+            removedFiles.Add(Path.GetRelativePath(targetRoot, legacyPath));
+        }
+
+        DeleteDirectoryIfEmpty(legacyRoot);
+        DeleteDirectoryIfEmpty(Path.Combine(targetRoot, "eng", "config"));
+        DeleteDirectoryIfEmpty(Path.Combine(targetRoot, "eng"));
+        return removedFiles;
+    }
+
+    private static void DeleteDirectoryIfEmpty(string path)
+    {
+        if (Directory.Exists(path) && !Directory.EnumerateFileSystemEntries(path).Any())
+            Directory.Delete(path);
+    }
+
     private static string RewriteRazorGlobalConfigImportContent(string content)
         => GlobalAnalyzerConfigItemGroupPattern.IsMatch(content)
             ? GlobalAnalyzerConfigItemGroupPattern.Replace(content, $"$1{RazorGlobalConfigItemGroupBlock}", 1)
@@ -1212,13 +1248,13 @@ internal static class PostMergeCleanupRunner
         [
             "  <ItemGroup>",
             "    <!-- Always include Common.globalconfig -->",
-            @"    <EditorConfigFiles Include=""$(MSBuildThisFileDirectory)eng\config\globalconfigs\Common.globalconfig"" />",
+            @"    <EditorConfigFiles Include=""$(MSBuildThisFileDirectory)Common.globalconfig"" />",
             "    <!-- Include Shipping.globalconfig for shipping projects -->",
-            @"    <EditorConfigFiles Condition=""'$(IsShipping)' == 'true'"" Include=""$(MSBuildThisFileDirectory)eng\config\globalconfigs\Shipping.globalconfig"" />",
+            @"    <EditorConfigFiles Condition=""'$(IsShipping)' == 'true'"" Include=""$(MSBuildThisFileDirectory)Shipping.globalconfig"" />",
             "    <!-- Include NonShipping.globalconfig for non-shipping projects, except for API shims -->",
-            @"    <EditorConfigFiles Condition=""'$(IsShipping)' != 'true' AND '$(IsApiShim)' != 'true'"" Include=""$(MSBuildThisFileDirectory)eng\config\globalconfigs\NonShipping.globalconfig"" />",
+            @"    <EditorConfigFiles Condition=""'$(IsShipping)' != 'true' AND '$(IsApiShim)' != 'true'"" Include=""$(MSBuildThisFileDirectory)NonShipping.globalconfig"" />",
             "    <!-- Include ApiShim.globalconfig for API shim projects -->",
-            @"    <EditorConfigFiles Condition=""'$(IsApiShim)' == 'true'"" Include=""$(MSBuildThisFileDirectory)eng\config\globalconfigs\ApiShim.globalconfig"" />",
+            @"    <EditorConfigFiles Condition=""'$(IsApiShim)' == 'true'"" Include=""$(MSBuildThisFileDirectory)ApiShim.globalconfig"" />",
             "  </ItemGroup>",
         ]) + Environment.NewLine;
 
