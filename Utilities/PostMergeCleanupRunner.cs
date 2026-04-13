@@ -89,6 +89,12 @@ internal static class PostMergeCleanupRunner
             "Razor test projects in the merged Roslyn tree should get Roslyn's required test utility references and produce *.UnitTests.dll outputs so they match Roslyn's test-runner conventions, while the microbenchmark generator helper should not be treated as a Roslyn UnitTests assembly.",
             NormalizeRazorUnitTestDetectionAsync),
         new(
+            "normalize-razor-moq-apis",
+            "Rewrite Razor test Moq usage to stay compatible with Roslyn's shared Moq package version.",
+            "Normalize Razor Moq APIs",
+            "Razor test helpers and test code in the merged Roslyn tree should use Moq APIs that exist in Roslyn's shared version, instead of relying on newer Mock.Of(..., MockBehavior.Strict) overloads that Roslyn does not carry.",
+            NormalizeRazorMoqApisAsync),
+        new(
             "remove-roslyn-diagnostics-analyzers",
             "Remove Roslyn.Diagnostics.Analyzers package references from Razor Directory.Build.props files.",
             "Remove Roslyn.Diagnostics.Analyzers refs",
@@ -660,6 +666,29 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor unit test detection cleanup was needed."
             : $"Normalized Razor unit test detection in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorMoqApisAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        foreach (var path in Directory.EnumerateFiles(targetRoot, "*.cs", SearchOption.AllDirectories))
+        {
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = NormalizeStrictMoqCalls(originalContent);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor Moq compatibility rewrites were needed."
+            : $"Normalized Razor Moq API usage in {changedFiles.Count} file(s) to stay compatible with Roslyn's shared package version: {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> NormalizeSdkRazorPackageVersionAsync(StageContext context)
@@ -1331,6 +1360,28 @@ internal static class PostMergeCleanupRunner
         return pattern.Replace(content, string.Empty);
     }
 
+    private static string NormalizeStrictMoqCalls(string content)
+    {
+        content = StrictMoqOfWithPredicatePattern.Replace(
+            content,
+            "global::Microsoft.AspNetCore.Razor.Test.Common.StrictMock.Of<${type}>(${predicate})");
+        content = StrictMoqOfPattern.Replace(
+            content,
+            "global::Microsoft.AspNetCore.Razor.Test.Common.StrictMock.Of<${type}>()");
+
+        if (content.Contains("public static class StrictMock", StringComparison.Ordinal))
+        {
+            content = StrictMockNoPredicateImplementationPattern.Replace(
+                content,
+                "        => new Mock<T>(MockBehavior.Strict).Object;");
+            content = StrictMockPredicateImplementationPattern.Replace(
+                content,
+                "        => Mock.Of(predicate);");
+        }
+
+        return content;
+    }
+
     private static string NormalizeAdjacentMsBuildItemFormatting(string content)
     {
         string previous;
@@ -1604,6 +1655,22 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex AdjacentMsBuildItemPattern = new(
         @"(?m)^(?<indent>[ \t]*)(?<first><(?:PackageReference|ProjectReference)\b[^>]*/>)[ \t]*(?<second><(?:PackageReference|ProjectReference)\b[^>]*/>)",
         RegexOptions.CultureInvariant);
+
+    private static readonly Regex StrictMoqOfPattern = new(
+        @"Mock\.Of<(?<type>.+?)>\(\s*MockBehavior\.Strict\s*\)",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex StrictMoqOfWithPredicatePattern = new(
+        @"Mock\.Of<(?<type>.+?)>\((?<predicate>.+?),\s*MockBehavior\.Strict\s*\)",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex StrictMockNoPredicateImplementationPattern = new(
+        @"^[ \t]*=>\s*Mock\.Of<T>\(MockBehavior\.Strict\);\s*$",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex StrictMockPredicateImplementationPattern = new(
+        @"^[ \t]*=>\s*Mock\.Of<T>\(predicate,\s*MockBehavior\.Strict\);\s*$",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private const string RazorSdkPackageVersion = "6.0.0-alpha.1.21072.5";
 
