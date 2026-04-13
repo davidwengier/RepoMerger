@@ -5,36 +5,11 @@ namespace RepoMerger;
 public static class SolutionPathUpdater
 {
     private const string RepositoryEngineeringDirProperty = "$(RepositoryEngineeringDir)";
-    private const string MSBuildThisFileDirectoryProperty = "$(MSBuildThisFileDirectory)";
     private const string RepoRootProperty = "$(RepoRoot)";
-
-    private static readonly Regex MsBuildThisFileDirectoryEngPathPattern = new(
-        Regex.Escape(MSBuildThisFileDirectoryProperty) + """eng(?<suffix>(?:[\\/][^"'<>;\r\n]*)?)(?=(?:["'<>\s;]|$))""",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
-
-    private static readonly Regex RepoRootEngPathPattern = new(
-        Regex.Escape(RepoRootProperty) + """eng(?<suffix>(?:[\\/][^"'<>;\r\n]*)?)(?=(?:["'<>\s;]|$))""",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
-
-    private static readonly Regex DirectEngPathPattern = new(
-        """(?<prefix>^|["'=;>\s])eng(?<suffix>(?:[\\/][^"'<>;\r\n]*)?)(?=(?:["'<>\s;]|$))""",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Multiline);
 
     private static readonly Regex RepoRootReferencePattern = new(
         Regex.Escape(RepoRootProperty) + """(?<suffix>[^"'<>;\r\n]*)""",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    public static async Task<int> NormalizeRepositoryEngineeringReferencesAsync(string repositoryRoot)
-    {
-        var updatedCount = 0;
-        foreach (var filePath in EnumerateProjectAndBuildFiles(repositoryRoot))
-        {
-            if (await NormalizeRepositoryEngineeringReferencesInFileAsync(filePath).ConfigureAwait(false))
-                updatedCount++;
-        }
-
-        return updatedCount;
-    }
 
     public static async Task<int> RewriteRepoRootReferencesAsync(string repositoryRoot, string targetRelativePath)
     {
@@ -76,26 +51,6 @@ public static class SolutionPathUpdater
             .Concat(Directory.GetFiles(repositoryRoot, "*.props", SearchOption.AllDirectories))
             .Concat(Directory.GetFiles(repositoryRoot, "*.targets", SearchOption.AllDirectories))
             .Distinct(StringComparer.OrdinalIgnoreCase);
-
-    private static async Task<bool> NormalizeRepositoryEngineeringReferencesInFileAsync(string filePath)
-    {
-        var originalText = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
-        var updatedText = MsBuildThisFileDirectoryEngPathPattern.Replace(
-            originalText,
-            match => RewriteRepositoryEngineeringReference(match.Groups["suffix"].Value));
-        updatedText = RepoRootEngPathPattern.Replace(
-            updatedText,
-            match => RewriteRepositoryEngineeringReference(match.Groups["suffix"].Value));
-        updatedText = DirectEngPathPattern.Replace(
-            updatedText,
-            match => $"{match.Groups["prefix"].Value}{RewriteRepositoryEngineeringReference(match.Groups["suffix"].Value)}");
-
-        if (string.Equals(originalText, updatedText, StringComparison.Ordinal))
-            return false;
-
-        await File.WriteAllTextAsync(filePath, updatedText).ConfigureAwait(false);
-        return true;
-    }
 
     private static async Task<bool> RewriteRepoRootReferencesInFileAsync(string repositoryRoot, string filePath, string targetRelativePath)
     {

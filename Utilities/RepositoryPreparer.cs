@@ -53,14 +53,6 @@ internal static class RepositoryPreparer
         if (!string.IsNullOrWhiteSpace(status))
             throw new InvalidOperationException("The source clone is not clean. Preparation expects a clean checkout.");
 
-        var normalizedEngFiles = await SolutionPathUpdater.NormalizeRepositoryEngineeringReferencesAsync(sourceRoot).ConfigureAwait(false);
-        if (normalizedEngFiles > 0)
-        {
-            await CommitPreparationStepAsync(
-                sourceRoot,
-                "Normalize eng path references to $(RepositoryEngineeringDir)").ConfigureAwait(false);
-        }
-
         var topLevelEntries = Directory.GetFileSystemEntries(sourceRoot)
             .Select(static path => Path.GetFileName(path))
             .Where(static name => !string.IsNullOrEmpty(name) && !string.Equals(name, ".git", StringComparison.OrdinalIgnoreCase))
@@ -116,7 +108,7 @@ internal static class RepositoryPreparer
                 $"Rewrite $(RepoRoot) references for '{targetRelativePath}' nesting").ConfigureAwait(false);
         }
 
-        var updatedFileCount = normalizedEngFiles + updatedPathFiles + rewrittenRepoRootFiles;
+        var updatedFileCount = updatedPathFiles + rewrittenRepoRootFiles;
 
         if (srcTreeAlreadyNested && rootMoveCount == 0 && updatedFileCount == 0)
         {
