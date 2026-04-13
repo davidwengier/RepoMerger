@@ -22,38 +22,53 @@ Prefer the short run name `razor` for RepoMerger validation runs to avoid long W
 
 Err on the side of **removing** Razor-local configuration and deferring to Roslyn's existing packages, versions, targets, conventions, and infrastructure.
 
+But do **not** delete Razor-local config blindly. First compare the Razor source file to the Roslyn target file it would use after the merge:
+
+- if the files are effectively the same, removing the Razor-local duplication is preferred
+- if Razor carries meaningful settings that Roslyn does not, preserve them with a **Razor-local overlay** under `src\Razor` and strip out only the keys that Roslyn already provides
+- for `.globalconfig` conflicts, prefer copying Razor's files into `src\Razor`, trimming duplicate keys, and rewriting Razor imports to point at those local files rather than re-importing Roslyn's shared files twice
+
 Good fixes look like:
 
 - removing duplicate package references that Roslyn already adds centrally
 - removing Razor-local analyzer references that Roslyn already enforces elsewhere
 - rewriting Razor package versions to use Roslyn's shared version properties
 - deleting redundant imports or build/test settings that conflict with Roslyn infrastructure
+- preserving Razor-only analyzer settings by localizing them under `src\Razor` when Roslyn already imports overlapping shared config
 
 Avoid fixing the issue by changing Roslyn's central infrastructure unless the user explicitly asks for that.
+
+When editing MSBuild/XML/config files, keep the diff **surgical**:
+
+- remove stale comments when removing the associated imports or items
+- preserve existing encoding/BOM and avoid unrelated reformatting
+- prefer targeted text rewrites over whole-file XML reserialization when the latter would churn unrelated lines
 
 ## Workflow
 
 1. Run `build.cmd -restore` in `D:\Code\repo-merge-work\razor\target`.
 2. Choose **one** warning or error to address.
 3. Identify the root cause by searching under `src\Razor` and comparing it to Roslyn's root-level build/test/package infrastructure.
-4. Implement the fix in `Utilities\PostMergeCleanupRunner.cs` as a new or updated post-merge cleanup step.
-5. Keep the cleanup:
+4. If the issue involves props/targets/globalconfigs/editorconfigs, compare the **Razor source checkout** with the **merged Roslyn target** before removing anything so you can tell whether the config is duplicate or Razor-specific.
+5. Implement the fix in `Utilities\PostMergeCleanupRunner.cs` as a new or updated post-merge cleanup step.
+6. Keep the cleanup:
    - idempotent
    - focused on a single root cause
    - biased toward removing Razor-specific duplication
-6. Build RepoMerger:
+   - careful not to lose Razor-only behavior when a local overlay is safer than deletion
+7. Build RepoMerger:
 
    ```powershell
    dotnet build RepoMerger.slnx
    ```
 
-7. Apply the cleanup against the existing worktree:
+8. Apply the cleanup against the existing worktree:
 
    ```powershell
    dotnet run -- --run-name razor --post-merge-cleanup-only
    ```
 
-8. Re-run:
+9. Re-run:
 
    ```powershell
    .\build.cmd -restore
@@ -61,7 +76,7 @@ Avoid fixing the issue by changing Roslyn's central infrastructure unless the us
 
    Confirm that the specific issue you chose is gone or that restore has moved on to the next issue in the queue.
 
-9. Commit the RepoMerger change.
+10. Commit the RepoMerger change.
 
 ## Commit message guidance
 
