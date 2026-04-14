@@ -83,6 +83,18 @@ internal static class PostMergeCleanupRunner
             "Razor should use Roslyn's shared Microsoft.Extensions versioning instead of carrying its own ObjectPool package version entry in the merged repository.",
             NormalizeObjectPoolPackageVersionAsync),
         new(
+            "normalize-basic-reference-assemblies-version",
+            "Remove Razor's local Basic.Reference.Assemblies version override so the merged tree uses Roslyn's shared version.",
+            "Normalize Razor Basic.Reference.Assemblies version",
+            "Razor's src\\Razor\\Directory.Packages.props should inherit Roslyn's shared Basic.Reference.Assemblies version instead of pinning its older local 1.7.2 value, which triggers restore failures in the merged tree.",
+            NormalizeBasicReferenceAssembliesVersionAsync),
+        new(
+            "remove-roslyn-testing-package-overrides",
+            "Rewrite Razor's local Microsoft.CodeAnalysis.Analyzer.Testing version pin to Roslyn's shared testing-version property.",
+            "Normalize Razor testing package version",
+            "Razor still needs a local PackageVersion entry for Microsoft.CodeAnalysis.Analyzer.Testing, but in the merged tree it should use Roslyn's shared $(MicrosoftCodeAnalysisTestingVersion) instead of pinning an older preview version that causes package downgrade errors.",
+            RemoveRoslynTestingPackageOverridesAsync),
+        new(
             "normalize-razor-benchmarkdotnet-apis",
             "Rewrite Razor microbenchmark runners to avoid BenchmarkDotNet APIs newer than Roslyn's shared package version.",
             "Normalize Razor BenchmarkDotNet runner APIs",
@@ -100,6 +112,18 @@ internal static class PostMergeCleanupRunner
             "Normalize Razor VS test harness refs",
             "When Razor's Visual Studio integration tests reference Roslyn's in-repo Microsoft.VisualStudio.Extensibility.Testing.SourceGenerator project, the reference must stay an Analyzer project reference so TestService and AbstractIdeIntegrationTest sources are generated during build.",
             NormalizeRazorVisualStudioTestHarnessReferencesAsync),
+        new(
+            "normalize-razor-liveshare-test-session",
+            "Implement the extra CollaborationSession members required by Roslyn's shared Live Share package in Razor's test stub.",
+            "Normalize Razor Live Share test session",
+            "Razor's TestCollaborationSession test stub should implement the ConversationId, IsSessionConnected, and SessionDisconnection members expected by Roslyn's shared Microsoft.VisualStudio.LiveShare version.",
+            NormalizeRazorLiveShareTestSessionAsync),
+        new(
+            "normalize-razor-vs-restore-manager-refs",
+            "Add Roslyn's shared NuGet.SolutionRestoreManager interop package to Razor's Visual Studio integration tests.",
+            "Normalize Razor VS restore manager refs",
+            "Razor's Visual Studio integration tests use IVsSolutionRestoreService APIs from NuGet.SolutionRestoreManager, so the merged tree should reference the same NuGet.SolutionRestoreManager.Interop package that Roslyn's own Visual Studio integration tests already carry.",
+            NormalizeRazorVisualStudioRestoreManagerReferencesAsync),
         new(
             "normalize-razor-moq-apis",
             "Rewrite Razor test Moq usage to stay compatible with Roslyn's shared Moq package version.",
@@ -315,7 +339,7 @@ internal static class PostMergeCleanupRunner
             if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
                 continue;
 
-            await File.WriteAllTextAsync(path, updatedContent).ConfigureAwait(false);
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
         }
 
@@ -550,6 +574,9 @@ internal static class PostMergeCleanupRunner
             return "No repo-root Directory.Packages.props file was found to import.";
 
         var rootPackageIds = await CollectPackageVersionIdsAsync(rootPackagesPath).ConfigureAwait(false);
+        var engPackagesPath = Path.Combine(targetRepoRoot, "eng", "Packages.props");
+        if (File.Exists(engPackagesPath))
+            rootPackageIds.UnionWith(await CollectPackageVersionIdsAsync(engPackagesPath).ConfigureAwait(false));
 
         var document = await LoadXmlAsync(razorPackagesPath).ConfigureAwait(false);
         var project = document.Root
@@ -634,6 +661,52 @@ internal static class PostMergeCleanupRunner
         return
             $"Updated {updatedCount} Razor Microsoft.Extensions.ObjectPool package version entr{(updatedCount == 1 ? "y" : "ies")} " +
             $"in '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use $(_MicrosoftExtensionsPackageVersion).";
+    }
+
+    private static async Task<string> NormalizeBasicReferenceAssembliesVersionAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var razorPackagesPath = Path.Combine(targetRoot, "Directory.Packages.props");
+        if (!File.Exists(razorPackagesPath))
+            return "No Razor Directory.Packages.props file was found for Basic.Reference.Assemblies version normalization.";
+
+        var originalContent = await File.ReadAllTextAsync(razorPackagesPath).ConfigureAwait(false);
+        var updatedContent = BasicReferenceAssembliesVersionPattern.Replace(originalContent, string.Empty, 1);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor Basic.Reference.Assemblies version override was found.";
+
+        await WriteTextPreservingUtf8BomAsync(razorPackagesPath, updatedContent, templatePath: razorPackagesPath).ConfigureAwait(false);
+        return
+            $"Updated '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to inherit Roslyn's shared Basic.Reference.Assemblies version.";
+    }
+
+    private static async Task<string> RemoveRoslynTestingPackageOverridesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var razorPackagesPath = Path.Combine(targetRoot, "Directory.Packages.props");
+        if (!File.Exists(razorPackagesPath))
+            return "No Razor Directory.Packages.props file was found for Roslyn testing package normalization.";
+
+        var originalContent = await File.ReadAllTextAsync(razorPackagesPath).ConfigureAwait(false);
+        var updatedContent = AnalyzerTestingPackageVersionPattern.IsMatch(originalContent)
+            ? AnalyzerTestingPackageVersionPattern.Replace(
+                originalContent,
+                "${prefix}$(MicrosoftCodeAnalysisTestingVersion)${suffix}",
+                1)
+            : AnalyzerTestingInsertionAnchorPattern.Replace(
+                originalContent,
+                "$0" + Environment.NewLine + @"    <PackageVersion Include=""Microsoft.CodeAnalysis.Analyzer.Testing"" Version=""$(MicrosoftCodeAnalysisTestingVersion)"" />",
+                1);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor Microsoft.CodeAnalysis.Analyzer.Testing version override was found.";
+
+        await WriteTextPreservingUtf8BomAsync(razorPackagesPath, updatedContent, templatePath: razorPackagesPath).ConfigureAwait(false);
+        return
+            $"Updated '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use Roslyn's shared Microsoft.CodeAnalysis.Analyzer.Testing version.";
     }
 
     private static async Task<string> NormalizeRazorBenchmarkDotNetApisAsync(StageContext context)
@@ -819,6 +892,72 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor Visual Studio test harness project reference cleanup was needed."
             : $"Normalized Razor Visual Studio test harness project references in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorLiveShareTestSessionAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var testSessionPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "test",
+            "Microsoft.VisualStudio.LanguageServices.Razor.Test",
+            "LiveShare",
+            "TestCollaborationSession.cs");
+
+        if (!File.Exists(testSessionPath))
+            return "No Razor Live Share test-session stub was found for compatibility cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(testSessionPath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(
+            "    public override string SessionId => throw new NotImplementedException();",
+            "    public override string SessionId => \"test-session\";",
+            StringComparison.Ordinal);
+
+        if (!updatedContent.Contains("public override string ConversationId =>", StringComparison.Ordinal))
+        {
+            updatedContent = updatedContent.Replace(
+                "    public override PeerAccess Access => throw new NotImplementedException();",
+                "    public override PeerAccess Access => throw new NotImplementedException();" + Environment.NewLine +
+                "    public override string ConversationId => SessionId;" + Environment.NewLine +
+                "    public override bool IsSessionConnected => true;" + Environment.NewLine +
+                "    public override Task SessionDisconnection => Task.CompletedTask;",
+                StringComparison.Ordinal);
+        }
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor Live Share test-session compatibility changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(testSessionPath, updatedContent, templatePath: testSessionPath).ConfigureAwait(false);
+        return $"Updated '{Path.GetRelativePath(targetRepoRoot, testSessionPath)}' to match Roslyn's current CollaborationSession API surface.";
+    }
+
+    private static async Task<string> NormalizeRazorVisualStudioRestoreManagerReferencesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var projectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "test",
+            "Microsoft.VisualStudio.Razor.IntegrationTests",
+            "Microsoft.VisualStudio.Razor.IntegrationTests.csproj");
+
+        if (!File.Exists(projectPath))
+            return "No Razor Visual Studio integration test project was found for restore-manager reference cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+        var updatedContent = EnsurePackageReferenceAfterPackageReference(
+            originalContent,
+            "NuGet.VisualStudio",
+            "NuGet.SolutionRestoreManager.Interop");
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor Visual Studio restore-manager package reference cleanup was needed.";
+
+        await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
+        return $"Added Roslyn's shared NuGet.SolutionRestoreManager.Interop reference to '{Path.GetRelativePath(targetRepoRoot, projectPath)}'.";
     }
 
     private static async Task<string> NormalizeSdkRazorPackageVersionAsync(StageContext context)
@@ -1654,6 +1793,12 @@ internal static class PostMergeCleanupRunner
         content = StrictMoqOfPattern.Replace(
             content,
             "StrictMock.Of<${type}>()");
+        content = ResidualStrictBehaviorWithPredicatePattern.Replace(
+            content,
+            "StrictMock.Of<${type}>(${predicate})");
+        content = ResidualStrictBehaviorOnlyPattern.Replace(
+            content,
+            "StrictMock.Of<${type}>()");
 
         if (content.Contains("public static class StrictMock", StringComparison.Ordinal))
         {
@@ -1968,7 +2113,7 @@ internal static class PostMergeCleanupRunner
     }
 
     private static readonly Regex CommonTargetsImportPattern = new(
-        @"^[ \t]*<Import\s+Project=""\$\(RepositoryEngineeringDir\)targets(?:\\|/)Common\.targets""\s*/>\r?\n?",
+        @"^[ \t]*<Import\s+Project=""(?:\$\(RepositoryEngineeringDir\)targets|eng(?:\\|/)targets)(?:\\|/)Common\.targets""\s*/>\r?\n?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex RepositoryEngineeringServicesPropsPattern = new(
@@ -2018,6 +2163,18 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex PackageProjectUrlElementPattern = new(
         @"^(?<indent>[ \t]*)<PackageProjectUrl>\s*[^<]+\s*</PackageProjectUrl>\s*$",
         RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex BasicReferenceAssembliesVersionPattern = new(
+        @"^[ \t]*<_BasicReferenceAssembliesVersion>.*?</_BasicReferenceAssembliesVersion>\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex AnalyzerTestingPackageVersionPattern = new(
+        @"(?<prefix><PackageVersion Include=""Microsoft\.CodeAnalysis\.Analyzer\.Testing""\s+Version="")[^""]+(?<suffix>""(?:\s+[^>]*)?/>)",
+        RegexOptions.CultureInvariant);
+
+    private static readonly Regex AnalyzerTestingInsertionAnchorPattern = new(
+        @"^[ \t]*<PackageVersion Include=""Microsoft\.AspNetCore\.App\.Runtime\.\$\(NetCoreSDKRuntimeIdentifier\)""[^>]*/>\s*$",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex BenchmarkDotNetBuildTimeoutPattern = new(
         @"^[ \t]*\.WithBuildTimeout\(TimeSpan\.FromMinutes\(15\)\)\s*(?://.*)?\r?\n",
@@ -2074,6 +2231,14 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex StrictMockPredicateImplementationPattern = new(
         @"^[ \t]*=>\s*(?:Mock\.Of<T>\(predicate,\s*MockBehavior\.Strict\)|StrictMock\.Of<T>\(predicate\))\s*;\s*$",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex ResidualStrictBehaviorOnlyPattern = new(
+        @"(?<![\w:.])(?:(?:global::Microsoft\.AspNetCore\.Razor\.Test\.Common\.)?StrictMock|Mock)\.Of<(?<type>[^>]+)>\(\s*MockBehavior\.Strict\s*\)",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    private static readonly Regex ResidualStrictBehaviorWithPredicatePattern = new(
+        @"(?<![\w:.])(?:(?:global::Microsoft\.AspNetCore\.Razor\.Test\.Common\.)?StrictMock|Mock)\.Of<(?<type>[^>]+)>\((?<predicate>[\s\S]*?),\s*MockBehavior\.Strict\s*\)",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
     private static readonly Regex ActiveConfigurationGroupNullCheckPattern = new(
         @"\r?\n[ \t]*if \(activeConfigurationGroupSubscriptionService is null\)\r?\n[ \t]*\{\r?\n[ \t]*throw new ArgumentNullException\(nameof\(activeConfigurationGroupSubscriptionService\)\);\r?\n[ \t]*\}\r?\n",
