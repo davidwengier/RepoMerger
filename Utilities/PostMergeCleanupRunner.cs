@@ -8,6 +8,8 @@ namespace RepoMerger;
 
 internal static class PostMergeCleanupRunner
 {
+    private const string RazorDiagnosticsAnalyzerReferenceCondition = "'$(BuildingInsideVisualStudio)' == 'true'";
+
     private static readonly CleanupStep[] Steps =
     [
         new(
@@ -137,11 +139,11 @@ internal static class PostMergeCleanupRunner
             "Roslyn already manages Roslyn.Diagnostics.Analyzers centrally, so the merged Razor tree should not add duplicate local analyzer references.",
             RemoveRoslynDiagnosticsAnalyzersAsync),
         new(
-            "remove-razor-diagnostics-analyzer-refs",
-            "Remove Razor's local build-analyzer project references so the merged Roslyn build stays free of compiler-version mismatch warnings.",
-            "Remove Razor diagnostics analyzer refs",
-            "Razor's in-repo diagnostics analyzer project should still build in the merged tree, but it should not be injected into every Razor build as a live analyzer because Roslyn's compiler bootstrap then emits CS9057 version-mismatch warnings.",
-            RemoveRazorDiagnosticsAnalyzerReferencesAsync),
+            "guard-razor-diagnostics-analyzer-refs",
+            "Keep Razor's local build analyzers enabled for Visual Studio developer builds, but skip them in command-line repo builds that use Roslyn's bootstrap flow.",
+            "Guard Razor diagnostics analyzer refs",
+            "Razor.Diagnostics.Analyzers are intended to light up diagnostics for developers working in the merged solution, so the analyzer references should remain in place for Visual Studio builds, but they need to be gated out of build.cmd's command-line bootstrap flow to avoid CS9057 compiler-version mismatch warnings.",
+            GuardRazorDiagnosticsAnalyzerReferencesAsync),
         new(
             "normalize-razor-warning-cleanups",
             "Adjust Razor Live Share helpers and the code-folding integration test to compile cleanly under Roslyn's warning set.",
@@ -1048,34 +1050,79 @@ internal static class PostMergeCleanupRunner
             : $"Removed {removedReferenceCount} Roslyn.Diagnostics.Analyzers reference(s) from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
-    private static async Task<string> RemoveRazorDiagnosticsAnalyzerReferencesAsync(StageContext context)
+    private static async Task<string> GuardRazorDiagnosticsAnalyzerReferencesAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
         var targetRoot = context.TargetRoot;
+        var sourceRazorRoot = Path.Combine(context.State.SourceCloneDirectory, "src", "Razor");
         var changedFiles = new List<string>();
-        var removedReferenceCount = 0;
+        var guardedReferenceCount = 0;
 
         foreach (var propsPath in Directory.EnumerateFiles(targetRoot, "Directory.Build.props", SearchOption.AllDirectories))
         {
             var originalContent = await File.ReadAllTextAsync(propsPath).ConfigureAwait(false);
-            var matchCount = RazorDiagnosticsAnalyzerProjectReferencePattern.Matches(originalContent).Count;
-            if (matchCount == 0)
-                continue;
+            var updatedContent = originalContent.Replace(
+                @" Condition=""'$(BootstrapBuildPath)' == '' or '$(BuildingInsideVisualStudio)' == 'true'""",
+                $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""",
+                StringComparison.Ordinal);
+            updatedContent = RazorDiagnosticsAnalyzerProjectReferencePattern.Replace(
+                updatedContent,
+                match =>
+                {
+                    if (match.Value.Contains("BootstrapBuildPath", StringComparison.OrdinalIgnoreCase))
+                        return match.Value.Replace(
+                            @" Condition=""'$(BootstrapBuildPath)' == '' or '$(BuildingInsideVisualStudio)' == 'true'""",
+                            $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""",
+                            StringComparison.Ordinal);
 
-            var updatedContent = RazorDiagnosticsAnalyzerProjectReferencePattern.Replace(originalContent, string.Empty);
-            updatedContent = NormalizeAdjacentMsBuildItemFormatting(updatedContent);
+                    guardedReferenceCount++;
+                    return match.Groups["prefix"].Value +
+                        $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""" +
+                        match.Groups["suffix"].Value;
+                });
+
+            if (!RazorDiagnosticsAnalyzerProjectReferencePattern.IsMatch(updatedContent))
+            {
+                var relativePath = Path.GetRelativePath(targetRoot, propsPath);
+                var sourcePath = Path.Combine(sourceRazorRoot, relativePath);
+                if (File.Exists(sourcePath))
+                {
+                    var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
+                    var sourceMatch = RazorDiagnosticsAnalyzerProjectReferencePattern.Match(sourceContent);
+                    if (sourceMatch.Success)
+                    {
+                        var guardedReference = sourceMatch.Value.Contains("BootstrapBuildPath", StringComparison.OrdinalIgnoreCase)
+                            ? sourceMatch.Value.Replace(
+                                @" Condition=""'$(BootstrapBuildPath)' == '' or '$(BuildingInsideVisualStudio)' == 'true'""",
+                                $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""",
+                                StringComparison.Ordinal)
+                            : sourceMatch.Groups["prefix"].Value +
+                                $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""" +
+                                sourceMatch.Groups["suffix"].Value;
+
+                        var restoredContent = EnsureRawItemAfterPackageReference(
+                            updatedContent,
+                            "Microsoft.CodeAnalysis.Analyzers",
+                            guardedReference);
+                        if (!string.Equals(updatedContent, restoredContent, StringComparison.Ordinal))
+                        {
+                            updatedContent = restoredContent;
+                            guardedReferenceCount++;
+                        }
+                    }
+                }
+            }
 
             if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
                 continue;
 
             await WriteTextPreservingUtf8BomAsync(propsPath, updatedContent, templatePath: propsPath).ConfigureAwait(false);
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, propsPath));
-            removedReferenceCount += matchCount;
         }
 
-        return removedReferenceCount == 0
-            ? "No Razor.Diagnostics.Analyzers build-analyzer references were found in Razor Directory.Build.props files."
-            : $"Removed {removedReferenceCount} Razor.Diagnostics.Analyzers build-analyzer reference(s) from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+        return guardedReferenceCount == 0
+            ? "No Razor.Diagnostics.Analyzers Visual Studio guard changes were needed in Razor Directory.Build.props files."
+            : $"Guarded {guardedReferenceCount} Razor.Diagnostics.Analyzers build-analyzer reference(s) in {changedFiles.Count} file(s) so they stay active in Visual Studio without breaking build.cmd: {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> NormalizeRazorBuildWarningsAsync(StageContext context)
@@ -1830,6 +1877,23 @@ internal static class PostMergeCleanupRunner
             1);
     }
 
+    private static string EnsureRawItemAfterPackageReference(string content, string packageId, string itemLine)
+    {
+        content = NormalizeAdjacentMsBuildItemFormatting(content);
+        var normalizedItemLine = itemLine.TrimEnd('\r', '\n');
+        if (content.Contains(normalizedItemLine, StringComparison.Ordinal))
+            return content;
+
+        var pattern = new Regex(
+            $@"^(?<indent>[ \t]*)<PackageReference Include=""{Regex.Escape(packageId)}""(?:\s+[^>]*)?/>\r?\n",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+        return pattern.Replace(
+            content,
+            match => $"{match.Value}{normalizedItemLine}{Environment.NewLine}",
+            1);
+    }
+
     private static string RemovePackageReferenceEntries(string content, string packageId)
     {
         var pattern = new Regex(
@@ -2450,7 +2514,7 @@ internal static class PostMergeCleanupRunner
         RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
     private static readonly Regex RazorDiagnosticsAnalyzerProjectReferencePattern = new(
-        @"(?:^[ \t]*\r?\n)?^[ \t]*<ProjectReference Include=""[^""]*Razor\.Diagnostics\.Analyzers\.csproj""(?:\s+[^>]*)?/>\r?\n?",
+        @"(?<prefix>^[ \t]*<ProjectReference Include=""[^""]*Razor\.Diagnostics\.Analyzers\.csproj""(?:(?!\sCondition=)[^>])*)(?<suffix>\s*/>)",
         RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static readonly Regex ActiveConfigurationGroupNullCheckPattern = new(
