@@ -61,6 +61,18 @@ internal static class PostMergeCleanupRunner
             "After the merge, Razor should import local copies of its globalconfigs from src\\Razor so Razor-specific analyzer settings are preserved, while trimming entries already supplied by Roslyn avoids duplicate key warnings.",
             OverlayRazorGlobalConfigsAsync),
         new(
+            "merge-razor-publish-data",
+            "Merge missing Razor package publish entries into Roslyn's PublishData.json without overriding Roslyn's existing branch routing.",
+            "Merge Razor PublishData packages",
+            "Roslyn's eng\\config\\PublishData.json should stay authoritative for feeds and branch routing, but the merged tree still needs Razor's package publish entries so build.cmd -pack/publish continues to include Razor's insertion packages.",
+            MergeRazorPublishDataAsync),
+        new(
+            "overlay-razor-banned-symbols",
+            "Copy Razor-specific banned symbol files into the merged tree where Razor projects still reference them.",
+            "Overlay Razor banned symbol files",
+            "Roslyn already imports its shared banned-symbol configuration, but Razor carries extra API restrictions and MEF-specific symbol lists that still need to exist in the merged tree.",
+            OverlayRazorBannedSymbolsAsync),
+        new(
             "remove-razor-repository-metadata-overrides",
             "Remove Razor-local PackageProjectUrl and RepositoryUrl overrides so Roslyn's repo metadata stays authoritative.",
             "Remove Razor repository metadata overrides",
@@ -519,6 +531,117 @@ internal static class PostMergeCleanupRunner
         }
 
         return string.Join(" ", summaryParts);
+    }
+
+    private static async Task<string> MergeRazorPublishDataAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var sourcePublishDataPath = Path.Combine(context.State.SourceCloneDirectory, "eng", "config", "PublishData.json");
+        if (!File.Exists(sourcePublishDataPath))
+            return "No Razor PublishData.json file was found for publish metadata cleanup.";
+
+        var targetPublishDataPath = Path.Combine(targetRepoRoot, "eng", "config", "PublishData.json");
+        if (!File.Exists(targetPublishDataPath))
+            return "No repo-root eng\\config\\PublishData.json file was found for publish metadata cleanup.";
+
+        var sourcePublishData = await LoadJsonObjectAsync(sourcePublishDataPath).ConfigureAwait(false);
+        if (sourcePublishData["packages"] is not JsonObject sourcePackages || sourcePackages.Count == 0)
+            return "No Razor package publish entries were found in source PublishData.json.";
+
+        var targetPublishData = await LoadJsonObjectAsync(targetPublishDataPath).ConfigureAwait(false);
+        if (targetPublishData["packages"] is not JsonObject targetPackages)
+        {
+            targetPackages = [];
+            targetPublishData["packages"] = targetPackages;
+        }
+
+        var sourceFeeds = sourcePublishData["feeds"] as JsonObject;
+        var targetFeeds = targetPublishData["feeds"] as JsonObject;
+        var addedPackages = new List<string>();
+        var addedFeeds = new List<string>();
+
+        foreach (var packageEntry in EnumeratePublishDataPackageEntries(sourcePackages))
+        {
+            if (targetPackages.ContainsKey(packageEntry.Key))
+                continue;
+
+            targetPackages[packageEntry.Key] = packageEntry.Value?.DeepClone();
+            addedPackages.Add(packageEntry.Key);
+
+            if (sourceFeeds is null || targetFeeds is null || packageEntry.Value is not JsonValue feedNameNode)
+                continue;
+
+            if (!feedNameNode.TryGetValue<string>(out var feedName) || string.IsNullOrWhiteSpace(feedName))
+                continue;
+
+            if (targetFeeds.ContainsKey(feedName) || !sourceFeeds.TryGetPropertyValue(feedName, out var sourceFeedValue))
+                continue;
+
+            targetFeeds[feedName] = sourceFeedValue?.DeepClone();
+            addedFeeds.Add(feedName);
+        }
+
+        if (addedPackages.Count == 0 && addedFeeds.Count == 0)
+            return "No Razor PublishData package merge was needed.";
+
+        await SaveJsonAsync(targetPublishData, targetPublishDataPath).ConfigureAwait(false);
+
+        var summaryParts = new List<string>();
+        if (addedPackages.Count > 0)
+        {
+            summaryParts.Add(
+                $"Added {addedPackages.Count} Razor package publish entr{(addedPackages.Count == 1 ? "y" : "ies")} to '{Path.GetRelativePath(targetRepoRoot, targetPublishDataPath)}': {string.Join(", ", addedPackages)}.");
+        }
+
+        if (addedFeeds.Count > 0)
+        {
+            summaryParts.Add(
+                $"Also added {addedFeeds.Count} missing feed definition{(addedFeeds.Count == 1 ? string.Empty : "s")}: {string.Join(", ", addedFeeds)}.");
+        }
+
+        return string.Join(" ", summaryParts);
+    }
+
+    private static async Task<string> OverlayRazorBannedSymbolsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var sourceEngRoot = Path.Combine(context.State.SourceCloneDirectory, "eng");
+        if (!Directory.Exists(sourceEngRoot))
+            return "No Razor eng folder was found for banned-symbol cleanup.";
+
+        var copiedFiles = new List<string>();
+
+        var sourceLocalBannedSymbolsPath = Path.Combine(sourceEngRoot, "BannedSymbols.txt");
+        var targetLocalBannedSymbolsPath = Path.Combine(targetRoot, "eng", "BannedSymbols.txt");
+        if (await CopyFileIfDifferentAsync(sourceLocalBannedSymbolsPath, targetLocalBannedSymbolsPath).ConfigureAwait(false))
+        {
+            await GitRunner.RunGitAsync(
+                targetRepoRoot,
+                "add",
+                "--",
+                Path.GetRelativePath(targetRepoRoot, targetLocalBannedSymbolsPath)).ConfigureAwait(false);
+            copiedFiles.Add(Path.GetRelativePath(targetRepoRoot, targetLocalBannedSymbolsPath));
+        }
+
+        foreach (var fileName in new[] { "BannedSymbols.MEFv1.txt", "BannedSymbols.MEFv2.txt" })
+        {
+            var sourcePath = Path.Combine(sourceEngRoot, fileName);
+            var targetPath = Path.Combine(targetRepoRoot, "eng", fileName);
+            if (!await CopyFileIfDifferentAsync(sourcePath, targetPath).ConfigureAwait(false))
+                continue;
+
+            await GitRunner.RunGitAsync(
+                targetRepoRoot,
+                "add",
+                "--",
+                Path.GetRelativePath(targetRepoRoot, targetPath)).ConfigureAwait(false);
+            copiedFiles.Add(Path.GetRelativePath(targetRepoRoot, targetPath));
+        }
+
+        return copiedFiles.Count == 0
+            ? "No Razor banned-symbol overlay files were needed."
+            : $"Copied or updated {copiedFiles.Count} Razor banned-symbol file(s): {string.Join(", ", copiedFiles)}.";
     }
 
     private static async Task<string> RemoveRazorRepositoryMetadataOverridesAsync(StageContext context)
@@ -2337,10 +2460,44 @@ internal static class PostMergeCleanupRunner
             ?? throw new InvalidOperationException($"The file '{path}' does not contain a root JSON object.");
     }
 
+    private static IEnumerable<KeyValuePair<string, JsonNode?>> EnumeratePublishDataPackageEntries(JsonObject packages)
+    {
+        foreach (var entry in packages)
+        {
+            if (entry.Value is JsonObject nestedPackages)
+            {
+                foreach (var nestedEntry in nestedPackages)
+                    yield return nestedEntry;
+
+                continue;
+            }
+
+            yield return entry;
+        }
+    }
+
     private static async Task SaveJsonAsync(JsonObject jsonObject, string path)
     {
         var content = jsonObject.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine;
         await File.WriteAllTextAsync(path, content).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> CopyFileIfDifferentAsync(string sourcePath, string targetPath)
+    {
+        if (!File.Exists(sourcePath))
+            return false;
+
+        var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
+        var targetContent = File.Exists(targetPath)
+            ? await File.ReadAllTextAsync(targetPath).ConfigureAwait(false)
+            : null;
+
+        if (string.Equals(sourceContent, targetContent, StringComparison.Ordinal))
+            return false;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        File.Copy(sourcePath, targetPath, overwrite: true);
+        return true;
     }
 
     private static async Task WriteTextPreservingUtf8BomAsync(string path, string content, string templatePath)
