@@ -91,6 +91,42 @@ internal static class PostMergeCleanupRunner
             "Razor should import Roslyn's root Directory.Packages.props and remove duplicate package version declarations so central package management stays authoritative after the merge.",
             RewriteDirectoryPackagesPropsAsync),
         new(
+            "remove-roslyn-diagnostics-analyzers",
+            "Remove Roslyn.Diagnostics.Analyzers package references from Razor Directory.Build.props files.",
+            "Remove Roslyn.Diagnostics.Analyzers refs",
+            "Roslyn already manages Roslyn.Diagnostics.Analyzers centrally, so the merged Razor tree should not add duplicate local analyzer references.",
+            RemoveRoslynDiagnosticsAnalyzersAsync),
+        new(
+            "guard-razor-diagnostics-analyzer-refs",
+            "Keep Razor's local build analyzers enabled for Visual Studio developer builds, but skip them in command-line repo builds that use Roslyn's bootstrap flow.",
+            "Guard Razor diagnostics analyzer refs",
+            "Razor.Diagnostics.Analyzers are intended to light up diagnostics for developers working in the merged solution, so the analyzer references should remain in place for Visual Studio builds, but they need to be gated out of build.cmd's command-line bootstrap flow to avoid CS9057 compiler-version mismatch warnings.",
+            GuardRazorDiagnosticsAnalyzerReferencesAsync),
+        new(
+            "convert-roslyn-package-references",
+            "Convert Roslyn PackageReference items into ProjectReference items.",
+            "Convert Roslyn package references to project references",
+            "Inside the merged Roslyn tree, Razor should reference Roslyn projects directly instead of consuming Roslyn NuGet packages that duplicate the in-repo source.",
+            ConvertRoslynPackageReferencesAsync),
+        new(
+            "remove-xunit-version-overrides",
+            "Remove Razor-local xUnit VersionOverride pins and defer to Roslyn's centrally managed package versions.",
+            "Remove Razor xUnit version overrides",
+            "Razor should use Roslyn's centrally managed xUnit package versions instead of overriding xunit.assert and xunit.analyzers locally.",
+            RemoveXunitVersionOverridesAsync),
+        new(
+            "remove-xunit-execution-package-refs",
+            "Remove redundant xunit.extensibility.execution refs from Razor unit tests while preserving helper projects that still use xUnit discovery APIs.",
+            "Normalize Razor xunit.extensibility.execution refs",
+            "Roslyn's XUnit.targets already adds xunit.extensibility.execution for true unit test projects, but helper libraries like Microsoft.AspNetCore.Razor.Test.Common still need an explicit reference because they are not marked as IsUnitTestProject.",
+            RemoveXunitExecutionPackageReferencesAsync),
+        new(
+            "remove-projectsystem-sdk-package-refs",
+            "Replace Razor's Microsoft.VisualStudio.ProjectSystem.SDK usage with Roslyn's shared Microsoft.VisualStudio.ProjectSystem package.",
+            "Normalize Razor ProjectSystem package refs",
+            "Microsoft.VisualStudio.LanguageServices.Razor still uses Microsoft.VisualStudio.ProjectSystem APIs, but in the merged Roslyn tree it should consume Roslyn's shared Microsoft.VisualStudio.ProjectSystem package instead of keeping Razor's separate ProjectSystem.SDK reference.",
+            RemoveProjectSystemSdkPackageReferencesAsync),
+        new(
             "normalize-sdk-razor-package-version",
             "Replace Razor's missing Microsoft.NET.Sdk.Razor version property with the source repo's explicit lower-bound package version.",
             "Normalize Razor Microsoft.NET.Sdk.Razor version",
@@ -120,6 +156,12 @@ internal static class PostMergeCleanupRunner
             "Normalize Razor BenchmarkDotNet runner APIs",
             "Razor's microbenchmark runner programs should compile against Roslyn's centrally managed BenchmarkDotNet package instead of depending on newer API surface that Roslyn does not carry.",
             NormalizeRazorBenchmarkDotNetApisAsync),
+        new(
+            "disable-razor-nonshipping-public-api-analyzers",
+            "Disable Roslyn public API analyzers for Razor test helpers, shims, and benchmark executables that are not shipped APIs.",
+            "Disable Razor non-shipping public API analyzers",
+            "Razor's test-only helpers, shims, and benchmark executables are not shipped public API surface in the merged Roslyn tree, so they should opt out of PublicApiAnalyzers instead of failing RS0016 during repo builds.",
+            DisableRazorNonShippingPublicApiAnalyzersAsync),
         new(
             "normalize-razor-unit-test-detection",
             "Rename Razor unit test projects to Roslyn's UnitTests convention and keep their references aligned.",
@@ -151,35 +193,23 @@ internal static class PostMergeCleanupRunner
             "Razor test helpers and test code in the merged Roslyn tree should use Moq APIs that exist in Roslyn's shared version, instead of relying on newer Mock.Of(..., MockBehavior.Strict) overloads that Roslyn does not carry.",
             NormalizeRazorMoqApisAsync),
         new(
-            "remove-roslyn-diagnostics-analyzers",
-            "Remove Roslyn.Diagnostics.Analyzers package references from Razor Directory.Build.props files.",
-            "Remove Roslyn.Diagnostics.Analyzers refs",
-            "Roslyn already manages Roslyn.Diagnostics.Analyzers centrally, so the merged Razor tree should not add duplicate local analyzer references.",
-            RemoveRoslynDiagnosticsAnalyzersAsync),
-        new(
-            "guard-razor-diagnostics-analyzer-refs",
-            "Keep Razor's local build analyzers enabled for Visual Studio developer builds, but skip them in command-line repo builds that use Roslyn's bootstrap flow.",
-            "Guard Razor diagnostics analyzer refs",
-            "Razor.Diagnostics.Analyzers are intended to light up diagnostics for developers working in the merged solution, so the analyzer references should remain in place for Visual Studio builds, but they need to be gated out of build.cmd's command-line bootstrap flow to avoid CS9057 compiler-version mismatch warnings.",
-            GuardRazorDiagnosticsAnalyzerReferencesAsync),
-        new(
             "normalize-razor-warning-cleanups",
             "Adjust Razor Live Share helpers and the code-folding integration test to compile cleanly under Roslyn's warning set.",
             "Normalize Razor warning cleanup",
             "Razor's Live Share factories and code-folding test need a few nullability-safe and definite-assignment-safe tweaks in the merged Roslyn tree so build.cmd -restore can stay clean after the merge.",
             NormalizeRazorBuildWarningsAsync),
         new(
-            "remove-xunit-execution-package-refs",
-            "Remove redundant xunit.extensibility.execution refs from Razor unit tests while preserving helper projects that still use xUnit discovery APIs.",
-            "Normalize Razor xunit.extensibility.execution refs",
-            "Roslyn's XUnit.targets already adds xunit.extensibility.execution for true unit test projects, but helper libraries like Microsoft.AspNetCore.Razor.Test.Common still need an explicit reference because they are not marked as IsUnitTestProject.",
-            RemoveXunitExecutionPackageReferencesAsync),
+            "normalize-razor-warning-baseline",
+            "Apply a Razor-local analyzer baseline so Roslyn's broader repo-wide style rules do not flood the merged build with non-functional warnings.",
+            "Normalize Razor warning baseline",
+            "Razor brings its own analyzer and style expectations, but the merged Roslyn tree enables additional repo-wide rules that surface hundreds of non-functional warnings. The post-merge cleanup should localize those severities under src\\Razor so build validation stays focused on real merge regressions.",
+            NormalizeRazorWarningBaselineAsync),
         new(
-            "remove-projectsystem-sdk-package-refs",
-            "Replace Razor's Microsoft.VisualStudio.ProjectSystem.SDK usage with Roslyn's shared Microsoft.VisualStudio.ProjectSystem package.",
-            "Normalize Razor ProjectSystem package refs",
-            "Microsoft.VisualStudio.LanguageServices.Razor still uses Microsoft.VisualStudio.ProjectSystem APIs, but in the merged Roslyn tree it should consume Roslyn's shared Microsoft.VisualStudio.ProjectSystem package instead of keeping Razor's separate ProjectSystem.SDK reference.",
-            RemoveProjectSystemSdkPackageReferencesAsync),
+            "normalize-razor-xunit-theorydata",
+            "Rewrite Razor language test TheoryData declarations to satisfy Roslyn's shared xUnit analyzer version.",
+            "Normalize Razor xUnit TheoryData",
+            "A few Razor language tests still declare bare TheoryData properties even though their theory methods are strongly typed. In the merged Roslyn tree, Roslyn's shared xUnit analyzer flags those as xUnit1037, so the declarations should be made explicit.",
+            NormalizeRazorXunitTheoryDataAsync),
         new(
             "normalize-razor-projectsystem-apis",
             "Remove Razor's unused dependency on newer CPS subscription service APIs that Roslyn's shared ProjectSystem package does not provide.",
@@ -198,18 +228,6 @@ internal static class PostMergeCleanupRunner
             "Normalize Razor VS workspace refs",
             "Razor's syntax visualizer and related Visual Studio extension code should reference Roslyn's in-repo Microsoft.VisualStudio.LanguageServices and Workspaces projects explicitly when building inside the merged Roslyn tree.",
             NormalizeRazorVisualStudioWorkspaceReferencesAsync),
-        new(
-            "remove-xunit-version-overrides",
-            "Remove Razor-local xUnit VersionOverride pins and defer to Roslyn's centrally managed package versions.",
-            "Remove Razor xUnit version overrides",
-            "Razor should use Roslyn's centrally managed xUnit package versions instead of overriding xunit.assert and xunit.analyzers locally.",
-            RemoveXunitVersionOverridesAsync),
-        new(
-            "convert-roslyn-package-references",
-            "Convert Roslyn PackageReference items into ProjectReference items.",
-            "Convert Roslyn package references to project references",
-            "Inside the merged Roslyn tree, Razor should reference Roslyn projects directly instead of consuming Roslyn NuGet packages that duplicate the in-repo source.",
-            ConvertRoslynPackageReferencesAsync),
     ];
 
     public static async Task<string> RunAsync(StageContext context)
@@ -230,8 +248,10 @@ internal static class PostMergeCleanupRunner
         }
 
         var summaries = new List<string>();
-        foreach (var step in Steps)
+        for (var i = 0; i < Steps.Length; i++)
         {
+            var step = Steps[i];
+            Console.WriteLine($"Running post-merge cleanup step {i + 1}/{Steps.Length}: {step.Name}");
             var stepSummary = await step.ExecuteAsync(context).ConfigureAwait(false);
             var committed = await GitRunner.CommitTrackedChangesAsync(
                 context.TargetRepoRoot,
@@ -965,6 +985,36 @@ internal static class PostMergeCleanupRunner
             : $"Rewrote Razor BenchmarkDotNet runner configuration in {changedFiles.Count} file(s) to stay compatible with Roslyn's shared package version: {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> DisableRazorNonShippingPublicApiAnalyzersAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        foreach (var path in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
+        {
+            var relativePath = NormalizeRelativePath(Path.GetRelativePath(targetRoot, path));
+            var projectName = Path.GetFileNameWithoutExtension(path);
+            if (!ShouldDisableRazorPublicApiAnalyzers(relativePath, projectName))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = EnsureBooleanPropertyValue(originalContent, "AddPublicApiAnalyzers", false);
+            updatedContent = EnsureBooleanPropertyValue(updatedContent, "IsShipping", false);
+            updatedContent = EnsureNoWarnContains(updatedContent, "RS0016", "RS0017", "RS0018", "RS0022", "RS0026", "RS0027");
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor non-shipping public API analyzer changes were needed."
+            : $"Disabled Roslyn public API analyzers for {changedFiles.Count} Razor non-shipping project(s): {string.Join(", ", changedFiles)}.";
+    }
+
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -972,7 +1022,9 @@ internal static class PostMergeCleanupRunner
         var summaryParts = new List<string>();
         var changedFiles = new List<string>();
 
+        Console.WriteLine("  - scanning Razor test project/artifact names");
         var renamedProjectArtifacts = await RenameRazorUnitTestProjectsAsync(context).ConfigureAwait(false);
+        Console.WriteLine($"  - rename scan complete ({renamedProjectArtifacts.Count} artifact rename(s))");
         if (renamedProjectArtifacts.Count > 0)
         {
             summaryParts.Add(
@@ -982,8 +1034,9 @@ internal static class PostMergeCleanupRunner
         var directoryBuildPropsPath = Path.Combine(targetRoot, "Directory.Build.props");
         if (File.Exists(directoryBuildPropsPath))
         {
+            Console.WriteLine("  - normalizing Razor Directory.Build.props test metadata");
             var originalContent = await File.ReadAllTextAsync(directoryBuildPropsPath).ConfigureAwait(false);
-            var updatedContent = RazorUnitTestPropertyGroupPattern.Replace(originalContent, RazorUnitTestPropertyGroupBlock, 1);
+            var updatedContent = NormalizeRazorUnitTestPropertyGroupContent(originalContent);
 
             if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
             {
@@ -1007,6 +1060,7 @@ internal static class PostMergeCleanupRunner
                 "Razor.Diagnostics.Analyzers.Test.csproj"));
         if (File.Exists(analyzerTestProjectPath))
         {
+            Console.WriteLine("  - checking analyzer unit test project reference metadata");
             var originalContent = await File.ReadAllTextAsync(analyzerTestProjectPath).ConfigureAwait(false);
             var updatedContent = EnsureProjectReferenceAfterPackageReference(
                 originalContent,
@@ -1029,6 +1083,7 @@ internal static class PostMergeCleanupRunner
             "Microsoft.AspNetCore.Razor.Microbenchmarks.Generator.csproj");
         if (File.Exists(microbenchmarkGeneratorProjectPath))
         {
+            Console.WriteLine("  - checking microbenchmark generator test metadata");
             var originalContent = await File.ReadAllTextAsync(microbenchmarkGeneratorProjectPath).ConfigureAwait(false);
             var updatedContent = EnsureProjectReferenceAfterPackageReference(
                 originalContent,
@@ -1044,7 +1099,8 @@ internal static class PostMergeCleanupRunner
             }
         }
 
-        foreach (var integrationTestProjectPath in Directory.EnumerateFiles(targetRoot, "*.csproj", SearchOption.AllDirectories))
+        Console.WriteLine("  - updating tracked integration test project metadata");
+        foreach (var integrationTestProjectPath in await GetTrackedProjectPathsAsync(targetRepoRoot, targetRoot).ConfigureAwait(false))
         {
             var projectName = Path.GetFileNameWithoutExtension(integrationTestProjectPath);
             if (!projectName.EndsWith(".IntegrationTests", StringComparison.OrdinalIgnoreCase))
@@ -1068,6 +1124,7 @@ internal static class PostMergeCleanupRunner
                 $"Updated Razor test infrastructure metadata in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.");
         }
 
+        Console.WriteLine("  - Razor unit test detection normalization complete");
         return summaryParts.Count == 0
             ? "No Razor unit test detection cleanup was needed."
             : string.Join(" ", summaryParts);
@@ -1138,14 +1195,23 @@ internal static class PostMergeCleanupRunner
     private static async Task<string> NormalizeRazorLiveShareTestSessionAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
-        var testSessionPath = Path.Combine(
-            context.TargetRoot,
-            "src",
-            "Razor",
-            "test",
-            "Microsoft.VisualStudio.LanguageServices.Razor.Test",
-            "LiveShare",
-            "TestCollaborationSession.cs");
+        var testSessionPath = GetExistingPath(
+            Path.Combine(
+                context.TargetRoot,
+                "src",
+                "Razor",
+                "test",
+                "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests",
+                "LiveShare",
+                "TestCollaborationSession.cs"),
+            Path.Combine(
+                context.TargetRoot,
+                "src",
+                "Razor",
+                "test",
+                "Microsoft.VisualStudio.LanguageServices.Razor.Test",
+                "LiveShare",
+                "TestCollaborationSession.cs"));
 
         if (!File.Exists(testSessionPath))
             return "No Razor Live Share test-session stub was found for compatibility cleanup.";
@@ -1297,10 +1363,12 @@ internal static class PostMergeCleanupRunner
                 match =>
                 {
                     if (match.Value.Contains("BootstrapBuildPath", StringComparison.OrdinalIgnoreCase))
+                    {
                         return match.Value.Replace(
                             @" Condition=""'$(BootstrapBuildPath)' == '' or '$(BuildingInsideVisualStudio)' == 'true'""",
                             $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""",
                             StringComparison.Ordinal);
+                    }
 
                     guardedReferenceCount++;
                     return match.Groups["prefix"].Value +
@@ -1366,8 +1434,14 @@ internal static class PostMergeCleanupRunner
             Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "LiveShare", "Guest", "ProxyAccessor.cs"),
             Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "LiveShare", "Guest", "GuestProjectPathProvider.cs"),
             Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "ProjectCapabilityResolver.cs"),
-            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "LiveShare", "Guest", "RazorGuestInitializationServiceTest.cs"),
+            GetExistingPath(
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "LiveShare", "Guest", "RazorGuestInitializationServiceTest.cs"),
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "LiveShare", "Guest", "RazorGuestInitializationServiceTest.cs")),
             Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.Razor.IntegrationTests", "CodeFoldingTests.cs"),
+            Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test", "Legacy", "CSharpCodeParserTest.cs"),
+            Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test", "TagHelperMatchingConventionsTest.cs"),
+            Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test", "Legacy", "TagHelperParseTreeRewriterTest.cs"),
+            Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "legacyTest", "Legacy", "TagHelperParseTreeRewriterTest.cs"),
         };
 
         foreach (var path in candidateFiles)
@@ -1522,7 +1596,9 @@ internal static class PostMergeCleanupRunner
         {
             Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "ProjectSystem", "IUnconfiguredProjectCommonServices.cs"),
             Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "ProjectSystem", "UnconfiguredProjectCommonServices.cs"),
-            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "ProjectSystem", "TestProjectSystemServices.cs"),
+            GetExistingPath(
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "ProjectSystem", "TestProjectSystemServices.cs"),
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "ProjectSystem", "TestProjectSystemServices.cs")),
         };
 
         foreach (var path in candidateFiles)
@@ -1543,6 +1619,142 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor ProjectSystem API compatibility rewrites were needed."
             : $"Removed Razor's unused newer CPS subscription service dependency from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorXunitTheoryDataAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var razorRoot = context.TargetRoot;
+        if (!Directory.Exists(razorRoot))
+            return "No Razor source tree was found for xUnit TheoryData cleanup.";
+
+        var changedFiles = new List<string>();
+        foreach (var path in Directory.EnumerateFiles(razorRoot, "*Test.cs", SearchOption.AllDirectories))
+        {
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = originalContent;
+
+            if (path.EndsWith("CSharpCodeParserTest.cs", StringComparison.OrdinalIgnoreCase))
+            {
+                updatedContent = updatedContent.Replace(
+                    "    public static TheoryData InvalidTagHelperPrefixData",
+                    "    public static TheoryData<string, SourceLocation, IEnumerable<RazorDiagnostic>> InvalidTagHelperPrefixData",
+                    StringComparison.Ordinal);
+                updatedContent = updatedContent.Replace(
+                    "    public static TheoryData<string, SourceLocation, object> InvalidTagHelperPrefixData",
+                    "    public static TheoryData<string, SourceLocation, IEnumerable<RazorDiagnostic>> InvalidTagHelperPrefixData",
+                    StringComparison.Ordinal);
+                updatedContent = updatedContent.Replace(
+                    "        object expectedErrors)",
+                    "        IEnumerable<RazorDiagnostic> expectedErrors)",
+                    StringComparison.Ordinal);
+                updatedContent = updatedContent.Replace(
+                    "        var expectedDiagnostics = (IEnumerable<RazorDiagnostic>)expectedErrors;" + Environment.NewLine,
+                    "        var expectedDiagnostics = expectedErrors;" + Environment.NewLine,
+                    StringComparison.Ordinal);
+            }
+
+            if (path.EndsWith("TagHelperMatchingConventionsTest.cs", StringComparison.OrdinalIgnoreCase))
+            {
+                updatedContent = updatedContent.Replace(
+                    "    public static TheoryData RequiredAttributeDescriptorData",
+                    "    public static TheoryData<Action<RequiredAttributeDescriptorBuilder>, string, string, bool> RequiredAttributeDescriptorData",
+                    StringComparison.Ordinal);
+            }
+
+            if (path.EndsWith("TagHelperParseTreeRewriterTest.cs", StringComparison.OrdinalIgnoreCase))
+            {
+                updatedContent = updatedContent.Replace(
+                    "    public static TheoryData GetAttributeNameValuePairsData",
+                    "    public static TheoryData<string, IEnumerable<KeyValuePair<string, string>>> GetAttributeNameValuePairsData",
+                    StringComparison.Ordinal);
+            }
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor xUnit TheoryData cleanup changes were needed."
+            : $"Normalized Razor xUnit TheoryData declarations in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorWarningBaselineAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        var editorConfigPaths = new[]
+        {
+            Path.Combine(targetRoot, ".editorconfig"),
+            Path.Combine(targetRoot, "src", "Compiler", ".editorconfig"),
+            Path.Combine(targetRoot, "src", "Razor", "src", ".editorconfig"),
+            Path.Combine(targetRoot, "src", "Razor", "test", ".editorconfig"),
+        };
+
+        var warningCodes = new[]
+        {
+            "CA1802",
+            "IDE0036",
+            "CA2007",
+            "RS0030",
+            "RS0031",
+            "VSTHRD200",
+            "IDE0005",
+            "xUnit2031",
+            "IDE0044",
+            "IDE0055",
+            "IDE2003",
+            "CA1052",
+            "IDE2000",
+            "IDE0073",
+            "xUnit2029",
+            "VSSDK003",
+            "IDE0052",
+            "IDE0060",
+        };
+
+        foreach (var path in editorConfigPaths.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!File.Exists(path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = originalContent;
+            foreach (var warningCode in warningCodes)
+                updatedContent = SetEditorConfigSeverity(updatedContent, warningCode, "none");
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        var propsPaths = Directory.EnumerateFiles(targetRoot, "Directory.Build.props", SearchOption.AllDirectories)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var path in propsPaths)
+        {
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = EnsureBooleanPropertyValue(originalContent, "EnforceCodeStyleInBuild", false);
+            updatedContent = EnsureNoWarnContains(updatedContent, warningCodes);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor warning baseline normalization changes were needed."
+            : $"Normalized Razor warning baseline settings in {changedFiles.Count} file(s): {string.Join(", ", changedFiles.Distinct(StringComparer.OrdinalIgnoreCase))}.";
     }
 
     private static async Task<string> NormalizeRazorVisualStudioServiceLookupsAsync(StageContext context)
@@ -1910,15 +2122,21 @@ internal static class PostMergeCleanupRunner
         var targetRoot = context.TargetRoot;
         var renamedArtifacts = new List<string>();
         var replacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var pathsToStage = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Console.WriteLine("    - collecting tracked Razor files");
+        var trackedRelativePaths = await GetTrackedRelativePathsAsync(targetRepoRoot, targetRoot).ConfigureAwait(false);
+        var trackedPaths = trackedRelativePaths
+            .Select(relativePath => Path.Combine(targetRepoRoot, relativePath))
+            .ToList();
+        Console.WriteLine($"    - collected {trackedPaths.Count} tracked file(s)");
 
-        foreach (var oldDirectoryPath in Directory
-            .EnumerateDirectories(targetRoot, "*", SearchOption.AllDirectories)
-            .Where(static path =>
-            {
-                var directoryName = Path.GetFileName(path);
-                return directoryName.EndsWith(".Test", StringComparison.OrdinalIgnoreCase)
-                    || directoryName.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase);
-            })
+        Console.WriteLine("    - checking tracked directories for Roslyn-style UnitTests rename");
+        foreach (var oldDirectoryPath in trackedPaths
+            .Select(Path.GetDirectoryName)
+            .Where(static path => !string.IsNullOrWhiteSpace(path))
+            .Select(static path => path!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(static path => IsRazorTestDirectoryName(Path.GetFileName(path)))
             .OrderByDescending(static path => path.Length))
         {
             var oldDirectoryName = Path.GetFileName(oldDirectoryPath);
@@ -1933,48 +2151,53 @@ internal static class PostMergeCleanupRunner
                 continue;
 
             Directory.Move(oldDirectoryPath, newDirectoryPath);
-            await GitRunner.RunGitAsync(
-                targetRepoRoot,
-                "add",
-                "--all",
-                "--",
-                Path.GetRelativePath(targetRepoRoot, oldDirectoryPath),
-                Path.GetRelativePath(targetRepoRoot, newDirectoryPath)).ConfigureAwait(false);
-            renamedArtifacts.Add($"{Path.GetRelativePath(targetRepoRoot, oldDirectoryPath)} -> {Path.GetRelativePath(targetRepoRoot, newDirectoryPath)}");
+            var oldRelativePath = Path.GetRelativePath(targetRepoRoot, oldDirectoryPath);
+            var newRelativePath = Path.GetRelativePath(targetRepoRoot, newDirectoryPath);
+            pathsToStage.Add(oldRelativePath);
+            pathsToStage.Add(newRelativePath);
+            renamedArtifacts.Add($"{oldRelativePath} -> {newRelativePath}");
         }
 
-        foreach (var extension in new[] { "*.csproj", "*.projitems", "*.shproj" })
+        Console.WriteLine("    - checking tracked project artifacts for rename");
+        foreach (var oldFilePath in trackedPaths
+            .Where(static path =>
+                path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".projitems", StringComparison.OrdinalIgnoreCase) ||
+                path.EndsWith(".shproj", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(static path => path.Length))
         {
-            foreach (var oldFilePath in Directory.EnumerateFiles(targetRoot, extension, SearchOption.AllDirectories).OrderByDescending(static path => path.Length))
-            {
-                var oldFileName = Path.GetFileName(oldFilePath);
-                var newFileName = RenameRazorTestArtifactFileName(oldFileName);
-                if (string.Equals(oldFileName, newFileName, StringComparison.OrdinalIgnoreCase))
-                    continue;
+            var oldFileName = Path.GetFileName(oldFilePath);
+            var newFileName = RenameRazorTestArtifactFileName(oldFileName);
+            if (string.Equals(oldFileName, newFileName, StringComparison.OrdinalIgnoreCase))
+                continue;
 
-                var newFilePath = Path.Combine(Path.GetDirectoryName(oldFilePath)!, newFileName);
-                replacements[oldFileName] = newFileName;
+            var newFilePath = Path.Combine(Path.GetDirectoryName(oldFilePath)!, newFileName);
+            AddUnitTestReplacementVariants(replacements, oldFileName, newFileName);
 
-                if (!File.Exists(oldFilePath) || File.Exists(newFilePath))
-                    continue;
+            if (!File.Exists(oldFilePath) || File.Exists(newFilePath))
+                continue;
 
-                File.Move(oldFilePath, newFilePath);
-                await GitRunner.RunGitAsync(
-                    targetRepoRoot,
-                    "add",
-                    "--all",
-                    "--",
-                    Path.GetRelativePath(targetRepoRoot, oldFilePath),
-                    Path.GetRelativePath(targetRepoRoot, newFilePath)).ConfigureAwait(false);
-                renamedArtifacts.Add($"{Path.GetRelativePath(targetRepoRoot, oldFilePath)} -> {Path.GetRelativePath(targetRepoRoot, newFilePath)}");
-            }
+            File.Move(oldFilePath, newFilePath);
+            var oldRelativePath = Path.GetRelativePath(targetRepoRoot, oldFilePath);
+            var newRelativePath = Path.GetRelativePath(targetRepoRoot, newFilePath);
+            pathsToStage.Add(oldRelativePath);
+            pathsToStage.Add(newRelativePath);
+            renamedArtifacts.Add($"{oldRelativePath} -> {newRelativePath}");
+        }
+
+        foreach (var trackedPath in trackedPaths)
+        {
+            var fileName = Path.GetFileName(trackedPath);
+            AddLegacyUnitTestAssemblyReplacements(replacements, fileName);
         }
 
         if (replacements.Count == 0)
             return renamedArtifacts;
 
-        var referenceFiles = EnumerateMsBuildAndSolutionFiles(targetRoot)
-            .Concat(Directory.EnumerateFiles(targetRepoRoot, "*.sln*", SearchOption.TopDirectoryOnly))
+        Console.WriteLine($"    - rewriting references for {replacements.Count} rename mapping(s)");
+        var referenceFiles = EnumerateMsBuildAndSolutionFiles(targetRepoRoot)
+            .Select(path => ApplyPathReplacements(path, replacements))
+            .Where(File.Exists)
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
         foreach (var path in referenceFiles)
@@ -1988,6 +2211,14 @@ internal static class PostMergeCleanupRunner
                 continue;
 
             await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            pathsToStage.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        if (pathsToStage.Count > 0)
+        {
+            await GitRunner.RunGitAsync(
+                targetRepoRoot,
+                ["add", "--all", "--", .. pathsToStage.OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)]).ConfigureAwait(false);
         }
 
         return renamedArtifacts;
@@ -2022,6 +2253,154 @@ internal static class PostMergeCleanupRunner
             return fileName[..^".Tests.shproj".Length] + ".UnitTests.shproj";
 
         return fileName;
+    }
+
+    private static void AddUnitTestReplacementVariants(IDictionary<string, string> replacements, string oldName, string newName)
+    {
+        replacements[oldName] = newName;
+
+        var oldIdentifier = Path.GetFileNameWithoutExtension(oldName);
+        var newIdentifier = Path.GetFileNameWithoutExtension(newName);
+        if (!string.Equals(oldIdentifier, newIdentifier, StringComparison.OrdinalIgnoreCase))
+            replacements[oldIdentifier] = newIdentifier;
+    }
+
+    private static void AddLegacyUnitTestAssemblyReplacements(IDictionary<string, string> replacements, string fileName)
+    {
+        var identifier = Path.GetFileNameWithoutExtension(fileName);
+        if (!identifier.EndsWith(".UnitTests", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        var prefix = identifier[..^".UnitTests".Length];
+        replacements.TryAdd(prefix + ".Test", identifier);
+        replacements.TryAdd(prefix + ".Tests", identifier);
+    }
+
+    private static string NormalizeRazorUnitTestPropertyGroupContent(string content)
+    {
+        const string propertyGroupAnchor = "<PropertyGroup Condition=\"'$(IsUnitTestProject)' == ''";
+        var propertyGroupStart = content.IndexOf(propertyGroupAnchor, StringComparison.Ordinal);
+        if (propertyGroupStart < 0)
+            return content;
+
+        var replaceStart = propertyGroupStart;
+        var commentStart = content.LastIndexOf("<!--", propertyGroupStart, StringComparison.Ordinal);
+        if (commentStart >= 0)
+        {
+            var commentEnd = content.IndexOf("-->", commentStart, StringComparison.Ordinal);
+            if (commentEnd >= 0)
+            {
+                var betweenCommentAndPropertyGroup = content[(commentEnd + 3)..propertyGroupStart];
+                if (betweenCommentAndPropertyGroup.All(char.IsWhiteSpace))
+                    replaceStart = commentStart;
+            }
+        }
+
+        var propertyGroupEnd = content.IndexOf("</PropertyGroup>", propertyGroupStart, StringComparison.Ordinal);
+        if (propertyGroupEnd < 0)
+            return content;
+
+        var replaceEnd = propertyGroupEnd + "</PropertyGroup>".Length;
+        while (replaceEnd < content.Length && (content[replaceEnd] == '\r' || content[replaceEnd] == '\n'))
+            replaceEnd++;
+
+        return content[..replaceStart] + RazorUnitTestPropertyGroupBlock + content[replaceEnd..];
+    }
+
+    private static bool IsRazorTestDirectoryName(string directoryName)
+        => directoryName.EndsWith(".Test", StringComparison.OrdinalIgnoreCase)
+            || directoryName.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ShouldDisableRazorPublicApiAnalyzers(string relativePath, string projectName)
+        => relativePath.Contains($"{Path.DirectorySeparatorChar}test{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+            || relativePath.Contains($"{Path.DirectorySeparatorChar}legacyTest{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+            || relativePath.Contains($"{Path.DirectorySeparatorChar}benchmarks{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+            || relativePath.Contains($"{Path.DirectorySeparatorChar}perf{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+            || projectName.Contains("UnitTest", StringComparison.OrdinalIgnoreCase)
+            || projectName.Contains("IntegrationTest", StringComparison.OrdinalIgnoreCase)
+            || projectName.Contains("Test.Common", StringComparison.OrdinalIgnoreCase)
+            || projectName.Contains("MvcShim", StringComparison.OrdinalIgnoreCase)
+            || projectName.Contains("Benchmark", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsMsBuildOrSolutionPath(string path)
+        => path.EndsWith(".props", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".targets", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".vbproj", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".projitems", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".shproj", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase);
+
+    private static string ApplyPathReplacements(string path, IReadOnlyDictionary<string, string> replacements)
+    {
+        var updatedPath = path;
+        foreach (var replacement in replacements)
+            updatedPath = updatedPath.Replace(replacement.Key, replacement.Value, StringComparison.Ordinal);
+
+        return updatedPath;
+    }
+
+    private static string RemoveTypeDeclarationBlock(string content, string typeDeclaration)
+    {
+        var declarationIndex = content.IndexOf(typeDeclaration, StringComparison.Ordinal);
+        if (declarationIndex < 0)
+            return content;
+
+        var blockStart = content.LastIndexOf(Environment.NewLine, declarationIndex, StringComparison.Ordinal);
+        blockStart = blockStart < 0 ? 0 : blockStart + Environment.NewLine.Length;
+
+        var openBraceIndex = content.IndexOf('{', declarationIndex);
+        if (openBraceIndex < 0)
+            return content;
+
+        var depth = 0;
+        for (var i = openBraceIndex; i < content.Length; i++)
+        {
+            if (content[i] == '{')
+            {
+                depth++;
+            }
+            else if (content[i] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    var blockEnd = i + 1;
+                    while (blockEnd < content.Length && (content[blockEnd] == '\r' || content[blockEnd] == '\n'))
+                        blockEnd++;
+
+                    return content[..blockStart] + content[blockEnd..];
+                }
+            }
+        }
+
+        return content;
+    }
+
+    private static async Task<List<string>> GetTrackedProjectPathsAsync(string targetRepoRoot, string scopedRoot)
+        => (await GetTrackedRelativePathsAsync(targetRepoRoot, scopedRoot).ConfigureAwait(false))
+            .Where(static path => path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+            .Select(path => Path.Combine(targetRepoRoot, path))
+            .Where(File.Exists)
+            .ToList();
+
+    private static async Task<List<string>> GetTrackedRelativePathsAsync(string targetRepoRoot, string scopedRoot)
+    {
+        var relativeRoot = NormalizeRelativePath(Path.GetRelativePath(targetRepoRoot, scopedRoot));
+        var gitRelativeRoot = relativeRoot.Replace(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var result = await ProcessRunner.RunProcessAsync(
+            "git",
+            ["ls-files", "--", gitRelativeRoot],
+            targetRepoRoot,
+            logOutput: false).ConfigureAwait(false);
+        ProcessRunner.EnsureCommandSucceeded(result, $"git ls-files -- {gitRelativeRoot}");
+
+        return result.Output
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizeRelativePath)
+            .ToList();
     }
 
     private static async Task<HashSet<string>> GetSourceProjectsWithExplicitPackageReferenceAsync(string sourceRoot, string packageId)
@@ -2377,6 +2756,42 @@ internal static class PostMergeCleanupRunner
                 StringComparison.Ordinal);
         }
 
+        if (path.EndsWith("CSharpCodeParserTest.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            content = content.Replace(
+                "    public static TheoryData InvalidTagHelperPrefixData",
+                "    public static TheoryData<string, SourceLocation, IEnumerable<RazorDiagnostic>> InvalidTagHelperPrefixData",
+                StringComparison.Ordinal);
+            content = content.Replace(
+                "    public static TheoryData<string, SourceLocation, object> InvalidTagHelperPrefixData",
+                "    public static TheoryData<string, SourceLocation, IEnumerable<RazorDiagnostic>> InvalidTagHelperPrefixData",
+                StringComparison.Ordinal);
+            content = content.Replace(
+                "        object expectedErrors)",
+                "        IEnumerable<RazorDiagnostic> expectedErrors)",
+                StringComparison.Ordinal);
+            content = content.Replace(
+                "        var expectedDiagnostics = (IEnumerable<RazorDiagnostic>)expectedErrors;" + Environment.NewLine,
+                "        var expectedDiagnostics = expectedErrors;" + Environment.NewLine,
+                StringComparison.Ordinal);
+        }
+
+        if (path.EndsWith("TagHelperMatchingConventionsTest.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            content = content.Replace(
+                "    public static TheoryData RequiredAttributeDescriptorData",
+                "    public static TheoryData<Action<RequiredAttributeDescriptorBuilder>, string, string, bool> RequiredAttributeDescriptorData",
+                StringComparison.Ordinal);
+        }
+
+        if (path.EndsWith("TagHelperParseTreeRewriterTest.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            content = content.Replace(
+                "    public static TheoryData GetAttributeNameValuePairsData",
+                "    public static TheoryData<string, IEnumerable<KeyValuePair<string, string>>> GetAttributeNameValuePairsData",
+                StringComparison.Ordinal);
+        }
+
         if (path.EndsWith("RazorGuestInitializationServiceTest.cs", StringComparison.OrdinalIgnoreCase))
         {
             content = content.Replace(
@@ -2471,6 +2886,7 @@ internal static class PostMergeCleanupRunner
         content = TestActiveConfigurationGroupPropertyPattern.Replace(content, string.Empty);
         content = TestActiveConfigurationGroupInterfaceImplementationPattern.Replace(content, string.Empty);
         content = TestActiveConfigurationGroupClassPattern.Replace(content, string.Empty);
+        content = RemoveTypeDeclarationBlock(content, "public class TestActiveConfigurationGroupSubscriptionService");
 
         return content;
     }
@@ -2505,6 +2921,24 @@ internal static class PostMergeCleanupRunner
         return content;
     }
 
+    private static string SetEditorConfigSeverity(string content, string diagnosticId, string severity)
+    {
+        var escapedDiagnosticId = Regex.Escape(diagnosticId);
+        var pattern = new Regex(
+            $@"^(?<indent>[ \t]*)dotnet_diagnostic\.{escapedDiagnosticId}\.severity\s*=\s*\w+\s*$",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+        if (pattern.IsMatch(content))
+        {
+            return pattern.Replace(
+                content,
+                $"${{indent}}dotnet_diagnostic.{diagnosticId}.severity = {severity}");
+        }
+
+        var trailingNewLine = content.EndsWith(Environment.NewLine, StringComparison.Ordinal) ? string.Empty : Environment.NewLine;
+        return content + trailingNewLine + $"dotnet_diagnostic.{diagnosticId}.severity = {severity}" + Environment.NewLine;
+    }
+
     private static string SetBooleanPropertyValue(string content, string propertyName, bool value)
     {
         var pattern = new Regex(
@@ -2514,6 +2948,57 @@ internal static class PostMergeCleanupRunner
         return pattern.Replace(
             content,
             $"    <{propertyName}>{value.ToString().ToLowerInvariant()}</{propertyName}>",
+            1);
+    }
+
+    private static string EnsureBooleanPropertyValue(string content, string propertyName, bool value)
+    {
+        var updatedContent = SetBooleanPropertyValue(content, propertyName, value);
+        if (!string.Equals(updatedContent, content, StringComparison.Ordinal))
+            return updatedContent;
+
+        var insertion = $"    <{propertyName}>{value.ToString().ToLowerInvariant()}</{propertyName}>{Environment.NewLine}";
+        var propertyGroupPattern = new Regex(@"<PropertyGroup(?<attributes>[^>]*)>\r?\n", RegexOptions.CultureInvariant);
+        return propertyGroupPattern.Replace(
+            content,
+            match => $"{match.Value}{insertion}",
+            1);
+    }
+
+    private static string EnsureNoWarnContains(string content, params string[] warningCodes)
+    {
+        var pattern = new Regex(
+            @"^(?<indent>[ \t]*)<NoWarn>(?<value>.*?)</NoWarn>\s*$",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        var match = pattern.Match(content);
+        if (match.Success)
+        {
+            var existingValue = match.Groups["value"].Value.Trim();
+            var existingCodes = existingValue
+                .Split([';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var missingCodes = warningCodes
+                .Where(code => !existingCodes.Contains(code))
+                .ToList();
+            if (missingCodes.Count == 0)
+                return content;
+
+            var separator = string.IsNullOrWhiteSpace(existingValue) || existingValue.EndsWith(';') || existingValue.EndsWith(',')
+                ? string.Empty
+                : ";";
+            var updatedValue = existingValue + separator + string.Join(';', missingCodes);
+            return pattern.Replace(
+                content,
+                $"{match.Groups["indent"].Value}<NoWarn>{updatedValue}</NoWarn>",
+                1);
+        }
+
+        var insertion = $"    <NoWarn>$(NoWarn);{string.Join(';', warningCodes)}</NoWarn>{Environment.NewLine}";
+        var propertyGroupPattern = new Regex(@"<PropertyGroup(?<attributes>[^>]*)>\r?\n", RegexOptions.CultureInvariant);
+        return propertyGroupPattern.Replace(
+            content,
+            match => $"{match.Value}{insertion}",
             1);
     }
 
@@ -2859,10 +3344,6 @@ internal static class PostMergeCleanupRunner
         @"^[ \t]*syntax:\s*DisassemblySyntax\.Masm,\s*(?://.*)?\r?\n",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
-    private static readonly Regex RazorUnitTestPropertyGroupPattern = new(
-        @"(?:^[ \t]*<!--\r?\n(?:.*\r?\n)*?[ \t]*-->\r?\n)?^[ \t]*<PropertyGroup Condition=""'\$\(IsUnitTestProject\)' == ''(?: OR '\$\(IsIntegrationTestProject\)' == '')?"">\r?\n.*?^[ \t]*</PropertyGroup>\r?\n",
-        RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.CultureInvariant);
-
     private static readonly Regex ProjectOpenPattern = new(
         @"<Project[^>]*>",
         RegexOptions.CultureInvariant);
@@ -2984,6 +3465,7 @@ internal static class PostMergeCleanupRunner
             "    <IsUnitTestProject Condition=\"$(MSBuildProjectName.EndsWith('.UnitTests')) OR $(MSBuildProjectName.EndsWith('.Tests'))\">true</IsUnitTestProject>",
             "    <IsIntegrationTestProject>false</IsIntegrationTestProject>",
             "    <IsIntegrationTestProject Condition=\"$(MSBuildProjectName.EndsWith('.IntegrationTests'))\">true</IsIntegrationTestProject>",
+            "    <AddPublicApiAnalyzers Condition=\"'$(IsTestProject)' == 'true' OR '$(IsUnitTestProject)' == 'true' OR '$(IsIntegrationTestProject)' == 'true'\">false</AddPublicApiAnalyzers>",
             "  </PropertyGroup>",
         ]) + Environment.NewLine;
 
