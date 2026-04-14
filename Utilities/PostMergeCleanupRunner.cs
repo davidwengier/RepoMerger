@@ -137,6 +137,18 @@ internal static class PostMergeCleanupRunner
             "Roslyn already manages Roslyn.Diagnostics.Analyzers centrally, so the merged Razor tree should not add duplicate local analyzer references.",
             RemoveRoslynDiagnosticsAnalyzersAsync),
         new(
+            "remove-razor-diagnostics-analyzer-refs",
+            "Remove Razor's local build-analyzer project references so the merged Roslyn build stays free of compiler-version mismatch warnings.",
+            "Remove Razor diagnostics analyzer refs",
+            "Razor's in-repo diagnostics analyzer project should still build in the merged tree, but it should not be injected into every Razor build as a live analyzer because Roslyn's compiler bootstrap then emits CS9057 version-mismatch warnings.",
+            RemoveRazorDiagnosticsAnalyzerReferencesAsync),
+        new(
+            "normalize-razor-warning-cleanups",
+            "Adjust Razor Live Share helpers and the code-folding integration test to compile cleanly under Roslyn's warning set.",
+            "Normalize Razor warning cleanup",
+            "Razor's Live Share factories and code-folding test need a few nullability-safe and definite-assignment-safe tweaks in the merged Roslyn tree so build.cmd -restore can stay clean after the merge.",
+            NormalizeRazorBuildWarningsAsync),
+        new(
             "remove-xunit-execution-package-refs",
             "Remove redundant xunit.extensibility.execution refs from Razor unit tests while preserving helper projects that still use xUnit discovery APIs.",
             "Normalize Razor xunit.extensibility.execution refs",
@@ -1036,6 +1048,74 @@ internal static class PostMergeCleanupRunner
             : $"Removed {removedReferenceCount} Roslyn.Diagnostics.Analyzers reference(s) from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> RemoveRazorDiagnosticsAnalyzerReferencesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+        var removedReferenceCount = 0;
+
+        foreach (var propsPath in Directory.EnumerateFiles(targetRoot, "Directory.Build.props", SearchOption.AllDirectories))
+        {
+            var originalContent = await File.ReadAllTextAsync(propsPath).ConfigureAwait(false);
+            var matchCount = RazorDiagnosticsAnalyzerProjectReferencePattern.Matches(originalContent).Count;
+            if (matchCount == 0)
+                continue;
+
+            var updatedContent = RazorDiagnosticsAnalyzerProjectReferencePattern.Replace(originalContent, string.Empty);
+            updatedContent = NormalizeAdjacentMsBuildItemFormatting(updatedContent);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(propsPath, updatedContent, templatePath: propsPath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, propsPath));
+            removedReferenceCount += matchCount;
+        }
+
+        return removedReferenceCount == 0
+            ? "No Razor.Diagnostics.Analyzers build-analyzer references were found in Razor Directory.Build.props files."
+            : $"Removed {removedReferenceCount} Razor.Diagnostics.Analyzers build-analyzer reference(s) from {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorBuildWarningsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        var candidateFiles = new[]
+        {
+            Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "LiveShare", "RemoteHierarchyServiceFactory.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "LiveShare", "Host", "ProjectHierarchyProxyFactory.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "LiveShare", "Guest", "RazorGuestInitializationService.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "LiveShare", "Guest", "ProxyAccessor.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "LiveShare", "Guest", "GuestProjectPathProvider.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "ProjectCapabilityResolver.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "LiveShare", "Guest", "RazorGuestInitializationServiceTest.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.Razor.IntegrationTests", "CodeFoldingTests.cs"),
+        };
+
+        foreach (var path in candidateFiles)
+        {
+            if (!File.Exists(path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = NormalizeRazorBuildWarnings(path, originalContent);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor warning cleanup changes were needed."
+            : $"Normalized Razor warning cleanup in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
     private static async Task<string> RemoveXunitExecutionPackageReferencesAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -1766,6 +1846,135 @@ internal static class PostMergeCleanupRunner
         return pattern.Replace(content, string.Empty);
     }
 
+    private static string NormalizeRazorBuildWarnings(string path, string content)
+    {
+        content = content.Replace(
+            "public Task<ICollaborationService> CreateServiceAsync(",
+            "public Task<ICollaborationService?> CreateServiceAsync(",
+            StringComparison.Ordinal);
+        content = content.Replace(
+            "return Task.FromResult<ICollaborationService>(",
+            "return Task.FromResult<ICollaborationService?>(",
+            StringComparison.Ordinal);
+
+        if (path.EndsWith("ProxyAccessor.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            content = content.Replace(
+                "        Assumes.NotNull(_liveShareSessionAccessor.Session);" + Environment.NewLine +
+                Environment.NewLine +
+                "        return _jtf.Run(" + Environment.NewLine +
+                "            () => _liveShareSessionAccessor.Session.GetRemoteServiceAsync<TProxy>(typeof(TProxy).Name, CancellationToken.None));",
+                "        var session = _liveShareSessionAccessor.Session;" + Environment.NewLine +
+                "        Assumes.NotNull(session);" + Environment.NewLine +
+                Environment.NewLine +
+                "        var proxy = _jtf.Run(" + Environment.NewLine +
+                "            () => session.GetRemoteServiceAsync<TProxy>(typeof(TProxy).Name, CancellationToken.None));" + Environment.NewLine +
+                "        return proxy ?? throw new global::System.InvalidOperationException($\"Unable to resolve Live Share proxy for {typeof(TProxy).Name}.\");",
+                StringComparison.Ordinal);
+        }
+
+        if (path.EndsWith("GuestProjectPathProvider.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            content = content.Replace(
+                "        Assumes.NotNull(_liveShareSessionAccessor.Session);" + Environment.NewLine +
+                Environment.NewLine +
+                "        // The path we're given is from the guest so following other patterns we always ask the host information in its own form (aka convert on guest instead of on host)." + Environment.NewLine +
+                "        var ownerPath = _liveShareSessionAccessor.Session.ConvertLocalPathToSharedUri(textDocument.FilePath);",
+                "        var session = _liveShareSessionAccessor.Session;" + Environment.NewLine +
+                "        Assumes.NotNull(session);" + Environment.NewLine +
+                Environment.NewLine +
+                "        if (string.IsNullOrEmpty(textDocument.FilePath))" + Environment.NewLine +
+                "        {" + Environment.NewLine +
+                "            return null;" + Environment.NewLine +
+                "        }" + Environment.NewLine +
+                Environment.NewLine +
+                "        // The path we're given is from the guest so following other patterns we always ask the host information in its own form (aka convert on guest instead of on host)." + Environment.NewLine +
+                "        var ownerPath = session.ConvertLocalPathToSharedUri(textDocument.FilePath);" + Environment.NewLine +
+                "        if (ownerPath is null)" + Environment.NewLine +
+                "        {" + Environment.NewLine +
+                "            return null;" + Environment.NewLine +
+                "        }",
+                StringComparison.Ordinal);
+
+            content = content.Replace(
+                "        Assumes.NotNull(_liveShareSessionAccessor.Session);" + Environment.NewLine +
+                Environment.NewLine +
+                "        return _liveShareSessionAccessor.Session.ConvertSharedUriToLocalPath(hostProjectPath);",
+                "        var session = _liveShareSessionAccessor.Session;" + Environment.NewLine +
+                "        Assumes.NotNull(session);" + Environment.NewLine +
+                Environment.NewLine +
+                "        return session.ConvertSharedUriToLocalPath(hostProjectPath) ?? hostProjectPath.LocalPath;",
+                StringComparison.Ordinal);
+        }
+
+        if (path.EndsWith("ProjectCapabilityResolver.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            content = content.Replace(
+                "            var remoteHierarchyService = await session" + Environment.NewLine +
+                "                .GetRemoteServiceAsync<IRemoteHierarchyService>(nameof(IRemoteHierarchyService), cancellationToken)" + Environment.NewLine +
+                "                .ConfigureAwait(false);" + Environment.NewLine +
+                Environment.NewLine +
+                "            var documentFilePathUri = session.ConvertLocalPathToSharedUri(documentFilePath);" + Environment.NewLine +
+                Environment.NewLine +
+                "            var isMatch = await remoteHierarchyService" + Environment.NewLine +
+                "                .HasCapabilityAsync(documentFilePathUri, capability, cancellationToken)" + Environment.NewLine +
+                "                .ConfigureAwait(false);",
+                "            var remoteHierarchyService = await session" + Environment.NewLine +
+                "                .GetRemoteServiceAsync<IRemoteHierarchyService>(nameof(IRemoteHierarchyService), cancellationToken)" + Environment.NewLine +
+                "                .ConfigureAwait(false);" + Environment.NewLine +
+                "            if (remoteHierarchyService is null)" + Environment.NewLine +
+                "            {" + Environment.NewLine +
+                "                _logger.LogWarning(\"Live Share remote hierarchy service was unavailable during capability resolution.\");" + Environment.NewLine +
+                "                return new(IsInProject: false, HasCapability: false);" + Environment.NewLine +
+                "            }" + Environment.NewLine +
+                Environment.NewLine +
+                "            var documentFilePathUri = session.ConvertLocalPathToSharedUri(documentFilePath);" + Environment.NewLine +
+                "            if (documentFilePathUri is null)" + Environment.NewLine +
+                "            {" + Environment.NewLine +
+                "                _logger.LogWarning($\"Live Share could not convert document path to shared URI: {documentFilePath}\");" + Environment.NewLine +
+                "                return new(IsInProject: false, HasCapability: false);" + Environment.NewLine +
+                "            }" + Environment.NewLine +
+                Environment.NewLine +
+                "            var isMatch = await remoteHierarchyService" + Environment.NewLine +
+                "                .HasCapabilityAsync(documentFilePathUri, capability, cancellationToken)" + Environment.NewLine +
+                "                .ConfigureAwait(false);",
+                StringComparison.Ordinal);
+        }
+
+        if (path.EndsWith("CodeFoldingTests.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            content = content.Replace(
+                "        ImmutableArray<CollapsibleBlock> missingLines;",
+                "        ImmutableArray<CollapsibleBlock> missingLines = [];",
+                StringComparison.Ordinal);
+        }
+
+        if (path.EndsWith("RazorGuestInitializationServiceTest.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            content = content.Replace(
+                "        IDisposable? sessionService = null;" + Environment.NewLine,
+                string.Empty,
+                StringComparison.Ordinal);
+            content = content.Replace(
+                "        sessionService = (IDisposable)await service.CreateServiceAsync(session.Object, DisposalToken);",
+                "        var sessionService = Assert.IsAssignableFrom<IDisposable>(await service.CreateServiceAsync(session.Object, DisposalToken));",
+                StringComparison.Ordinal);
+            content = content.Replace(
+                "        sessionService = (IDisposable)await service.CreateServiceAsync(session.Object, cts.Token);",
+                "        var sessionService = Assert.IsAssignableFrom<IDisposable>(await service.CreateServiceAsync(session.Object, cts.Token));",
+                StringComparison.Ordinal);
+            content = content.Replace(
+                "        // Act" + Environment.NewLine +
+                "        sessionService.Dispose();",
+                "        // Act" + Environment.NewLine +
+                "        Assert.NotNull(sessionService);" + Environment.NewLine +
+                "        sessionService.Dispose();",
+                StringComparison.Ordinal);
+        }
+
+        return content;
+    }
+
     private static string NormalizeStrictMoqCalls(string content)
     {
         if (content.Contains("public static class StrictMock", StringComparison.Ordinal))
@@ -2239,6 +2448,10 @@ internal static class PostMergeCleanupRunner
     private static readonly Regex ResidualStrictBehaviorWithPredicatePattern = new(
         @"(?<![\w:.])(?:(?:global::Microsoft\.AspNetCore\.Razor\.Test\.Common\.)?StrictMock|Mock)\.Of<(?<type>[^>]+)>\((?<predicate>[\s\S]*?),\s*MockBehavior\.Strict\s*\)",
         RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    private static readonly Regex RazorDiagnosticsAnalyzerProjectReferencePattern = new(
+        @"(?:^[ \t]*\r?\n)?^[ \t]*<ProjectReference Include=""[^""]*Razor\.Diagnostics\.Analyzers\.csproj""(?:\s+[^>]*)?/>\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static readonly Regex ActiveConfigurationGroupNullCheckPattern = new(
         @"\r?\n[ \t]*if \(activeConfigurationGroupSubscriptionService is null\)\r?\n[ \t]*\{\r?\n[ \t]*throw new ArgumentNullException\(nameof\(activeConfigurationGroupSubscriptionService\)\);\r?\n[ \t]*\}\r?\n",
