@@ -161,7 +161,10 @@ internal static class RepositoryPreparer
         if (name is "artifacts" or "eng")
             return true;
 
-        if (name is ".editorconfig" or ".globalconfig" or ".vsconfig" or "global.json" or "NuGet.config")
+        if (name is ".editorconfig" or "SpellingExclusions.dic")
+            return false;
+
+        if (name is ".globalconfig" or ".vsconfig" or "global.json" or "NuGet.config")
             return true;
 
         if (string.Equals(name, "NOTICE.txt", StringComparison.OrdinalIgnoreCase))

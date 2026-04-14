@@ -61,6 +61,12 @@ internal static class PostMergeCleanupRunner
             "After the merge, Razor should import local copies of its globalconfigs from src\\Razor so Razor-specific analyzer settings are preserved, while trimming entries already supplied by Roslyn avoids duplicate key warnings.",
             OverlayRazorGlobalConfigsAsync),
         new(
+            "overlay-razor-editorconfig",
+            "Copy Razor's repo-root .editorconfig and spelling exclusions file into src\\Razor.",
+            "Overlay Razor .editorconfig",
+            "Razor source files in the merged Roslyn tree should keep Razor's repo-local editorconfig and spelling exclusions under src\\Razor, otherwise Roslyn's root editorconfig takes over and triggers unwanted file-header and style diagnostics.",
+            OverlayRazorRootEditorConfigAsync),
+        new(
             "merge-razor-publish-data",
             "Merge missing Razor package publish entries into Roslyn's PublishData.json without overriding Roslyn's existing branch routing.",
             "Merge Razor PublishData packages",
@@ -600,6 +606,33 @@ internal static class PostMergeCleanupRunner
         }
 
         return string.Join(" ", summaryParts);
+    }
+
+    private static async Task<string> OverlayRazorRootEditorConfigAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var sourceRoot = context.State.SourceCloneDirectory;
+        var copiedFiles = new List<string>();
+
+        foreach (var fileName in new[] { ".editorconfig", "SpellingExclusions.dic" })
+        {
+            var sourcePath = Path.Combine(sourceRoot, fileName);
+            var targetPath = Path.Combine(targetRoot, fileName);
+            if (!await CopyFileIfDifferentAsync(sourcePath, targetPath).ConfigureAwait(false))
+                continue;
+
+            await GitRunner.RunGitAsync(
+                targetRepoRoot,
+                "add",
+                "--",
+                Path.GetRelativePath(targetRepoRoot, targetPath)).ConfigureAwait(false);
+            copiedFiles.Add(Path.GetRelativePath(targetRepoRoot, targetPath));
+        }
+
+        return copiedFiles.Count == 0
+            ? "No Razor .editorconfig overlay changes were needed."
+            : $"Copied or updated {copiedFiles.Count} Razor root config file(s): {string.Join(", ", copiedFiles)}.";
     }
 
     private static async Task<string> OverlayRazorBannedSymbolsAsync(StageContext context)
