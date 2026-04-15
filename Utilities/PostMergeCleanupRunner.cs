@@ -280,6 +280,12 @@ internal static class PostMergeCleanupRunner
             "Suppress NestedFile ThreadHelper RS0030",
             "Razor's NestedFileCommandHandler still uses ThreadHelper.JoinableTaskFactory in two legacy Visual Studio extension call sites, and the merged Roslyn tree bans that API in favor of IThreadingContext.JoinableTaskFactory. The post-merge cleanup should suppress those two warning sites locally instead of broadening the suppression scope.",
             SuppressNestedFileThreadHelperRS0030Async),
+        new(
+            "disable-razorextension-ca2007",
+            "Disable CA2007 for Razor's Microsoft.VisualStudio.RazorExtension project via a local editorconfig.",
+            "Disable RazorExtension CA2007",
+            "The merged Roslyn build surfaces CA2007 throughout Microsoft.VisualStudio.RazorExtension, so Razor should suppress that rule in the project's local editorconfig instead of churning many Visual Studio extension async-call sites during post-merge cleanup.",
+            DisableRazorExtensionCA2007Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1432,6 +1438,48 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(nestedFileCommandHandlerPath, updatedContent, templatePath: nestedFileCommandHandlerPath).ConfigureAwait(false);
         return $"Suppressed RS0030 in '{Path.GetRelativePath(targetRepoRoot, nestedFileCommandHandlerPath)}' at Razor's legacy ThreadHelper.JoinableTaskFactory call sites.";
+    }
+
+    private static async Task<string> DisableRazorExtensionCA2007Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var razorExtensionDirectory = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.RazorExtension");
+        var editorConfigPath = Path.Combine(razorExtensionDirectory, ".editorconfig");
+        var relativeEditorConfigPath = Path.GetRelativePath(targetRepoRoot, editorConfigPath);
+        var templatePath = File.Exists(editorConfigPath)
+            ? editorConfigPath
+            : Path.Combine(targetRepoRoot, "src", "Razor", "src", "Razor", "src", ".editorconfig");
+
+        if (!Directory.Exists(razorExtensionDirectory))
+            return "No Microsoft.VisualStudio.RazorExtension project directory was found for CA2007 suppression.";
+
+        var existingStatus = (await GitRunner.RunGitAsync(
+            targetRepoRoot,
+            "status",
+            "--short",
+            "--",
+            relativeEditorConfigPath).ConfigureAwait(false)).Trim();
+        var wasUntracked = existingStatus.StartsWith("??", StringComparison.Ordinal);
+        var originalContent = File.Exists(editorConfigPath)
+            ? await File.ReadAllTextAsync(editorConfigPath).ConfigureAwait(false)
+            : "[*.cs]" + Environment.NewLine + Environment.NewLine + "# Call ConfigureAwait" + Environment.NewLine;
+        var updatedContent = SetEditorConfigSeverity(originalContent, "CA2007", "none");
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal) && !wasUntracked)
+            return "No RazorExtension CA2007 editorconfig changes were needed.";
+
+        if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            await WriteTextPreservingUtf8BomAsync(editorConfigPath, updatedContent, templatePath: templatePath).ConfigureAwait(false);
+
+        await GitRunner.RunGitAsync(targetRepoRoot, "add", "--", relativeEditorConfigPath).ConfigureAwait(false);
+        return $"Disabled CA2007 in '{relativeEditorConfigPath}' via Razor's local editorconfig.";
     }
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
