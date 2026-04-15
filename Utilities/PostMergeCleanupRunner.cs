@@ -9,7 +9,6 @@ namespace RepoMerger;
 
 internal static class PostMergeCleanupRunner
 {
-    private const string RazorDiagnosticsAnalyzerReferenceCondition = "'$(BuildingInsideVisualStudio)' == 'true'";
 
     private static readonly CleanupStep[] Steps =
     [
@@ -99,9 +98,9 @@ internal static class PostMergeCleanupRunner
             RemoveRoslynDiagnosticsAnalyzersAsync),
         new(
             "guard-razor-diagnostics-analyzer-refs",
-            "Keep Razor's local build analyzers enabled for Visual Studio developer builds, but skip them in command-line repo builds that use Roslyn's bootstrap flow.",
-            "Guard Razor diagnostics analyzer refs",
-            "Razor.Diagnostics.Analyzers are intended to light up diagnostics for developers working in the merged solution, so the analyzer references should remain in place for Visual Studio builds, but they need to be gated out of build.cmd's command-line bootstrap flow to avoid CS9057 compiler-version mismatch warnings.",
+            "Comment out Razor's local diagnostics-analyzer project references and leave a TODO to restore them once the merged Roslyn build can consume them cleanly again.",
+            "Comment Razor diagnostics analyzer refs",
+            "The merged Roslyn tree should not actively reference Razor.Diagnostics.Analyzers.csproj yet, but keeping the intended ProjectReference in a TODO comment makes it clear how to restore the analyzer once the compatibility issues are resolved.",
             GuardRazorDiagnosticsAnalyzerReferencesAsync),
         new(
             "convert-roslyn-package-references",
@@ -1400,63 +1399,39 @@ internal static class PostMergeCleanupRunner
         var targetRoot = context.TargetRoot;
         var sourceRazorRoot = Path.Combine(context.State.SourceCloneDirectory, "src", "Razor");
         var changedFiles = new List<string>();
-        var guardedReferenceCount = 0;
+        var commentedReferenceCount = 0;
+        const string todoComment = """
+    <!-- TODO: Re-enable the Razor.Diagnostics.Analyzers project reference once the merged Roslyn build can load it cleanly again.
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\Analyzers\Razor.Diagnostics.Analyzers\Razor.Diagnostics.Analyzers.csproj"
+                      PrivateAssets="all"
+                      ReferenceOutputAssembly="false"
+                      OutputItemType="Analyzer" />
+    -->
+""";
 
         foreach (var propsPath in Directory.EnumerateFiles(targetRoot, "Directory.Build.props", SearchOption.AllDirectories))
         {
             var originalContent = await File.ReadAllTextAsync(propsPath).ConfigureAwait(false);
-            var updatedContent = originalContent.Replace(
-                @" Condition=""'$(BootstrapBuildPath)' == '' or '$(BuildingInsideVisualStudio)' == 'true'""",
-                $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""",
-                StringComparison.Ordinal);
-            updatedContent = RazorDiagnosticsAnalyzerProjectReferencePattern.Replace(
-                updatedContent,
-                match =>
-                {
-                    if (match.Value.Contains("BootstrapBuildPath", StringComparison.OrdinalIgnoreCase))
-                    {
-                        return match.Value.Replace(
-                            @" Condition=""'$(BootstrapBuildPath)' == '' or '$(BuildingInsideVisualStudio)' == 'true'""",
-                            $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""",
-                            StringComparison.Ordinal);
-                    }
-
-                    guardedReferenceCount++;
-                    return match.Groups["prefix"].Value +
-                        $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""" +
-                        match.Groups["suffix"].Value;
-                });
-
-            if (!RazorDiagnosticsAnalyzerProjectReferencePattern.IsMatch(updatedContent))
+            var updatedContent = RazorDiagnosticsAnalyzerTodoCommentPattern.Replace(originalContent, string.Empty);
+            var activeReferenceCount = RazorDiagnosticsAnalyzerProjectReferencePattern.Matches(updatedContent).Count;
+            if (activeReferenceCount > 0)
             {
-                var relativePath = Path.GetRelativePath(targetRoot, propsPath);
-                var sourcePath = Path.Combine(sourceRazorRoot, relativePath);
-                if (File.Exists(sourcePath))
-                {
-                    var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
-                    var sourceMatch = RazorDiagnosticsAnalyzerProjectReferencePattern.Match(sourceContent);
-                    if (sourceMatch.Success)
-                    {
-                        var guardedReference = sourceMatch.Value.Contains("BootstrapBuildPath", StringComparison.OrdinalIgnoreCase)
-                            ? sourceMatch.Value.Replace(
-                                @" Condition=""'$(BootstrapBuildPath)' == '' or '$(BuildingInsideVisualStudio)' == 'true'""",
-                                $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""",
-                                StringComparison.Ordinal)
-                            : sourceMatch.Groups["prefix"].Value +
-                                $@" Condition=""{RazorDiagnosticsAnalyzerReferenceCondition}""" +
-                                sourceMatch.Groups["suffix"].Value;
+                updatedContent = RazorDiagnosticsAnalyzerProjectReferencePattern.Replace(updatedContent, string.Empty);
+                commentedReferenceCount += activeReferenceCount;
+            }
 
-                        var restoredContent = EnsureRawItemAfterPackageReference(
-                            updatedContent,
-                            "Microsoft.CodeAnalysis.Analyzers",
-                            guardedReference);
-                        if (!string.Equals(updatedContent, restoredContent, StringComparison.Ordinal))
-                        {
-                            updatedContent = restoredContent;
-                            guardedReferenceCount++;
-                        }
-                    }
-                }
+            var relativePath = Path.GetRelativePath(targetRoot, propsPath);
+            var sourcePath = Path.Combine(sourceRazorRoot, relativePath);
+            var sourceHasAnalyzerReference = File.Exists(sourcePath)
+                && RazorDiagnosticsAnalyzerProjectReferencePattern.IsMatch(await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false));
+
+            if ((activeReferenceCount > 0 || sourceHasAnalyzerReference) &&
+                updatedContent.Contains("Microsoft.CodeAnalysis.Analyzers", StringComparison.Ordinal))
+            {
+                updatedContent = EnsureRawItemAfterPackageReference(
+                    updatedContent,
+                    "Microsoft.CodeAnalysis.Analyzers",
+                    todoComment);
             }
 
             if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
@@ -1466,9 +1441,9 @@ internal static class PostMergeCleanupRunner
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, propsPath));
         }
 
-        return guardedReferenceCount == 0
-            ? "No Razor.Diagnostics.Analyzers Visual Studio guard changes were needed in Razor Directory.Build.props files."
-            : $"Guarded {guardedReferenceCount} Razor.Diagnostics.Analyzers build-analyzer reference(s) in {changedFiles.Count} file(s) so they stay active in Visual Studio without breaking build.cmd: {string.Join(", ", changedFiles)}.";
+        return commentedReferenceCount == 0
+            ? "No Razor.Diagnostics.Analyzers TODO comment rewrites were needed in Razor Directory.Build.props files."
+            : $"Commented out {commentedReferenceCount} Razor.Diagnostics.Analyzers project reference(s) in {changedFiles.Count} file(s) and replaced them with a TODO note: {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> NormalizeRazorBuildWarningsAsync(StageContext context)
@@ -3487,7 +3462,11 @@ internal static class PostMergeCleanupRunner
         RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
     private static readonly Regex RazorDiagnosticsAnalyzerProjectReferencePattern = new(
-        @"(?<prefix>^[ \t]*<ProjectReference Include=""[^""]*Razor\.Diagnostics\.Analyzers\.csproj""(?:(?!\sCondition=)[^>])*)(?<suffix>\s*/>)",
+        @"^[ \t]*<ProjectReference Include=""[^""]*Razor\.Diagnostics\.Analyzers\.csproj""[\s\S]*?\s*/>\s*\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex RazorDiagnosticsAnalyzerTodoCommentPattern = new(
+        @"^[ \t]*<!-- TODO: Re-enable the Razor\.Diagnostics\.Analyzers project reference once the merged Roslyn build can load it cleanly again\.[\s\S]*?-->[ \t]*\r?\n?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static readonly Regex ActiveConfigurationGroupNullCheckPattern = new(
