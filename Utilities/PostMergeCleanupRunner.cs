@@ -175,6 +175,12 @@ internal static class PostMergeCleanupRunner
             "The merged Roslyn tree expects `static` and `unsafe` modifiers in Roslyn's preferred order, so Razor's StringExtensions helper should rewrite its legacy declaration accordingly.",
             FixRazorStringExtensionsModifierOrderingAsync),
         new(
+            "fix-razor-enum-gethashcode-ban",
+            "Rewrite Razor's DocumentationId hash-code calculation to cast the enum to an integral type instead of calling Enum.GetHashCode().",
+            "Fix Razor enum hash-code ban",
+            "Roslyn bans Enum.GetHashCode because it can box on .NET Framework, so the merged Razor tree should cast DocumentationId to int in DocumentationDescriptor.SimpleDescriptor.ComputeHashCode instead.",
+            FixRazorEnumGetHashCodeBanAsync),
+        new(
             "disable-containedlanguage-ca2007",
             "Disable CA2007 for Razor's ContainedLanguage project via its local editorconfig.",
             "Disable ContainedLanguage CA2007",
@@ -1162,6 +1168,34 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(stringExtensionsPath, updatedContent, templatePath: stringExtensionsPath).ConfigureAwait(false);
         return $"Fixed modifier ordering in '{Path.GetRelativePath(targetRepoRoot, stringExtensionsPath)}' to match Roslyn's analyzer expectations.";
+    }
+
+    private static async Task<string> FixRazorEnumGetHashCodeBanAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var documentationDescriptorPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Compiler",
+            "Microsoft.CodeAnalysis.Razor.Compiler",
+            "src",
+            "Language",
+            "DocumentationDescriptor.SimpleDescriptor.cs");
+
+        if (!File.Exists(documentationDescriptorPath))
+            return "No Razor DocumentationDescriptor.SimpleDescriptor.cs file was found for enum hash-code cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(documentationDescriptorPath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(
+            "            => Id.GetHashCode();",
+            "            => (int)Id;",
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor enum hash-code cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(documentationDescriptorPath, updatedContent, templatePath: documentationDescriptorPath).ConfigureAwait(false);
+        return $"Rewrote DocumentationId hash-code calculation in '{Path.GetRelativePath(targetRepoRoot, documentationDescriptorPath)}' to avoid Enum.GetHashCode() boxing.";
     }
 
     private static async Task<string> DisableContainedLanguageCA2007Async(StageContext context)
