@@ -4117,7 +4117,7 @@ public class SurveyPrompt : ComponentBase
         @"(?<![\w.])Package\.GetGlobalService\(",
         RegexOptions.CultureInvariant);
 
-    private const string RazorSdkPackageVersion = "7.0.0-preview.5.22368.1";
+    private const string RazorSdkPackageVersion = "11.0.100-preview.4.26215.114";
 
     private static readonly string[] RazorGlobalConfigFileNames =
     [
