@@ -2469,6 +2469,8 @@ internal static class PostMergeCleanupRunner
             || relativePath.Contains($"{Path.DirectorySeparatorChar}legacyTest{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
             || relativePath.Contains($"{Path.DirectorySeparatorChar}benchmarks{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
             || relativePath.Contains($"{Path.DirectorySeparatorChar}perf{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+            || projectName.EndsWith(".Test", StringComparison.OrdinalIgnoreCase)
+            || projectName.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase)
             || projectName.Contains("UnitTest", StringComparison.OrdinalIgnoreCase)
             || projectName.Contains("IntegrationTest", StringComparison.OrdinalIgnoreCase)
             || projectName.Contains("Test.Common", StringComparison.OrdinalIgnoreCase)
