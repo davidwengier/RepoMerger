@@ -1987,19 +1987,9 @@ internal static class PostMergeCleanupRunner
                 "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(text, System.Text.Encoding.UTF8), CSharpParseOptions)"
             ),
             (
-                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.CodeAnalysis.Razor.Compiler", "src", "SourceGenerators", "RazorSourceGenerator.cs"),
-                "CSharpSyntaxTree.ParseText(generatedDeclarationText.Text, (CSharpParseOptions)parseOptions, cancellationToken: ct)",
-                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(generatedDeclarationText.Text, System.Text.Encoding.UTF8), (CSharpParseOptions)parseOptions, cancellationToken: ct)"
-            ),
-            (
                 Path.Combine(targetRoot, "src", "Shared", "Microsoft.AspNetCore.Razor.Test.Common", "Language", "IntegrationTests", "IntegrationTestBase.cs"),
                 "CSharpSyntaxTree.ParseText(text, CSharpParseOptions, path: filePath ?? string.Empty)",
                 "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(text, System.Text.Encoding.UTF8), CSharpParseOptions, path: filePath ?? string.Empty)"
-            ),
-            (
-                Path.Combine(targetRoot, "src", "Shared", "Microsoft.AspNetCore.Razor.Test.Common", "Language", "IntegrationTests", "IntegrationTestBase.cs"),
-                "CSharpSyntaxTree.ParseText(csharpDocument.Text, CSharpParseOptions, path: code.CodeDocument.Source.FilePath ?? string.Empty)",
-                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(csharpDocument.Text, System.Text.Encoding.UTF8), CSharpParseOptions, path: code.CodeDocument.Source.FilePath ?? string.Empty)"
             ),
             (
                 Path.Combine(targetRoot, "src", "Razor", "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Mapping", "RazorEditServiceTest.cs"),
