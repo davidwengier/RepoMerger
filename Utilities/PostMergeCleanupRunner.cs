@@ -292,6 +292,12 @@ internal static class PostMergeCleanupRunner
             "Fix SyntaxVisualizer readonly field",
             "Razor's SyntaxVisualizerControl temp-path field is initialized once and never reassigned, so the merged Roslyn tree expects it to be marked readonly.",
             FixSyntaxVisualizerReadonlyFieldAsync),
+        new(
+            "normalize-razor-parsetext-sourcetext",
+            "Rewrite Razor's string-based CSharpSyntaxTree.ParseText calls to use SourceText.",
+            "Normalize Razor ParseText SourceText usage",
+            "Razor's banned-symbols policy disallows the string-based CSharpSyntaxTree.ParseText overload, so the merged Roslyn tree should wrap Razor's test and generator inputs in SourceText instead of relying on the banned API.",
+            NormalizeRazorParseTextSourceTextAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1941,6 +1947,117 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor warning cleanup changes were needed."
             : $"Normalized Razor warning cleanup in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorParseTextSourceTextAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+        var replacements = new (string Path, string OldText, string NewText)[]
+        {
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Mvc.Razor.Extensions", "test", "ViewComponentTagHelperProducerTest.cs"),
+                "CSharpSyntaxTree.ParseText(code)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(code, System.Text.Encoding.UTF8))"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Mvc.Razor.Extensions", "test", "ViewComponentTagHelperDescriptorFactoryTest.cs"),
+                "CSharpSyntaxTree.ParseText(AdditionalCode)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(AdditionalCode, System.Text.Encoding.UTF8))"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Mvc.Razor.Extensions.Version1_X", "test", "ViewComponentTagHelperProducerTest.cs"),
+                "CSharpSyntaxTree.ParseText(code)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(code, System.Text.Encoding.UTF8))"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Mvc.Razor.Extensions.Version2_X", "test", "ViewComponentTagHelperProducerTest.cs"),
+                "CSharpSyntaxTree.ParseText(code)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(code, System.Text.Encoding.UTF8))"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test", "IntegrationTests", "CodeGenerationIntegrationTest.cs"),
+                "CSharpSyntaxTree.ParseText(TestTagHelperDescriptors.Code)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(TestTagHelperDescriptors.Code, System.Text.Encoding.UTF8))"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.CodeAnalysis.Razor", "test", "BaseTagHelperProducerTest.cs"),
+                "CSharpSyntaxTree.ParseText(text, CSharpParseOptions)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(text, System.Text.Encoding.UTF8), CSharpParseOptions)"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.CodeAnalysis.Razor.Compiler", "src", "SourceGenerators", "RazorSourceGenerator.cs"),
+                "CSharpSyntaxTree.ParseText(generatedDeclarationText.Text, (CSharpParseOptions)parseOptions, cancellationToken: ct)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(generatedDeclarationText.Text, System.Text.Encoding.UTF8), (CSharpParseOptions)parseOptions, cancellationToken: ct)"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Shared", "Microsoft.AspNetCore.Razor.Test.Common", "Language", "IntegrationTests", "IntegrationTestBase.cs"),
+                "CSharpSyntaxTree.ParseText(text, CSharpParseOptions, path: filePath ?? string.Empty)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(text, System.Text.Encoding.UTF8), CSharpParseOptions, path: filePath ?? string.Empty)"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Shared", "Microsoft.AspNetCore.Razor.Test.Common", "Language", "IntegrationTests", "IntegrationTestBase.cs"),
+                "CSharpSyntaxTree.ParseText(csharpDocument.Text, CSharpParseOptions, path: code.CodeDocument.Source.FilePath ?? string.Empty)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(csharpDocument.Text, System.Text.Encoding.UTF8), CSharpParseOptions, path: code.CodeDocument.Source.FilePath ?? string.Empty)"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Mapping", "RazorEditServiceTest.cs"),
+                "CSharpSyntaxTree.ParseText(csharpSource)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(csharpSource, System.Text.Encoding.UTF8))"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Mapping", "RazorEditServiceTest.cs"),
+                "CSharpSyntaxTree.ParseText(newCSharpSource)",
+                "CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(newCSharpSource, System.Text.Encoding.UTF8))"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "test", "Microsoft.NET.Sdk.Razor.SourceGenerators.UnitTests", "RazorSourceGeneratorTests.cs"),
+                """
+                    .AddSyntaxTrees(CSharpSyntaxTree.ParseText(@"
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Rendering;
+namespace SurveyPromptRootNamspace;
+public class SurveyPrompt : ComponentBase
+{
+    protected override void BuildRenderTree(RenderTreeBuilder builder) {}
+}"));
+""".ReplaceLineEndings(),
+                """
+                    .AddSyntaxTrees(CSharpSyntaxTree.ParseText(Microsoft.CodeAnalysis.Text.SourceText.From(@"
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Rendering;
+namespace SurveyPromptRootNamspace;
+public class SurveyPrompt : ComponentBase
+{
+    protected override void BuildRenderTree(RenderTreeBuilder builder) {}
+}", System.Text.Encoding.UTF8)));
+""".ReplaceLineEndings()
+            ),
+        };
+
+        foreach (var group in replacements.GroupBy(static replacement => replacement.Path, StringComparer.OrdinalIgnoreCase))
+        {
+            var path = group.Key;
+            if (!File.Exists(path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = originalContent;
+
+            foreach (var (_, oldText, newText) in group)
+                updatedContent = updatedContent.Replace(oldText, newText, StringComparison.Ordinal);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor ParseText SourceText rewrites were needed."
+            : $"Normalized Razor ParseText calls to use SourceText in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveXunitExecutionPackageReferencesAsync(StageContext context)
