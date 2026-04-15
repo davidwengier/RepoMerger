@@ -764,13 +764,10 @@ internal static class PostMergeCleanupRunner
         {
             var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
             var updatedContent = originalContent
-                .Replace(@"$(MSBuildThisFileDirectory)eng\BannedSymbols.txt", @"$(RepositoryRoot)src\Razor\BannedSymbols.txt", StringComparison.Ordinal)
-                .Replace(@"$(RepositoryEngineeringDir)BannedSymbols.txt", @"$(RepositoryRoot)src\Razor\BannedSymbols.txt", StringComparison.Ordinal)
-                .Replace(@"$(RepositoryRoot)BannedSymbols.txt", @"$(RepositoryRoot)src\Razor\BannedSymbols.txt", StringComparison.Ordinal)
-                .Replace(@"$(RepositoryEngineeringDir)BannedSymbols.MEFv1.txt", @"$(RepositoryRoot)src\Razor\BannedSymbols.MEFv1.txt", StringComparison.Ordinal)
-                .Replace(@"$(RepositoryRoot)BannedSymbols.MEFv1.txt", @"$(RepositoryRoot)src\Razor\BannedSymbols.MEFv1.txt", StringComparison.Ordinal)
-                .Replace(@"$(RepositoryEngineeringDir)BannedSymbols.MEFv2.txt", @"$(RepositoryRoot)src\Razor\BannedSymbols.MEFv2.txt", StringComparison.Ordinal)
-                .Replace(@"$(RepositoryRoot)BannedSymbols.MEFv2.txt", @"$(RepositoryRoot)src\Razor\BannedSymbols.MEFv2.txt", StringComparison.Ordinal);
+                .Replace(@"$(MSBuildThisFileDirectory)eng\BannedSymbols.txt", @"$(RepositoryRoot)BannedSymbols.txt", StringComparison.Ordinal)
+                .Replace(@"$(RepositoryEngineeringDir)BannedSymbols.txt", @"$(RepositoryRoot)BannedSymbols.txt", StringComparison.Ordinal)
+                .Replace(@"$(RepositoryEngineeringDir)BannedSymbols.MEFv1.txt", @"$(RepositoryRoot)BannedSymbols.MEFv1.txt", StringComparison.Ordinal)
+                .Replace(@"$(RepositoryEngineeringDir)BannedSymbols.MEFv2.txt", @"$(RepositoryRoot)BannedSymbols.MEFv2.txt", StringComparison.Ordinal);
 
             if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
                 continue;
