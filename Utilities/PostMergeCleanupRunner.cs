@@ -175,6 +175,12 @@ internal static class PostMergeCleanupRunner
             "The merged Roslyn tree expects `static` and `unsafe` modifiers in Roslyn's preferred order, so Razor's StringExtensions helper should rewrite its legacy declaration accordingly.",
             FixRazorStringExtensionsModifierOrderingAsync),
         new(
+            "make-razorsyntaxgenerator-program-static",
+            "Make RazorSyntaxGenerator.Program static to satisfy Roslyn's style analyzers.",
+            "Make RazorSyntaxGenerator.Program static",
+            "RazorSyntaxGenerator.Program only exposes static entry-point helpers, so the merged Roslyn tree should mark it static to match Roslyn's analyzer expectations.",
+            MakeRazorSyntaxGeneratorProgramStaticAsync),
+        new(
             "normalize-razor-unit-test-detection",
             "Rename Razor unit test projects to Roslyn's UnitTests convention and keep their references aligned.",
             "Align Razor test infrastructure with Roslyn",
@@ -1150,6 +1156,33 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(stringExtensionsPath, updatedContent, templatePath: stringExtensionsPath).ConfigureAwait(false);
         return $"Fixed modifier ordering in '{Path.GetRelativePath(targetRepoRoot, stringExtensionsPath)}' to match Roslyn's analyzer expectations.";
+    }
+
+    private static async Task<string> MakeRazorSyntaxGeneratorProgramStaticAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var programPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Compiler",
+            "tools",
+            "RazorSyntaxGenerator",
+            "Program.cs");
+
+        if (!File.Exists(programPath))
+            return "No RazorSyntaxGenerator Program.cs file was found for static-class cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(programPath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(
+            "public class Program",
+            "public static class Program",
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No RazorSyntaxGenerator Program static-class cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(programPath, updatedContent, templatePath: programPath).ConfigureAwait(false);
+        return $"Made '{Path.GetRelativePath(targetRepoRoot, programPath)}' static to satisfy Roslyn's analyzer expectations.";
     }
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
