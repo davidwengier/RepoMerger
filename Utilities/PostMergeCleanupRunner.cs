@@ -298,6 +298,12 @@ internal static class PostMergeCleanupRunner
             "Normalize Razor ParseText SourceText usage",
             "Razor's banned-symbols policy disallows the string-based CSharpSyntaxTree.ParseText overload, so the merged Roslyn tree should wrap Razor's test and generator inputs in SourceText instead of relying on the banned API.",
             NormalizeRazorParseTextSourceTextAsync),
+        new(
+            "rewrite-sdk-razor-package-paths",
+            @"Rewrite Razor Microsoft.NET.Sdk.Razor asset paths from $(PkgMicrosoft_NET_Sdk_Razor)\build\netstandard2.0 to $(PkgMicrosoft_NET_Sdk_Razor)\targets.",
+            "Rewrite Razor SDK package asset paths",
+            @"The merged Roslyn tree consumes Microsoft.NET.Sdk.Razor assets from $(PkgMicrosoft_NET_Sdk_Razor)\targets, so Razor projects and VSIX content should stop referencing the old build\netstandard2.0 layout.",
+            RewriteSdkRazorPackagePathsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1812,6 +1818,34 @@ internal static class PostMergeCleanupRunner
         return
             $"Updated {updatedCount} Razor Microsoft.NET.Sdk.Razor package version entr{(updatedCount == 1 ? "y" : "ies")} " +
             $"in '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use {RazorSdkPackageVersion}.";
+    }
+
+    private static async Task<string> RewriteSdkRazorPackagePathsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+        var updatedReferenceCount = 0;
+
+        foreach (var path in EnumerateMsBuildFiles(targetRoot))
+        {
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var matchCount = SdkRazorBuildNetstandardPathPattern.Matches(originalContent).Count;
+            if (matchCount == 0)
+                continue;
+
+            var updatedContent = SdkRazorBuildNetstandardPathPattern.Replace(
+                originalContent,
+                match => $"$(PkgMicrosoft_NET_Sdk_Razor){match.Groups["separator"].Value}targets");
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+            updatedReferenceCount += matchCount;
+        }
+
+        return changedFiles.Count == 0
+            ? @"No Razor SDK package paths referencing $(PkgMicrosoft_NET_Sdk_Razor)\build\netstandard2.0 were found."
+            : $@"Updated {updatedReferenceCount} Razor SDK package path reference(s) in {changedFiles.Count} file(s) to use $(PkgMicrosoft_NET_Sdk_Razor)\targets: {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
@@ -3913,6 +3947,10 @@ public class SurveyPrompt : ComponentBase
 
     private static readonly Regex PathCombineServicesPropsPattern = new(
         @"""eng""\s*,\s*""targets""\s*,\s*""Services\.props""",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex SdkRazorBuildNetstandardPathPattern = new(
+        Regex.Escape("$(PkgMicrosoft_NET_Sdk_Razor)") + @"(?<separator>[\\/])build\k<separator>netstandard2\.0",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     private static readonly Regex BrokeredServicesBeforeTargetsPattern = new(
