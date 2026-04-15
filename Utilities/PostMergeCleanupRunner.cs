@@ -268,6 +268,18 @@ internal static class PostMergeCleanupRunner
             "Fix ContainedLanguage modifier ordering",
             "Razor's ContainedLanguage project still carries a few legacy modifier-order spellings such as `public async override` and `readonly static`, but the merged Roslyn tree enforces Roslyn's preferred modifier order for those declarations.",
             FixContainedLanguageModifierOrderingAsync),
+        new(
+            "suppress-razorpackage-vssdk003",
+            "Suppress VSSDK003 on RazorPackage's legacy syntax visualizer tool-window registration.",
+            "Suppress RazorPackage VSSDK003",
+            "Razor's Visual Studio extension still registers its syntax visualizer with a synchronous ProvideToolWindow attribute, and the merged Roslyn tree surfaces VSSDK003 for that legacy pattern. The post-merge cleanup should suppress that one warning at the attribute site instead of broadening the suppression scope.",
+            SuppressRazorPackageVSSDK003Async),
+        new(
+            "suppress-nestedfile-threadhelper-rs0030",
+            "Suppress RS0030 on NestedFileCommandHandler's legacy ThreadHelper.JoinableTaskFactory usage.",
+            "Suppress NestedFile ThreadHelper RS0030",
+            "Razor's NestedFileCommandHandler still uses ThreadHelper.JoinableTaskFactory in two legacy Visual Studio extension call sites, and the merged Roslyn tree bans that API in favor of IThreadingContext.JoinableTaskFactory. The post-merge cleanup should suppress those two warning sites locally instead of broadening the suppression scope.",
+            SuppressNestedFileThreadHelperRS0030Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1334,6 +1346,92 @@ internal static class PostMergeCleanupRunner
             return "No ContainedLanguage modifier-order cleanup changes were needed.";
 
         return $"Fixed modifier ordering in {changedFiles.Count} ContainedLanguage file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> SuppressRazorPackageVSSDK003Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var razorPackagePath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.RazorExtension",
+            "RazorPackage.cs");
+
+        if (!File.Exists(razorPackagePath))
+            return "No RazorPackage.cs file was found for VSSDK003 suppression.";
+
+        var originalText =
+            "[ProvideMenuResource(\"Menus.ctmenu\", 1)]" + Environment.NewLine +
+            "[ProvideToolWindow(typeof(SyntaxVisualizerToolWindow))]" + Environment.NewLine +
+            "[ProvideSettingsManifest(PackageRelativeManifestFile = @\"UnifiedSettings\\razor.registration.json\")]";
+        var updatedText =
+            "[ProvideMenuResource(\"Menus.ctmenu\", 1)]" + Environment.NewLine +
+            "#pragma warning disable VSSDK003 // Tool windows should support async construction" + Environment.NewLine +
+            "[ProvideToolWindow(typeof(SyntaxVisualizerToolWindow))]" + Environment.NewLine +
+            "#pragma warning restore VSSDK003 // Tool windows should support async construction" + Environment.NewLine +
+            "[ProvideSettingsManifest(PackageRelativeManifestFile = @\"UnifiedSettings\\razor.registration.json\")]";
+
+        var originalContent = await File.ReadAllTextAsync(razorPackagePath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(originalText, updatedText, StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No RazorPackage VSSDK003 suppression changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(razorPackagePath, updatedContent, templatePath: razorPackagePath).ConfigureAwait(false);
+        return $"Suppressed VSSDK003 in '{Path.GetRelativePath(targetRepoRoot, razorPackagePath)}' at Razor's syntax visualizer tool-window registration.";
+    }
+
+    private static async Task<string> SuppressNestedFileThreadHelperRS0030Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var nestedFileCommandHandlerPath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.RazorExtension",
+            "NestedFiles",
+            "NestedFileCommandHandler.cs");
+
+        if (!File.Exists(nestedFileCommandHandlerPath))
+            return "No NestedFileCommandHandler.cs file was found for RS0030 suppression.";
+
+        var originalContent = await File.ReadAllTextAsync(nestedFileCommandHandlerPath).ConfigureAwait(false);
+        var updatedContent = originalContent;
+
+        var runAsyncOriginalText =
+            "#pragma warning disable VSSDK007 // Fire-and-forget from synchronous EventHandler is intentional" + Environment.NewLine +
+            "            ThreadHelper.JoinableTaskFactory.RunAsync(" + Environment.NewLine +
+            "                () => CreateAndOpenNestedFileAsync(razorFilePath, nestedFilePath, CancellationToken.None)).FileAndForget(\"NestedFileCommandHandler.Execute\");" + Environment.NewLine +
+            "#pragma warning restore VSSDK007";
+        var runAsyncUpdatedText =
+            "#pragma warning disable VSSDK007 // Fire-and-forget from synchronous EventHandler is intentional" + Environment.NewLine +
+            "#pragma warning disable RS0030 // NestedFileCommandHandler does not currently flow IThreadingContext." + Environment.NewLine +
+            "            ThreadHelper.JoinableTaskFactory.RunAsync(" + Environment.NewLine +
+            "                () => CreateAndOpenNestedFileAsync(razorFilePath, nestedFilePath, CancellationToken.None)).FileAndForget(\"NestedFileCommandHandler.Execute\");" + Environment.NewLine +
+            "#pragma warning restore RS0030" + Environment.NewLine +
+            "#pragma warning restore VSSDK007";
+        updatedContent = updatedContent.Replace(runAsyncOriginalText, runAsyncUpdatedText, StringComparison.Ordinal);
+
+        var switchToMainThreadOriginalText =
+            "            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);";
+        var switchToMainThreadUpdatedText =
+            "#pragma warning disable RS0030 // NestedFileCommandHandler does not currently flow IThreadingContext." + Environment.NewLine +
+            "            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);" + Environment.NewLine +
+            "#pragma warning restore RS0030";
+        updatedContent = updatedContent.Replace(switchToMainThreadOriginalText, switchToMainThreadUpdatedText, StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No NestedFileCommandHandler RS0030 suppression changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(nestedFileCommandHandlerPath, updatedContent, templatePath: nestedFileCommandHandlerPath).ConfigureAwait(false);
+        return $"Suppressed RS0030 in '{Path.GetRelativePath(targetRepoRoot, nestedFileCommandHandlerPath)}' at Razor's legacy ThreadHelper.JoinableTaskFactory call sites.";
     }
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
