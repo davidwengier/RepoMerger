@@ -129,9 +129,9 @@ internal static class PostMergeCleanupRunner
             RemoveProjectSystemSdkPackageReferencesAsync),
         new(
             "normalize-sdk-razor-package-version",
-            "Replace Razor's missing Microsoft.NET.Sdk.Razor version property with the source repo's explicit lower-bound package version.",
+            "Rewrite Razor's Microsoft.NET.Sdk.Razor package version to the restore-compatible preview expected by the merged Roslyn tree.",
             "Normalize Razor Microsoft.NET.Sdk.Razor version",
-            "Roslyn does not define $(MicrosoftNETSdkRazorPackageVersion), so the merged Razor Directory.Packages.props should carry the source repo's explicit lower bound for Microsoft.NET.Sdk.Razor instead of restoring without a version.",
+            "The merged Roslyn restore expects Microsoft.NET.Sdk.Razor 7.0.0-preview.5.22368.1, so Razor's Directory.Packages.props should normalize that PackageVersion to the restore-compatible preview instead of keeping the older source-repo pin.",
             NormalizeSdkRazorPackageVersionAsync),
         new(
             "normalize-objectpool-package-version",
@@ -1806,7 +1806,7 @@ internal static class PostMergeCleanupRunner
         }
 
         if (updatedCount == 0)
-            return "Razor Microsoft.NET.Sdk.Razor already has an explicit lower-bound package version.";
+            return $"Razor Microsoft.NET.Sdk.Razor already uses {RazorSdkPackageVersion}.";
 
         await SaveXmlAsync(document, razorPackagesPath).ConfigureAwait(false);
         return
@@ -4089,7 +4089,7 @@ public class SurveyPrompt : ComponentBase
         @"(?<![\w.])Package\.GetGlobalService\(",
         RegexOptions.CultureInvariant);
 
-    private const string RazorSdkPackageVersion = "6.0.0-alpha.1.21072.5";
+    private const string RazorSdkPackageVersion = "7.0.0-preview.5.22368.1";
 
     private static readonly string[] RazorGlobalConfigFileNames =
     [
