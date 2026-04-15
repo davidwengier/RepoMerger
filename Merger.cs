@@ -1,9 +1,13 @@
+using System.Diagnostics;
+using System.Text;
+
 namespace RepoMerger;
 
 internal static class Merger
 {
     public static async Task<int> RunAsync(Settings settings)
     {
+        var runStopwatch = Stopwatch.StartNew();
         var toolRoot = PathHelper.GetToolRoot();
         var runName = string.IsNullOrWhiteSpace(settings.RunName)
             ? PathHelper.GetDefaultRunName(settings.SourceRepo, settings.TargetRepo, settings.TargetPath)
@@ -65,23 +69,79 @@ internal static class Merger
             RunDirectory: workDirectory,
             State: state);
 
+        var exitCode = 0;
         foreach (var definition in Stages.GetExecutionPlan(settings))
         {
+            var stageStopwatch = Stopwatch.StartNew();
             try
             {
                 Console.WriteLine($"Starting stage '{definition.Name}': {definition.Description}");
                 var summary = await definition.ExecuteAsync(context).ConfigureAwait(false);
+                stageStopwatch.Stop();
+                context.State.StageResults.Add(new StageExecutionResult(
+                    definition.Name,
+                    definition.Description,
+                    stageStopwatch.Elapsed,
+                    Succeeded: true,
+                    summary));
                 Console.WriteLine(summary);
                 Console.WriteLine($"Completed stage '{definition.Name}'.");
             }
             catch (Exception ex)
             {
+                stageStopwatch.Stop();
+                context.State.StageResults.Add(new StageExecutionResult(
+                    definition.Name,
+                    definition.Description,
+                    stageStopwatch.Elapsed,
+                    Succeeded: false,
+                    ex.Message));
                 Console.WriteLine($"Stage '{definition.Name}' failed: {ex.Message}");
-                return 1;
+                exitCode = 1;
+                break;
             }
         }
 
-        Console.WriteLine("Repo-merge run completed successfully.");
-        return 0;
+        if (exitCode == 0)
+            Console.WriteLine("Repo-merge run completed successfully.");
+
+        runStopwatch.Stop();
+        PrintRunSummary(context.State, runStopwatch.Elapsed, exitCode == 0);
+
+        return exitCode;
+    }
+
+    private static void PrintRunSummary(RunState state, TimeSpan totalDuration, bool succeeded)
+    {
+        var builder = new StringBuilder()
+            .AppendLine()
+            .AppendLine("Run summary")
+            .AppendLine("===========")
+            .AppendLine($"Overall result: {(succeeded ? "success" : "failed")}")
+            .AppendLine("Stages:");
+
+        foreach (var stage in state.StageResults)
+            builder.AppendLine($"- {stage.Name} [{(stage.Succeeded ? "ok" : "failed")}] ({FormatDuration(stage.Duration)})");
+
+        if (state.CleanupResults.Count > 0)
+        {
+            builder.AppendLine("Cleanup steps:");
+            foreach (var step in state.CleanupResults)
+                builder.AppendLine($"- {step.DisplayName} [{step.Status}] ({FormatDuration(step.Duration)})");
+        }
+
+        builder.AppendLine($"Total runtime: {FormatDuration(totalDuration)}");
+        Console.Write(builder.ToString());
+    }
+
+    private static string FormatDuration(TimeSpan duration)
+    {
+        if (duration.TotalHours >= 1)
+            return duration.ToString(@"h\:mm\:ss\.ff");
+
+        if (duration.TotalMinutes >= 1)
+            return duration.ToString(@"m\:ss\.ff");
+
+        return duration.ToString(@"s\.ff\s");
     }
 }

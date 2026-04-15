@@ -20,4 +20,20 @@ internal sealed class RunState
     public string SourceHeadCommit { get; set; } = string.Empty;
     public string TargetHeadCommit { get; set; } = string.Empty;
     public bool DryRun { get; set; }
+    public List<StageExecutionResult> StageResults { get; } = [];
+    public List<CleanupExecutionResult> CleanupResults { get; } = [];
 }
+
+internal sealed record StageExecutionResult(
+    string Name,
+    string Description,
+    TimeSpan Duration,
+    bool Succeeded,
+    string Details);
+
+internal sealed record CleanupExecutionResult(
+    string Name,
+    string DisplayName,
+    TimeSpan Duration,
+    string Status,
+    string Details);

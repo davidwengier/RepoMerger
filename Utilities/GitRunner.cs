@@ -40,12 +40,11 @@ public static class GitRunner
         if (string.IsNullOrWhiteSpace(status))
             return false;
 
+        // Some cleanup steps explicitly stage newly created files before they finish rewriting existing tracked files.
+        // Always refresh the tracked index so those follow-up edits are committed together instead of being left behind.
+        await RunGitAsync(repositoryDirectory, "add", "--update", "--", ".").ConfigureAwait(false);
+
         var stagedStatus = await GetStagedStatusAsync(repositoryDirectory).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(stagedStatus))
-        {
-            await RunGitAsync(repositoryDirectory, "add", "--update", "--", ".").ConfigureAwait(false);
-            stagedStatus = await GetStagedStatusAsync(repositoryDirectory).ConfigureAwait(false);
-        }
 
         if (string.IsNullOrWhiteSpace(stagedStatus))
             return false;

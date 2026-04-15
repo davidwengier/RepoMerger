@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -198,12 +199,15 @@ internal static class PostMergeCleanupRunner
             "Normalize Razor warning cleanup",
             "Razor's Live Share factories and code-folding test need a few nullability-safe and definite-assignment-safe tweaks in the merged Roslyn tree so build.cmd -restore can stay clean after the merge.",
             NormalizeRazorBuildWarningsAsync),
+        // Temporarily disabled so a fresh rerun can show the unsuppressed warning behavior for review.
+        /*
         new(
             "normalize-razor-warning-baseline",
             "Apply a Razor-local analyzer baseline so Roslyn's broader repo-wide style rules do not flood the merged build with non-functional warnings.",
             "Normalize Razor warning baseline",
             "Razor brings its own analyzer and style expectations, but the merged Roslyn tree enables additional repo-wide rules that surface hundreds of non-functional warnings. The post-merge cleanup should localize those severities under src\\Razor so build validation stays focused on real merge regressions.",
             NormalizeRazorWarningBaselineAsync),
+        */
         new(
             "normalize-razor-xunit-theorydata",
             "Rewrite Razor language test TheoryData declarations to satisfy Roslyn's shared xUnit analyzer version.",
@@ -236,6 +240,16 @@ internal static class PostMergeCleanupRunner
 
         if (context.Settings.DryRun)
         {
+            foreach (var step in Steps)
+            {
+                context.State.CleanupResults.Add(new CleanupExecutionResult(
+                    step.Name,
+                    step.CommitMessage,
+                    TimeSpan.Zero,
+                    "dry-run",
+                    "Dry run: not executed."));
+            }
+
             return
                 $"Dry run: would apply {Steps.Length} post-merge cleanup step(s) under '{targetRoot}', " +
                 "committing each cleanup separately.";
@@ -252,19 +266,44 @@ internal static class PostMergeCleanupRunner
         {
             var step = Steps[i];
             Console.WriteLine($"Running post-merge cleanup step {i + 1}/{Steps.Length}: {step.Name}");
-            var stepSummary = await step.ExecuteAsync(context).ConfigureAwait(false);
-            var committed = await GitRunner.CommitTrackedChangesAsync(
-                context.TargetRepoRoot,
-                step.CommitMessage,
-                step.CommitRationale).ConfigureAwait(false);
-            if (committed)
+            var stepStopwatch = Stopwatch.StartNew();
+
+            try
             {
-                context.State.TargetHeadCommit = await GitRunner.GetHeadCommitAsync(context.TargetRepoRoot).ConfigureAwait(false);
-                summaries.Add($"{stepSummary} Committed as '{context.State.TargetHeadCommit}'.");
+                var stepSummary = await step.ExecuteAsync(context).ConfigureAwait(false);
+                var committed = await GitRunner.CommitTrackedChangesAsync(
+                    context.TargetRepoRoot,
+                    step.CommitMessage,
+                    step.CommitRationale).ConfigureAwait(false);
+                stepStopwatch.Stop();
+
+                if (committed)
+                {
+                    context.State.TargetHeadCommit = await GitRunner.GetHeadCommitAsync(context.TargetRepoRoot).ConfigureAwait(false);
+                    summaries.Add($"{stepSummary} Committed as '{context.State.TargetHeadCommit}'.");
+                }
+                else
+                {
+                    summaries.Add($"{stepSummary} No commit was needed.");
+                }
+
+                context.State.CleanupResults.Add(new CleanupExecutionResult(
+                    step.Name,
+                    step.CommitMessage,
+                    stepStopwatch.Elapsed,
+                    committed ? "committed" : "no commit",
+                    stepSummary));
             }
-            else
+            catch (Exception ex)
             {
-                summaries.Add($"{stepSummary} No commit was needed.");
+                stepStopwatch.Stop();
+                context.State.CleanupResults.Add(new CleanupExecutionResult(
+                    step.Name,
+                    step.CommitMessage,
+                    stepStopwatch.Elapsed,
+                    "failed",
+                    ex.Message));
+                throw;
             }
         }
 
@@ -359,14 +398,22 @@ internal static class PostMergeCleanupRunner
             targetGlobalJson["msbuild-sdks"] = targetMsbuildSdks;
         }
 
+        var sourceSdkEntries = sourceMsbuildSdks
+            .Select(static sdkEntry => new KeyValuePair<string, string?>(
+                sdkEntry.Key,
+                sdkEntry.Value?.ToJsonString()))
+            .ToList();
+
         var addedSdkEntries = new List<string>();
-        foreach (var sdkEntry in sourceMsbuildSdks)
+        foreach (var sdkEntry in sourceSdkEntries)
         {
             if (targetMsbuildSdks.ContainsKey(sdkEntry.Key))
                 continue;
 
-            targetMsbuildSdks[sdkEntry.Key] = sdkEntry.Value?.DeepClone();
-            addedSdkEntries.Add($"{sdkEntry.Key}={sdkEntry.Value?.ToJsonString() ?? "null"}");
+            targetMsbuildSdks[sdkEntry.Key] = sdkEntry.Value is null
+                ? null
+                : JsonNode.Parse(sdkEntry.Value);
+            addedSdkEntries.Add($"{sdkEntry.Key}={sdkEntry.Value ?? "null"}");
         }
 
         if (addedSdkEntries.Count == 0)
@@ -2122,6 +2169,7 @@ internal static class PostMergeCleanupRunner
         var targetRoot = context.TargetRoot;
         var renamedArtifacts = new List<string>();
         var replacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var directoryReplacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var pathsToStage = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         Console.WriteLine("    - collecting tracked Razor files");
         var trackedRelativePaths = await GetTrackedRelativePathsAsync(targetRepoRoot, targetRoot).ConfigureAwait(false);
@@ -2146,6 +2194,7 @@ internal static class PostMergeCleanupRunner
 
             var newDirectoryPath = Path.Combine(Path.GetDirectoryName(oldDirectoryPath)!, newDirectoryName);
             replacements[oldDirectoryName] = newDirectoryName;
+            directoryReplacements[oldDirectoryName] = newDirectoryName;
 
             if (!Directory.Exists(oldDirectoryPath) || Directory.Exists(newDirectoryPath))
                 continue;
@@ -2166,18 +2215,20 @@ internal static class PostMergeCleanupRunner
                 path.EndsWith(".shproj", StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(static path => path.Length))
         {
+            var currentDirectoryPath = ApplyPathReplacements(Path.GetDirectoryName(oldFilePath)!, directoryReplacements);
             var oldFileName = Path.GetFileName(oldFilePath);
+            var currentFilePath = Path.Combine(currentDirectoryPath, oldFileName);
             var newFileName = RenameRazorTestArtifactFileName(oldFileName);
             if (string.Equals(oldFileName, newFileName, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            var newFilePath = Path.Combine(Path.GetDirectoryName(oldFilePath)!, newFileName);
+            var newFilePath = Path.Combine(Path.GetDirectoryName(currentFilePath)!, newFileName);
             AddUnitTestReplacementVariants(replacements, oldFileName, newFileName);
 
-            if (!File.Exists(oldFilePath) || File.Exists(newFilePath))
+            if (!File.Exists(currentFilePath) || File.Exists(newFilePath))
                 continue;
 
-            File.Move(oldFilePath, newFilePath);
+            File.Move(currentFilePath, newFilePath);
             var oldRelativePath = Path.GetRelativePath(targetRepoRoot, oldFilePath);
             var newRelativePath = Path.GetRelativePath(targetRepoRoot, newFilePath);
             pathsToStage.Add(oldRelativePath);
@@ -2196,7 +2247,6 @@ internal static class PostMergeCleanupRunner
 
         Console.WriteLine($"    - rewriting references for {replacements.Count} rename mapping(s)");
         var referenceFiles = EnumerateMsBuildAndSolutionFiles(targetRepoRoot)
-            .Select(path => ApplyPathReplacements(path, replacements))
             .Where(File.Exists)
             .Distinct(StringComparer.OrdinalIgnoreCase);
 
@@ -2216,9 +2266,13 @@ internal static class PostMergeCleanupRunner
 
         if (pathsToStage.Count > 0)
         {
+            var stageablePaths = await GetStageableRelativePathsAsync(targetRepoRoot, pathsToStage).ConfigureAwait(false);
+            if (stageablePaths.Count == 0)
+                return renamedArtifacts;
+
             await GitRunner.RunGitAsync(
                 targetRepoRoot,
-                ["add", "--all", "--", .. pathsToStage.OrderBy(static path => path, StringComparer.OrdinalIgnoreCase)]).ConfigureAwait(false);
+                ["add", "--all", "--", .. stageablePaths]).ConfigureAwait(false);
         }
 
         return renamedArtifacts;
@@ -2336,10 +2390,46 @@ internal static class PostMergeCleanupRunner
     private static string ApplyPathReplacements(string path, IReadOnlyDictionary<string, string> replacements)
     {
         var updatedPath = path;
-        foreach (var replacement in replacements)
+        foreach (var replacement in replacements
+                     .Where(static replacement => !string.IsNullOrWhiteSpace(replacement.Key))
+                     .OrderByDescending(static replacement => replacement.Key.Length)
+                     .ThenBy(static replacement => replacement.Key, StringComparer.Ordinal))
+        {
             updatedPath = updatedPath.Replace(replacement.Key, replacement.Value, StringComparison.Ordinal);
+        }
 
         return updatedPath;
+    }
+
+    private static async Task<List<string>> GetStageableRelativePathsAsync(string repositoryRoot, IEnumerable<string> relativePaths)
+    {
+        var stageablePaths = new List<string>();
+
+        foreach (var relativePath in relativePaths
+                     .Where(static path => !string.IsNullOrWhiteSpace(path))
+                     .Distinct(StringComparer.OrdinalIgnoreCase)
+                     .OrderBy(static path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            var fullPath = Path.Combine(repositoryRoot, relativePath);
+            if (File.Exists(fullPath) || Directory.Exists(fullPath))
+            {
+                stageablePaths.Add(relativePath);
+                continue;
+            }
+
+            var pendingDiff = (await GitRunner.RunGitAsync(repositoryRoot, "diff", "--name-only", "--", relativePath).ConfigureAwait(false)).Trim();
+            if (!string.IsNullOrWhiteSpace(pendingDiff))
+            {
+                stageablePaths.Add(relativePath);
+                continue;
+            }
+
+            var pendingCachedDiff = (await GitRunner.RunGitAsync(repositoryRoot, "diff", "--cached", "--name-only", "--", relativePath).ConfigureAwait(false)).Trim();
+            if (!string.IsNullOrWhiteSpace(pendingCachedDiff))
+                stageablePaths.Add(relativePath);
+        }
+
+        return stageablePaths;
     }
 
     private static string RemoveTypeDeclarationBlock(string content, string typeDeclaration)
