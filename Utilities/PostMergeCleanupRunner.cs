@@ -262,6 +262,12 @@ internal static class PostMergeCleanupRunner
             "Normalize Razor VS workspace refs",
             "Razor's syntax visualizer and related Visual Studio extension code should reference Roslyn's in-repo Microsoft.VisualStudio.LanguageServices and Workspaces projects explicitly when building inside the merged Roslyn tree.",
             NormalizeRazorVisualStudioWorkspaceReferencesAsync),
+        new(
+            "fix-containedlanguage-modifier-ordering",
+            "Normalize ContainedLanguage modifier ordering to satisfy Roslyn's IDE0036 analyzer.",
+            "Fix ContainedLanguage modifier ordering",
+            "Razor's ContainedLanguage project still carries a few legacy modifier-order spellings such as `public async override` and `readonly static`, but the merged Roslyn tree enforces Roslyn's preferred modifier order for those declarations.",
+            FixContainedLanguageModifierOrderingAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1274,6 +1280,60 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(programPath, updatedContent, templatePath: programPath).ConfigureAwait(false);
         return $"Made '{Path.GetRelativePath(targetRepoRoot, programPath)}' static to satisfy Roslyn's analyzer expectations.";
+    }
+
+    private static async Task<string> FixContainedLanguageModifierOrderingAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var containedLanguageRoot = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.LanguageServer.ContainedLanguage");
+        var replacements = new (string RelativePath, string OldText, string NewText)[]
+        {
+            (
+                "DefaultLSPRequestInvoker.cs",
+                "    public async override Task<ReinvokeResponse<TOut>> ReinvokeRequestOnServerAsync<TIn, TOut>(",
+                "    public override async Task<ReinvokeResponse<TOut>> ReinvokeRequestOnServerAsync<TIn, TOut>("),
+            (
+                "InviolableEditTag.cs",
+                "    public readonly static IInviolableEditTag Instance = new InviolableEditTag();",
+                "    public static readonly IInviolableEditTag Instance = new InviolableEditTag();"),
+            (
+                Path.Combine("MessageInterception", "DefaultInterceptorManager.cs"),
+                "    public async override Task<TJsonToken?> ProcessGenericInterceptorsAsync<TJsonToken>(string methodName, TJsonToken message, string contentType, CancellationToken cancellationToken)",
+                "    public override async Task<TJsonToken?> ProcessGenericInterceptorsAsync<TJsonToken>(string methodName, TJsonToken message, string contentType, CancellationToken cancellationToken)"),
+        };
+
+        var changedFiles = new List<string>();
+
+        foreach (var replacement in replacements)
+        {
+            var filePath = Path.Combine(containedLanguageRoot, replacement.RelativePath);
+            if (!File.Exists(filePath))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
+            var updatedContent = originalContent.Replace(
+                replacement.OldText,
+                replacement.NewText,
+                StringComparison.Ordinal);
+
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(filePath, updatedContent, templatePath: filePath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, filePath));
+        }
+
+        if (changedFiles.Count == 0)
+            return "No ContainedLanguage modifier-order cleanup changes were needed.";
+
+        return $"Fixed modifier ordering in {changedFiles.Count} ContainedLanguage file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
