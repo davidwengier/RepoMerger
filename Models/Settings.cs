@@ -9,4 +9,8 @@ internal readonly record struct Settings(
     string? RunName,
     bool SkipHistoryFilter,
     bool DryRun,
-    bool PostMergeCleanupOnly);
+    string? PostMergeCleanupStep)
+{
+    public bool RunsSinglePostMergeCleanup
+        => !string.IsNullOrWhiteSpace(PostMergeCleanupStep);
+}

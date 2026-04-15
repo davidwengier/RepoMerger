@@ -9,7 +9,8 @@ namespace RepoMerger;
 
 internal static class PostMergeCleanupRunner
 {
-
+    // Append new cleanup steps to the end so single-step validation runs them in the same
+    // environment they would see during a full clean run.
     private static readonly CleanupStep[] Steps =
     [
         new(
@@ -263,13 +264,21 @@ internal static class PostMergeCleanupRunner
             NormalizeRazorVisualStudioWorkspaceReferencesAsync),
     ];
 
+    public static IReadOnlyList<string> StepNames { get; } = Steps
+        .Select(static step => step.Name)
+        .ToArray();
+
+    public static bool ContainsStep(string stepName)
+        => StepNames.Contains(stepName, StringComparer.OrdinalIgnoreCase);
+
     public static async Task<string> RunAsync(StageContext context)
     {
         var targetRoot = context.TargetRoot;
+        var stepsToRun = ResolveStepsToRun(context.Settings.PostMergeCleanupStep);
 
         if (context.Settings.DryRun)
         {
-            foreach (var step in Steps)
+            foreach (var step in stepsToRun)
             {
                 context.State.CleanupResults.Add(new CleanupExecutionResult(
                     step.Name,
@@ -280,7 +289,7 @@ internal static class PostMergeCleanupRunner
             }
 
             return
-                $"Dry run: would apply {Steps.Length} post-merge cleanup step(s) under '{targetRoot}', " +
+                $"Dry run: would apply {stepsToRun.Length} post-merge cleanup step(s) under '{targetRoot}', " +
                 "committing each cleanup separately.";
         }
 
@@ -291,10 +300,10 @@ internal static class PostMergeCleanupRunner
         }
 
         var summaries = new List<string>();
-        for (var i = 0; i < Steps.Length; i++)
+        for (var i = 0; i < stepsToRun.Length; i++)
         {
-            var step = Steps[i];
-            Console.WriteLine($"Running post-merge cleanup step {i + 1}/{Steps.Length}: {step.Name}");
+            var step = stepsToRun[i];
+            Console.WriteLine($"Running post-merge cleanup step {i + 1}/{stepsToRun.Length}: {step.Name}");
             var stepStopwatch = Stopwatch.StartNew();
 
             try
@@ -337,6 +346,24 @@ internal static class PostMergeCleanupRunner
         }
 
         return $"Applied post-merge cleanup stage.{Environment.NewLine}- {string.Join($"{Environment.NewLine}- ", summaries)}";
+    }
+
+    private static CleanupStep[] ResolveStepsToRun(string? postMergeCleanupStep)
+    {
+        if (string.IsNullOrWhiteSpace(postMergeCleanupStep))
+            return Steps;
+
+        var selectedStep = Steps.FirstOrDefault(step =>
+            string.Equals(step.Name, postMergeCleanupStep, StringComparison.OrdinalIgnoreCase));
+
+        if (selectedStep is null)
+        {
+            throw new InvalidOperationException(
+                $"Unknown post-merge cleanup step '{postMergeCleanupStep}'. " +
+                $"Available steps: {string.Join(", ", StepNames)}");
+        }
+
+        return [selectedStep];
     }
 
     private static async Task<string> CommitPendingSolutionUpdatesAsync(StageContext context)

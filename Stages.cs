@@ -40,7 +40,7 @@ internal static class Stages
 
     public static IEnumerable<StageDefinition> GetExecutionPlan(Settings settings)
     {
-        if (!settings.PostMergeCleanupOnly)
+        if (!settings.RunsSinglePostMergeCleanup)
             return Definitions;
 
         return Definitions.Where(static definition =>
@@ -82,12 +82,26 @@ internal static class Stages
         if (PathHelper.LooksLikeLocalPath(context.Settings.TargetRepo) || context.Settings.TargetRepo.Count(static c => c == '/') != 1)
             throw new InvalidOperationException("--target-repo must be in owner/repo format.");
 
-        if (context.Settings.PostMergeCleanupOnly
+        if (context.Settings.PostMergeCleanupStep is not null
+            && string.IsNullOrWhiteSpace(context.Settings.PostMergeCleanupStep))
+        {
+            throw new InvalidOperationException("--post-merge-cleanup-step must not be empty.");
+        }
+
+        if (context.Settings.RunsSinglePostMergeCleanup
             && (!Directory.Exists(context.TargetRepoRoot) || !GitRunner.IsRepository(context.TargetRepoRoot)))
         {
             throw new InvalidOperationException(
-                $"--post-merge-cleanup-only requires an existing target clone at '{context.TargetRepoRoot}'. " +
+                $"--post-merge-cleanup-step requires an existing target clone at '{context.TargetRepoRoot}'. " +
                 "Run the full workflow first, or point --work-root/--run-name at an existing run.");
+        }
+
+        if (context.Settings.RunsSinglePostMergeCleanup
+            && !PostMergeCleanupRunner.ContainsStep(context.Settings.PostMergeCleanupStep!))
+        {
+            throw new InvalidOperationException(
+                $"Unknown post-merge cleanup step '{context.Settings.PostMergeCleanupStep}'. " +
+                $"Available steps: {string.Join(", ", PostMergeCleanupRunner.StepNames)}");
         }
 
         var gitVersion = await GitRunner.RunGitAsync(context.ToolRoot, "--version").ConfigureAwait(false);
