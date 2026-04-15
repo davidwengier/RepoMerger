@@ -163,6 +163,12 @@ internal static class PostMergeCleanupRunner
             "Razor's test-only helpers, shims, and benchmark executables are not shipped public API surface in the merged Roslyn tree, so they should opt out of PublicApiAnalyzers instead of failing RS0016 during repo builds.",
             DisableRazorNonShippingPublicApiAnalyzersAsync),
         new(
+            "suppress-razor-specializedtasks-vsthrd200",
+            "Suppress VSTHRD200 on Razor's shared SpecializedTasks helpers that intentionally expose Task wrappers without Async suffixes.",
+            "Suppress Razor SpecializedTasks VSTHRD200",
+            "Razor's shared SpecializedTasks helper mirrors Roslyn's cached Task-wrapper APIs, so the merged tree should suppress VSTHRD200 on those members instead of renaming the established utility surface.",
+            SuppressRazorSpecializedTasksVSTHRD200Async),
+        new(
             "normalize-razor-unit-test-detection",
             "Rename Razor unit test projects to Roslyn's UnitTests convention and keep their references aligned.",
             "Align Razor test infrastructure with Roslyn",
@@ -1063,6 +1069,58 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor non-shipping public API analyzer changes were needed."
             : $"Disabled Roslyn public API analyzers for {changedFiles.Count} Razor non-shipping project(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> SuppressRazorSpecializedTasksVSTHRD200Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var specializedTasksPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Shared",
+            "Microsoft.AspNetCore.Razor.Utilities.Shared",
+            "Threading",
+            "SpecializedTasks.cs");
+
+        if (!File.Exists(specializedTasksPath))
+            return "No Razor SpecializedTasks.cs file was found for VSTHRD200 suppression.";
+
+        const string suppressionAttribute = """[SuppressMessage("Style", "VSTHRD200:Use \"Async\" suffix for async methods", Justification = "This is a Task wrapper, not an asynchronous method.")]""";
+        var originalContent = await File.ReadAllTextAsync(specializedTasksPath).ConfigureAwait(false);
+        var updatedContent = originalContent;
+
+        if (!updatedContent.Contains("using System.Diagnostics.CodeAnalysis;", StringComparison.Ordinal))
+        {
+            updatedContent = updatedContent.Replace(
+                "using System.Collections.Immutable;" + Environment.NewLine,
+                "using System.Collections.Immutable;" + Environment.NewLine +
+                "using System.Diagnostics.CodeAnalysis;" + Environment.NewLine,
+                StringComparison.Ordinal);
+        }
+
+        foreach (var signature in new[]
+        {
+            "public static Task<T?> AsNullable<T>(this Task<T> task) where T : class",
+            "public static Task<T?> Default<T>()",
+            "public static Task<T?> Null<T>() where T : class",
+            "public static Task<IReadOnlyList<T>> EmptyReadOnlyList<T>()",
+            "public static Task<IList<T>> EmptyList<T>()",
+            "public static Task<ImmutableArray<T>> EmptyImmutableArray<T>()",
+            "public static Task<IEnumerable<T>> EmptyEnumerable<T>()",
+            "public static Task<T[]> EmptyArray<T>()",
+        })
+        {
+            updatedContent = updatedContent.Replace(
+                "    " + signature,
+                "    " + suppressionAttribute + Environment.NewLine + "    " + signature,
+                StringComparison.Ordinal);
+        }
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor SpecializedTasks VSTHRD200 suppression changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(specializedTasksPath, updatedContent, templatePath: specializedTasksPath).ConfigureAwait(false);
+        return $"Added VSTHRD200 suppressions to '{Path.GetRelativePath(targetRepoRoot, specializedTasksPath)}' for Razor's cached Task helper APIs.";
     }
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
