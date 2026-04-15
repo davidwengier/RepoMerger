@@ -169,6 +169,12 @@ internal static class PostMergeCleanupRunner
             "Razor's shared SpecializedTasks helper mirrors Roslyn's cached Task-wrapper APIs, so the merged tree should suppress VSTHRD200 on those members instead of renaming the established utility surface.",
             SuppressRazorSpecializedTasksVSTHRD200Async),
         new(
+            "fix-razor-stringextensions-modifier-ordering",
+            "Normalize Razor's StringExtensions modifier ordering to satisfy Roslyn's style analyzers.",
+            "Fix Razor StringExtensions modifier ordering",
+            "The merged Roslyn tree expects `static` and `unsafe` modifiers in Roslyn's preferred order, so Razor's StringExtensions helper should rewrite its legacy declaration accordingly.",
+            FixRazorStringExtensionsModifierOrderingAsync),
+        new(
             "normalize-razor-unit-test-detection",
             "Rename Razor unit test projects to Roslyn's UnitTests convention and keep their references aligned.",
             "Align Razor test infrastructure with Roslyn",
@@ -1121,6 +1127,32 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(specializedTasksPath, updatedContent, templatePath: specializedTasksPath).ConfigureAwait(false);
         return $"Added VSTHRD200 suppressions to '{Path.GetRelativePath(targetRepoRoot, specializedTasksPath)}' for Razor's cached Task helper APIs.";
+    }
+
+    private static async Task<string> FixRazorStringExtensionsModifierOrderingAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var stringExtensionsPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Shared",
+            "Microsoft.AspNetCore.Razor.Utilities.Shared",
+            "StringExtensions.cs");
+
+        if (!File.Exists(stringExtensionsPath))
+            return "No Razor StringExtensions.cs file was found for modifier-order cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(stringExtensionsPath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(
+            "public unsafe static string Create<TState>(int length, TState state, SpanAction<char, TState> action)",
+            "public static unsafe string Create<TState>(int length, TState state, SpanAction<char, TState> action)",
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor StringExtensions modifier-order cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(stringExtensionsPath, updatedContent, templatePath: stringExtensionsPath).ConfigureAwait(false);
+        return $"Fixed modifier ordering in '{Path.GetRelativePath(targetRepoRoot, stringExtensionsPath)}' to match Roslyn's analyzer expectations.";
     }
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
