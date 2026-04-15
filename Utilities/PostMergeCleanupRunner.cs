@@ -175,6 +175,12 @@ internal static class PostMergeCleanupRunner
             "The merged Roslyn tree expects `static` and `unsafe` modifiers in Roslyn's preferred order, so Razor's StringExtensions helper should rewrite its legacy declaration accordingly.",
             FixRazorStringExtensionsModifierOrderingAsync),
         new(
+            "disable-containedlanguage-ca2007",
+            "Disable CA2007 for Razor's ContainedLanguage project via its local editorconfig.",
+            "Disable ContainedLanguage CA2007",
+            "The merged Roslyn build surfaces CA2007 in Microsoft.VisualStudio.LanguageServer.ContainedLanguage, so Razor should suppress that rule in the project's local editorconfig instead of churning async-call sites during post-merge cleanup.",
+            DisableContainedLanguageCA2007Async),
+        new(
             "make-razorsyntaxgenerator-program-static",
             "Make RazorSyntaxGenerator.Program static to satisfy Roslyn's style analyzers.",
             "Make RazorSyntaxGenerator.Program static",
@@ -1156,6 +1162,30 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(stringExtensionsPath, updatedContent, templatePath: stringExtensionsPath).ConfigureAwait(false);
         return $"Fixed modifier ordering in '{Path.GetRelativePath(targetRepoRoot, stringExtensionsPath)}' to match Roslyn's analyzer expectations.";
+    }
+
+    private static async Task<string> DisableContainedLanguageCA2007Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var editorConfigPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.LanguageServer.ContainedLanguage",
+            ".editorconfig");
+
+        if (!File.Exists(editorConfigPath))
+            return "No ContainedLanguage .editorconfig file was found for CA2007 suppression.";
+
+        var originalContent = await File.ReadAllTextAsync(editorConfigPath).ConfigureAwait(false);
+        var updatedContent = SetEditorConfigSeverity(originalContent, "CA2007", "none");
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No ContainedLanguage CA2007 editorconfig changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(editorConfigPath, updatedContent, templatePath: editorConfigPath).ConfigureAwait(false);
+        return $"Disabled CA2007 in '{Path.GetRelativePath(targetRepoRoot, editorConfigPath)}' via Razor's local editorconfig.";
     }
 
     private static async Task<string> MakeRazorSyntaxGeneratorProgramStaticAsync(StageContext context)
