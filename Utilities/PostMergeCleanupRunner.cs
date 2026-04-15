@@ -286,6 +286,12 @@ internal static class PostMergeCleanupRunner
             "Disable RazorExtension CA2007",
             "The merged Roslyn build surfaces CA2007 throughout Microsoft.VisualStudio.RazorExtension, so Razor should suppress that rule in the project's local editorconfig instead of churning many Visual Studio extension async-call sites during post-merge cleanup.",
             DisableRazorExtensionCA2007Async),
+        new(
+            "fix-syntaxvisualizer-readonly-field",
+            "Make Razor's SyntaxVisualizerControl temp-path field readonly to satisfy IDE0044.",
+            "Fix SyntaxVisualizer readonly field",
+            "Razor's SyntaxVisualizerControl temp-path field is initialized once and never reassigned, so the merged Roslyn tree expects it to be marked readonly.",
+            FixSyntaxVisualizerReadonlyFieldAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1480,6 +1486,36 @@ internal static class PostMergeCleanupRunner
 
         await GitRunner.RunGitAsync(targetRepoRoot, "add", "--", relativeEditorConfigPath).ConfigureAwait(false);
         return $"Disabled CA2007 in '{relativeEditorConfigPath}' via Razor's local editorconfig.";
+    }
+
+    private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var syntaxVisualizerControlPath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.RazorExtension",
+            "SyntaxVisualizer",
+            "SyntaxVisualizerControl.xaml.cs");
+
+        if (!File.Exists(syntaxVisualizerControlPath))
+            return "No SyntaxVisualizerControl.xaml.cs file was found for readonly-field cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(syntaxVisualizerControlPath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(
+            "    private static string s_baseTempPath = Path.Combine(Path.GetTempPath(), \"RazorDevTools\");",
+            "    private static readonly string s_baseTempPath = Path.Combine(Path.GetTempPath(), \"RazorDevTools\");",
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No SyntaxVisualizer readonly-field cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(syntaxVisualizerControlPath, updatedContent, templatePath: syntaxVisualizerControlPath).ConfigureAwait(false);
+        return $"Made the temp-path field readonly in '{Path.GetRelativePath(targetRepoRoot, syntaxVisualizerControlPath)}' to satisfy Roslyn's IDE0044 analyzer.";
     }
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
