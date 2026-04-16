@@ -364,6 +364,12 @@ internal static class PostMergeCleanupRunner
             "Restore Razor VSIX dev assets",
             @"Standalone Razor uses its own VSIX packaging targets to keep ServiceHub assets under ServiceHubCore, generate the brokered-services pkgdef/clientenabledpkg artifacts, and avoid Roslyn-only VSIX content, so the merged Razor subtree should restore those local targets instead of inheriting Roslyn's generic VSIX layout.",
             RestoreRazorVsixDevAssetsAsync),
+        new(
+            "ensure-origin-remote",
+            "Ensure the merged target repo exposes Roslyn's target remote as origin for clean source-package SourceLink generation.",
+            "Ensure origin remote for source packages",
+            "Arcade source-package packing regenerates SourceLink targets from the repo's Git metadata on clean runs. RepoMerger's merged worktree keeps Roslyn under a target remote, so adding a matching origin remote lets SourceLink populate the repo-root ScmRepositoryUrl metadata that clean build.cmd -pack runs require.",
+            EnsureOriginRemoteAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1005,6 +1011,43 @@ internal static class PostMergeCleanupRunner
         return summaryParts.Count == 0
             ? "No Razor repository metadata cleanup was needed."
             : string.Join(" ", summaryParts);
+    }
+
+    private static async Task<string> EnsureOriginRemoteAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var remoteList = await GitRunner.RunGitAsync(targetRepoRoot, "remote").ConfigureAwait(false);
+        var remotes = remoteList
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (!remotes.Contains("target"))
+        {
+            return remotes.Contains("origin")
+                ? "Origin remote already existed and no target remote needed mirroring."
+                : "No target remote was found to mirror as origin for clean SourceLink generation.";
+        }
+
+        var targetRemoteUrl = await GitRunner.GetRemoteUrlAsync(targetRepoRoot, "target").ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(targetRemoteUrl))
+            return "The target remote did not have a URL to mirror as origin for clean SourceLink generation.";
+
+        var originExisted = remotes.Contains("origin");
+        var existingOriginUrl = originExisted
+            ? await GitRunner.GetRemoteUrlAsync(targetRepoRoot, "origin").ConfigureAwait(false)
+            : null;
+
+        await GitRunner.EnsureRemoteAsync(targetRepoRoot, "origin", targetRemoteUrl).ConfigureAwait(false);
+
+        if (!originExisted)
+        {
+            return $"Added origin remote pointing to '{targetRemoteUrl}' so Arcade source packages can populate repo-root SourceLink metadata on clean pack runs.";
+        }
+
+        if (PathHelper.RepositoryLocationsMatch(existingOriginUrl!, targetRemoteUrl))
+            return $"Origin remote already pointed to '{targetRemoteUrl}', so no SourceLink remote update was needed.";
+
+        return $"Updated origin remote from '{existingOriginUrl}' to '{targetRemoteUrl}' so Arcade source packages can populate repo-root SourceLink metadata on clean pack runs.";
     }
 
     private static async Task<string> RewriteDirectoryPackagesPropsAsync(StageContext context)
