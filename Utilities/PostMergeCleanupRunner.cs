@@ -340,6 +340,12 @@ internal static class PostMergeCleanupRunner
             "Remove Razor unused usings",
             "A few Razor files end up with redundant using directives after the Moq and Visual Studio service-lookup normalizations, so the merged Roslyn tree should remove those exact stale usings instead of carrying IDE0005 warnings.",
             RemoveRazorUnusedUsingsAsync),
+        new(
+            "ensure-razor-codeowners",
+            "Ensure Roslyn's .github\\CODEOWNERS routes src/Razor changes to @dotnet/razor-tooling.",
+            "Ensure Razor CODEOWNERS ownership",
+            "Standalone Razor routes src/Razor changes to @dotnet/razor-tooling, and the merged Roslyn tree should preserve that reviewer ownership in .github\\CODEOWNERS so Razor changes still request the correct team.",
+            EnsureRazorCodeOwnersAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1870,6 +1876,32 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor unused-using cleanup changes were needed."
             : $"Removed {replacementCount} known unused using directive{(replacementCount == 1 ? string.Empty : "s")} from {changedFiles.Count} Razor file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> EnsureRazorCodeOwnersAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var codeOwnersPath = Path.Combine(targetRepoRoot, ".github", "CODEOWNERS");
+        if (!File.Exists(codeOwnersPath))
+        {
+            throw new InvalidOperationException(
+                $"Expected Roslyn CODEOWNERS file at '{codeOwnersPath}', but it was not found.");
+        }
+
+        var originalContent = await File.ReadAllTextAsync(codeOwnersPath).ConfigureAwait(false);
+        var updatedContent = EnsureRazorCodeOwnersEntry(originalContent);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return @"No .github\CODEOWNERS changes were needed for src\Razor.";
+
+        await WriteTextPreservingUtf8BomAsync(codeOwnersPath, updatedContent, templatePath: codeOwnersPath).ConfigureAwait(false);
+        await GitRunner.RunGitAsync(
+            targetRepoRoot,
+            "add",
+            "--",
+            Path.GetRelativePath(targetRepoRoot, codeOwnersPath)).ConfigureAwait(false);
+
+        return @"Updated .github\CODEOWNERS so src\Razor is owned by @dotnet/razor-tooling.";
     }
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
@@ -5442,6 +5474,82 @@ public class SurveyPrompt : ComponentBase
             .Replace("\r", "\n", StringComparison.Ordinal)
             .Replace("\n", lineEnding, StringComparison.Ordinal);
 
+    private static string EnsureRazorCodeOwnersEntry(string content)
+    {
+        var lines = NormalizeLineEndings(content, "\n").Split('\n').ToList();
+
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var path = TryGetCodeOwnersPath(lines[i]);
+            if (path is null)
+                continue;
+
+            if (IsRazorCodeOwnersPath(path))
+            {
+                lines[i] = RazorCodeOwnersEntry;
+                return string.Join("\n", lines);
+            }
+        }
+
+        var insertIndex = lines.Count;
+        var lastSrcEntryIndex = -1;
+
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var path = TryGetCodeOwnersPath(lines[i]);
+            if (path is null)
+                continue;
+
+            var normalizedPath = NormalizeCodeOwnersPath(path);
+            if (!normalizedPath.StartsWith("src/", StringComparison.OrdinalIgnoreCase) || normalizedPath.Contains('*'))
+                continue;
+
+            lastSrcEntryIndex = i;
+            if (string.Compare(normalizedPath, RazorCodeOwnersPath, StringComparison.OrdinalIgnoreCase) > 0)
+            {
+                insertIndex = i;
+                break;
+            }
+        }
+
+        if (insertIndex == lines.Count)
+        {
+            if (lastSrcEntryIndex >= 0)
+            {
+                insertIndex = lastSrcEntryIndex + 1;
+            }
+            else if (lines.Count > 0 && lines[^1].Length == 0)
+            {
+                insertIndex = lines.Count - 1;
+            }
+        }
+
+        lines.Insert(insertIndex, RazorCodeOwnersEntry);
+        return string.Join("\n", lines);
+    }
+
+    private static string? TryGetCodeOwnersPath(string line)
+    {
+        var trimmedLine = line.Trim();
+        if (trimmedLine.Length == 0 || trimmedLine.StartsWith("#", StringComparison.Ordinal))
+            return null;
+
+        var separatorIndex = trimmedLine.IndexOfAny([' ', '\t']);
+        return separatorIndex <= 0
+            ? null
+            : trimmedLine[..separatorIndex];
+    }
+
+    private static bool IsRazorCodeOwnersPath(string path)
+    {
+        var normalizedPath = NormalizeCodeOwnersPath(path);
+        return string.Equals(normalizedPath, RazorCodeOwnersPath, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalizedPath, RazorCodeOwnersPath.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeCodeOwnersPath(string path)
+        => path.Trim().TrimStart('/');
+
     private static bool HasUtf8Bom(string path)
     {
         using var stream = File.OpenRead(path);
@@ -5641,6 +5749,8 @@ public class SurveyPrompt : ComponentBase
         @"(?<![\w.])Package\.GetGlobalService\(",
         RegexOptions.CultureInvariant);
 
+    private const string RazorCodeOwnersPath = "src/Razor/";
+    private const string RazorCodeOwnersEntry = "src/Razor/ @dotnet/razor-tooling";
     private const string RazorSdkPackageVersion = "11.0.100-preview.4.26215.114";
 
     private static readonly string[] RazorGlobalConfigFileNames =
