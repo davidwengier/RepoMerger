@@ -400,6 +400,12 @@ internal static class PostMergeCleanupRunner
             "Fix AbstractMemoryLoggerProvider.Buffer IDE0044",
             "AbstractMemoryLoggerProvider.Buffer only assigns its _memory array during construction and mutates the array contents afterward, so the merged Roslyn tree can safely make the field readonly to satisfy IDE0044 without changing behavior.",
             FixAbstractMemoryLoggerProviderBufferIDE0044Async),
+        new(
+            "use-formattingoptions2-for-razor-formatting",
+            "Route Razor's C# formatting interaction path through a Razor-facing indent-style wrapper.",
+            "Use FormattingOptions2 for Razor formatting",
+            "Roslyn bans FormattingOptions in workspaces code, but FormattingOptions2 is not visible to Razor's workspaces layer. The merged tree should route the indent-style choice through a Razor-facing enum in the external-access bridge and convert to FormattingOptions2 inside that bridge.",
+            UseFormattingOptions2ForRazorFormattingAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1762,6 +1768,104 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(bufferPath, updatedContent, templatePath: bufferPath).ConfigureAwait(false);
         return $"Made '{Path.GetRelativePath(targetRepoRoot, bufferPath)}' use a readonly backing array field for IDE0044 compliance.";
+    }
+
+    private static async Task<string> UseFormattingOptions2ForRazorFormattingAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var formattingPassPath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Razor.Workspaces",
+            "Formatting",
+            "Passes",
+            "CSharpOnTypeFormattingPass.cs");
+        var formattingInteractionServicePath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Tools",
+            "ExternalAccess",
+            "Razor",
+            "Features",
+            "RazorCSharpFormattingInteractionService.cs");
+
+        if (!File.Exists(formattingPassPath))
+            return "No CSharpOnTypeFormattingPass.cs file was found for RS0030 cleanup.";
+
+        if (!File.Exists(formattingInteractionServicePath))
+            return "No RazorCSharpFormattingInteractionService.cs file was found for RS0030 cleanup.";
+
+        var changedPaths = new List<string>();
+
+        var formattingPassOriginalContent = await File.ReadAllTextAsync(formattingPassPath).ConfigureAwait(false);
+        var formattingPassUpdatedContent = formattingPassOriginalContent
+            .Replace(
+                "                indentStyle: CodeAnalysis.Formatting.FormattingOptions.IndentStyle.Smart,",
+                "                indentStyle: RazorIndentStyle.Smart,",
+                StringComparison.Ordinal)
+            .Replace(
+                "                indentStyle: CodeAnalysis.Formatting.FormattingOptions2.IndentStyle.Smart,",
+                "                indentStyle: RazorIndentStyle.Smart,",
+                StringComparison.Ordinal);
+
+        if (!string.Equals(formattingPassOriginalContent, formattingPassUpdatedContent, StringComparison.Ordinal))
+        {
+            await WriteTextPreservingUtf8BomAsync(formattingPassPath, formattingPassUpdatedContent, templatePath: formattingPassPath).ConfigureAwait(false);
+            changedPaths.Add(Path.GetRelativePath(targetRepoRoot, formattingPassPath));
+        }
+
+        var formattingInteractionServiceOriginalContent = await File.ReadAllTextAsync(formattingInteractionServicePath).ConfigureAwait(false);
+        var formattingInteractionServiceUpdatedContent = formattingInteractionServiceOriginalContent
+            .Replace(
+                "            FormattingOptions.IndentStyle indentStyle,",
+                "            RazorIndentStyle indentStyle,",
+                StringComparison.Ordinal)
+            .Replace(
+                "            FormattingOptions2.IndentStyle indentStyle,",
+                "            RazorIndentStyle indentStyle,",
+                StringComparison.Ordinal);
+
+        if (!formattingInteractionServiceUpdatedContent.Contains("internal enum RazorIndentStyle", StringComparison.Ordinal))
+        {
+            var summaryAnchor = "    /// <summary>";
+            var summaryIndex = formattingInteractionServiceUpdatedContent.IndexOf(summaryAnchor, StringComparison.Ordinal);
+            if (summaryIndex < 0)
+                return "No RazorCSharpFormattingInteractionService summary anchor was found for RS0030 cleanup.";
+
+            var enumBlock = string.Join(
+                Environment.NewLine,
+                [
+                    "    internal enum RazorIndentStyle",
+                    "    {",
+                    "        None = 0,",
+                    "        Block = 1,",
+                    "        Smart = 2,",
+                    "    }",
+                    "",
+                ]);
+            formattingInteractionServiceUpdatedContent = formattingInteractionServiceUpdatedContent.Insert(summaryIndex, enumBlock);
+        }
+
+        formattingInteractionServiceUpdatedContent = formattingInteractionServiceUpdatedContent
+            .Replace(
+                "                IndentStyle = indentStyle",
+                "                IndentStyle = (FormattingOptions2.IndentStyle)indentStyle",
+                StringComparison.Ordinal);
+
+        if (!string.Equals(formattingInteractionServiceOriginalContent, formattingInteractionServiceUpdatedContent, StringComparison.Ordinal))
+        {
+            await WriteTextPreservingUtf8BomAsync(formattingInteractionServicePath, formattingInteractionServiceUpdatedContent, templatePath: formattingInteractionServicePath).ConfigureAwait(false);
+            changedPaths.Add(Path.GetRelativePath(targetRepoRoot, formattingInteractionServicePath));
+        }
+
+        if (changedPaths.Count == 0)
+            return "No Razor FormattingOptions2 cleanup changes were needed.";
+
+        return $"Switched Razor's C# formatting path to use a Razor-facing indent-style wrapper that bridges to FormattingOptions2 in {string.Join(" and ", changedPaths.Select(path => $"'{path}'"))}.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
