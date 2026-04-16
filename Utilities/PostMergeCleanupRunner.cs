@@ -382,6 +382,12 @@ internal static class PostMergeCleanupRunner
             "Suppress SemanticTokenModifiers CA1802",
             "AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over SemanticTokenModifiers' non-public static fields, so the merged Roslyn tree should suppress CA1802 in that file instead of converting those fields to const and changing the reflected field set.",
             SuppressSemanticTokenModifiersCA1802Async),
+        new(
+            "fix-razor-formattingservice-ca1802",
+            "Rewrite RazorFormattingService.FirstTriggerCharacter from static readonly to const.",
+            "Fix RazorFormattingService CA1802",
+            "RazorFormattingService.FirstTriggerCharacter is a simple string literal used as a trigger-character value, so the merged Roslyn tree can safely make it const to satisfy CA1802 without changing behavior.",
+            FixRazorFormattingServiceCA1802Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1646,6 +1652,36 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(semanticTokenModifiersPath, updatedContent, templatePath: semanticTokenModifiersPath).ConfigureAwait(false);
         return $"Suppressed CA1802 in '{Path.GetRelativePath(targetRepoRoot, semanticTokenModifiersPath)}' because SemanticTokenModifiers fields are discovered via reflection when building Razor's semantic token legend.";
+    }
+
+    private static async Task<string> FixRazorFormattingServiceCA1802Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var razorFormattingServicePath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Razor.Workspaces",
+            "Formatting",
+            "RazorFormattingService.cs");
+
+        if (!File.Exists(razorFormattingServicePath))
+            return "No RazorFormattingService.cs file was found for CA1802 cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(razorFormattingServicePath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(
+            "    public static readonly string FirstTriggerCharacter = \"}\";",
+            "    public const string FirstTriggerCharacter = \"}\";",
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No RazorFormattingService CA1802 cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(razorFormattingServicePath, updatedContent, templatePath: razorFormattingServicePath).ConfigureAwait(false);
+        return $"Rewrote '{Path.GetRelativePath(targetRepoRoot, razorFormattingServicePath)}' to use a const trigger-character field for CA1802 compliance.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
