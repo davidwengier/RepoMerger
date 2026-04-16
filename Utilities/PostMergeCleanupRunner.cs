@@ -370,6 +370,12 @@ internal static class PostMergeCleanupRunner
             "Ensure origin remote for source packages",
             "Arcade source-package packing regenerates SourceLink targets from the repo's Git metadata on clean runs. RepoMerger's merged worktree keeps Roslyn under a target remote, so adding a matching origin remote lets SourceLink populate the repo-root ScmRepositoryUrl metadata that clean build.cmd -pack runs require.",
             EnsureOriginRemoteAsync),
+        new(
+            "disable-language-services-razor-ca2007",
+            "Disable CA2007 for Razor's Microsoft.VisualStudio.LanguageServices.Razor project via a local editorconfig.",
+            "Disable LanguageServices.Razor CA2007",
+            "The merged Roslyn build surfaces CA2007 throughout Microsoft.VisualStudio.LanguageServices.Razor, so Razor should suppress that rule in a project-local editorconfig instead of churning established Visual Studio integration code to satisfy Roslyn's repo-wide ConfigureAwait guidance.",
+            DisableLanguageServicesRazorCA2007Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1563,44 +1569,39 @@ internal static class PostMergeCleanupRunner
 
     private static async Task<string> DisableRazorExtensionCA2007Async(StageContext context)
     {
-        var targetRepoRoot = context.TargetRepoRoot;
         var razorExtensionDirectory = Path.Combine(
-            targetRepoRoot,
+            context.TargetRepoRoot,
             "src",
             "Razor",
             "src",
             "Razor",
             "src",
             "Microsoft.VisualStudio.RazorExtension");
-        var editorConfigPath = Path.Combine(razorExtensionDirectory, ".editorconfig");
-        var relativeEditorConfigPath = Path.GetRelativePath(targetRepoRoot, editorConfigPath);
-        var templatePath = File.Exists(editorConfigPath)
-            ? editorConfigPath
-            : Path.Combine(targetRepoRoot, "src", "Razor", "src", "Razor", "src", ".editorconfig");
+        return await EnsureProjectLocalEditorConfigSuppressionAsync(
+            context,
+            razorExtensionDirectory,
+            "Microsoft.VisualStudio.RazorExtension",
+            "CA2007",
+            "Call ConfigureAwait").ConfigureAwait(false);
+    }
 
-        if (!Directory.Exists(razorExtensionDirectory))
-            return "No Microsoft.VisualStudio.RazorExtension project directory was found for CA2007 suppression.";
+    private static async Task<string> DisableLanguageServicesRazorCA2007Async(StageContext context)
+    {
+        var languageServicesRazorDirectory = Path.Combine(
+            context.TargetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.LanguageServices.Razor");
 
-        var existingStatus = (await GitRunner.RunGitAsync(
-            targetRepoRoot,
-            "status",
-            "--short",
-            "--",
-            relativeEditorConfigPath).ConfigureAwait(false)).Trim();
-        var wasUntracked = existingStatus.StartsWith("??", StringComparison.Ordinal);
-        var originalContent = File.Exists(editorConfigPath)
-            ? await File.ReadAllTextAsync(editorConfigPath).ConfigureAwait(false)
-            : "[*.cs]" + Environment.NewLine + Environment.NewLine + "# Call ConfigureAwait" + Environment.NewLine;
-        var updatedContent = SetEditorConfigSeverity(originalContent, "CA2007", "none");
-
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal) && !wasUntracked)
-            return "No RazorExtension CA2007 editorconfig changes were needed.";
-
-        if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            await WriteTextPreservingUtf8BomAsync(editorConfigPath, updatedContent, templatePath: templatePath).ConfigureAwait(false);
-
-        await GitRunner.RunGitAsync(targetRepoRoot, "add", "--", relativeEditorConfigPath).ConfigureAwait(false);
-        return $"Disabled CA2007 in '{relativeEditorConfigPath}' via Razor's local editorconfig.";
+        return await EnsureProjectLocalEditorConfigSuppressionAsync(
+            context,
+            languageServicesRazorDirectory,
+            "Microsoft.VisualStudio.LanguageServices.Razor",
+            "CA2007",
+            "Call ConfigureAwait").ConfigureAwait(false);
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
@@ -4599,6 +4600,45 @@ public class SurveyPrompt : ComponentBase
 
         var trailingNewLine = content.EndsWith(Environment.NewLine, StringComparison.Ordinal) ? string.Empty : Environment.NewLine;
         return content + trailingNewLine + $"dotnet_diagnostic.{diagnosticId}.severity = {severity}" + Environment.NewLine;
+    }
+
+    private static async Task<string> EnsureProjectLocalEditorConfigSuppressionAsync(
+        StageContext context,
+        string projectDirectory,
+        string projectDisplayName,
+        string diagnosticId,
+        string comment)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        if (!Directory.Exists(projectDirectory))
+            return $"No {projectDisplayName} project directory was found for {diagnosticId} suppression.";
+
+        var editorConfigPath = Path.Combine(projectDirectory, ".editorconfig");
+        var relativeEditorConfigPath = Path.GetRelativePath(targetRepoRoot, editorConfigPath);
+        var templatePath = File.Exists(editorConfigPath)
+            ? editorConfigPath
+            : Path.Combine(targetRepoRoot, "src", "Razor", "src", "Razor", "src", ".editorconfig");
+
+        var existingStatus = (await GitRunner.RunGitAsync(
+            targetRepoRoot,
+            "status",
+            "--short",
+            "--",
+            relativeEditorConfigPath).ConfigureAwait(false)).Trim();
+        var wasUntracked = existingStatus.StartsWith("??", StringComparison.Ordinal);
+        var originalContent = File.Exists(editorConfigPath)
+            ? await File.ReadAllTextAsync(editorConfigPath).ConfigureAwait(false)
+            : "[*.cs]" + Environment.NewLine + Environment.NewLine + $"# {comment}" + Environment.NewLine;
+        var updatedContent = SetEditorConfigSeverity(originalContent, diagnosticId, "none");
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal) && !wasUntracked)
+            return $"No {projectDisplayName} {diagnosticId} editorconfig changes were needed.";
+
+        if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            await WriteTextPreservingUtf8BomAsync(editorConfigPath, updatedContent, templatePath: templatePath).ConfigureAwait(false);
+
+        await GitRunner.RunGitAsync(targetRepoRoot, "add", "--", relativeEditorConfigPath).ConfigureAwait(false);
+        return $"Disabled {diagnosticId} in '{relativeEditorConfigPath}' via Razor's local editorconfig.";
     }
 
     private static string SetBooleanPropertyValue(string content, string propertyName, bool value)
