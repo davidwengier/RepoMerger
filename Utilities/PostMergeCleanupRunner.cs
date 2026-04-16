@@ -358,6 +358,12 @@ internal static class PostMergeCleanupRunner
             "Restore Razor VSIX version props",
             @"Standalone Razor defines its own VsixVersionPrefix, AddinMajorVersion, and AddinVersion in eng\Versions.props, so the merged Razor subtree should restore those values locally instead of defaulting VSIX versioning to Roslyn's 10.0 package version line in official builds.",
             RestoreRazorVsixVersionPropsAsync),
+        new(
+            "restore-razor-vsix-dev-assets",
+            "Restore Razor's local VSIX packaging targets and strip Roslyn-only VSIX content so developer builds match standalone Razor.",
+            "Restore Razor VSIX dev assets",
+            @"Standalone Razor uses its own VSIX packaging targets to keep ServiceHub assets under ServiceHubCore, generate the brokered-services pkgdef/clientenabledpkg artifacts, and avoid Roslyn-only VSIX content, so the merged Razor subtree should restore those local targets instead of inheriting Roslyn's generic VSIX layout.",
+            RestoreRazorVsixDevAssetsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2267,6 +2273,93 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(directoryBuildPropsPath, updatedContent, templatePath: directoryBuildPropsPath).ConfigureAwait(false);
         return $"Restored Razor's local VSIX version props in '{Path.GetRelativePath(targetRepoRoot, directoryBuildPropsPath)}'.";
+    }
+
+    private static async Task<string> RestoreRazorVsixDevAssetsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var sourceRepoRoot = context.State.SourceCloneDirectory;
+        var sourceRazorRoot = Path.Combine(sourceRepoRoot, "src", "Razor");
+        var sourceEngTargetsRoot = Path.Combine(sourceRepoRoot, "eng", "targets");
+        if (!Directory.Exists(sourceRazorRoot) || !Directory.Exists(sourceEngTargetsRoot))
+            return "No Razor source checkout was found for VSIX developer asset cleanup.";
+
+        var changedFiles = new List<string>();
+
+        async Task RecordChangedFileAsync(string path)
+        {
+            var relativePath = Path.GetRelativePath(targetRepoRoot, path);
+            await GitRunner.RunGitAsync(targetRepoRoot, "add", "--", relativePath).ConfigureAwait(false);
+            changedFiles.Add(relativePath);
+        }
+
+        foreach (var fileName in new[]
+        {
+            "GenerateServiceHubConfigurationFiles.targets",
+            "ReplaceServiceHubAssetsInVsixManifest.targets",
+        })
+        {
+            var sourcePath = Path.Combine(sourceEngTargetsRoot, fileName);
+            var targetPath = Path.Combine(targetRoot, "eng", "targets", fileName);
+            if (!await CopyFileIfDifferentAsync(sourcePath, targetPath).ConfigureAwait(false))
+                continue;
+
+            await RecordChangedFileAsync(targetPath).ConfigureAwait(false);
+        }
+
+        var legacyBrokeredServicesTargetPath = Path.Combine(targetRoot, "eng", "targets", "GenerateBrokeredServicesPkgDef.targets");
+        if (File.Exists(legacyBrokeredServicesTargetPath))
+        {
+            File.Delete(legacyBrokeredServicesTargetPath);
+            await GitRunner.RunGitAsync(
+                targetRepoRoot,
+                "rm",
+                "--ignore-unmatch",
+                "--",
+                Path.GetRelativePath(targetRepoRoot, legacyBrokeredServicesTargetPath)).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, legacyBrokeredServicesTargetPath));
+        }
+
+        var sourceBrokeredServicesTargetPath = Path.Combine(sourceEngTargetsRoot, "GenerateBrokeredServicesPkgDef.targets");
+        var targetBrokeredServicesTargetPath = Path.Combine(targetRoot, "eng", "targets", "GenerateRazorBrokeredServicesPkgDef.targets");
+        if (File.Exists(sourceBrokeredServicesTargetPath))
+        {
+            var desiredContent = await BuildRazorBrokeredServicesPkgDefTargetsContentAsync(sourceBrokeredServicesTargetPath).ConfigureAwait(false);
+            var existingContent = File.Exists(targetBrokeredServicesTargetPath)
+                ? await File.ReadAllTextAsync(targetBrokeredServicesTargetPath).ConfigureAwait(false)
+                : null;
+            if (!string.Equals(existingContent, desiredContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    targetBrokeredServicesTargetPath,
+                    desiredContent,
+                    templatePath: sourceBrokeredServicesTargetPath).ConfigureAwait(false);
+                await RecordChangedFileAsync(targetBrokeredServicesTargetPath).ConfigureAwait(false);
+            }
+        }
+
+        var sourceVsixProjectRoot = Path.Combine(sourceRazorRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension");
+        var targetVsixProjectRoot = Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension");
+        var sourceDirectoryBuildTargetsPath = Path.Combine(sourceVsixProjectRoot, "Directory.Build.targets");
+        var targetDirectoryBuildTargetsPath = Path.Combine(targetVsixProjectRoot, "Directory.Build.targets");
+        if (File.Exists(sourceDirectoryBuildTargetsPath) && File.Exists(targetDirectoryBuildTargetsPath))
+        {
+            var desiredContent = await BuildRazorVsixDirectoryBuildTargetsContentAsync(sourceDirectoryBuildTargetsPath).ConfigureAwait(false);
+            var originalContent = await File.ReadAllTextAsync(targetDirectoryBuildTargetsPath).ConfigureAwait(false);
+            if (!string.Equals(originalContent, desiredContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    targetDirectoryBuildTargetsPath,
+                    desiredContent,
+                    templatePath: sourceDirectoryBuildTargetsPath).ConfigureAwait(false);
+                await RecordChangedFileAsync(targetDirectoryBuildTargetsPath).ConfigureAwait(false);
+            }
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor VSIX developer asset cleanup changes were needed."
+            : $"Restored Razor VSIX developer-build packaging behavior in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
@@ -4697,6 +4790,129 @@ public class SurveyPrompt : ComponentBase
             stream,
             preserveWhitespace ? LoadOptions.PreserveWhitespace : LoadOptions.None,
             CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private static async Task<string> BuildRazorVsixDirectoryBuildTargetsContentAsync(string sourcePath)
+    {
+        var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
+        var updatedContent = sourceContent
+            .Replace(
+                "BeforeTargets=\"GenerateBrokeredServicesPkgDef\"",
+                "BeforeTargets=\"GeneratePkgDef;GenerateRazorBrokeredServicesPkgDef\"",
+                StringComparison.Ordinal)
+            .Replace(
+                @"$(RepositoryEngineeringDir)targets\ReplaceServiceHubAssetsInVsixManifest.targets",
+                @"$(RepositoryRoot)eng\targets\ReplaceServiceHubAssetsInVsixManifest.targets",
+                StringComparison.Ordinal)
+            .Replace(
+                @"$(RepositoryEngineeringDir)targets\GenerateBrokeredServicesPkgDef.targets",
+                @"$(RepositoryRoot)eng\targets\GenerateRazorBrokeredServicesPkgDef.targets",
+                StringComparison.Ordinal);
+
+        var mergedRoslynCleanupBlock = string.Join(
+            Environment.NewLine,
+            [
+                "  <ItemGroup>",
+                @"    <Content Remove=""$(RepoRoot)src\Setup\Roslyn.VsixLicense\EULA.rtf"" />",
+                @"    <Content Remove=""$(RepoRoot)src\Setup\Roslyn.ThirdPartyNotices\ThirdPartyNotices.rtf"" />",
+                "  </ItemGroup>",
+                string.Empty,
+                "  <PropertyGroup>",
+                "    <GetVsixSourceItemsDependsOn>$(GetVsixSourceItemsDependsOn);GenerateRazorBrokeredServicesPkgDef;GenerateRazorClientEnabledPkg;IncludeMissingRazorServiceHubPayload</GetVsixSourceItemsDependsOn>",
+                "    <IncludeVSIXItemsDependsOn>$(IncludeVSIXItemsDependsOn);RemoveMergedRoslynVsixSourceItems</IncludeVSIXItemsDependsOn>",
+                "  </PropertyGroup>",
+                string.Empty,
+                "  <Target Name=\"GenerateRazorClientEnabledPkg\">",
+                "    <ItemGroup>",
+                "      <_RazorClientEnabledPkgLine Include=\"$(TargetName).pkgdef\" />",
+                "      <_RazorClientEnabledPkgLine Include=\"$(TargetName).Custom.pkgdef\" />",
+                "      <_RazorClientEnabledPkgLine Include=\"$(TargetName).BrokeredServices.pkgdef\" />",
+                "    </ItemGroup>",
+                "    <PropertyGroup>",
+                "      <_RazorClientEnabledPkgPath>$(IntermediateOutputPath)$(TargetName).clientenabledpkg</_RazorClientEnabledPkgPath>",
+                "    </PropertyGroup>",
+                "    <WriteLinesToFile File=\"$(_RazorClientEnabledPkgPath)\"",
+                "                      Lines=\"@(_RazorClientEnabledPkgLine)\"",
+                "                      Overwrite=\"true\"",
+                "                      Encoding=\"UTF-8\"",
+                "                      WriteOnlyWhenDifferent=\"true\" />",
+                "    <ItemGroup>",
+                "      <FileWrites Include=\"$(_RazorClientEnabledPkgPath)\" />",
+                "      <VSIXSourceItem Include=\"$(_RazorClientEnabledPkgPath)\" />",
+                "    </ItemGroup>",
+                "  </Target>",
+                string.Empty,
+                "  <Target Name=\"IncludeMissingRazorServiceHubPayload\">",
+                "    <ItemGroup>",
+                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll\" Condition=\"Exists('$(TargetDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll')\" />",
+                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)Microsoft.CodeAnalysis.Razor.Compiler.dll\" Condition=\"Exists('$(TargetDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')\" />",
+                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll\" Condition=\"Exists('$(TargetDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll')\" />",
+                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)*\\Microsoft.AspNetCore.Razor.Utilities.Shared.resources.dll\" />",
+                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)*\\Microsoft.CodeAnalysis.Razor.Workspaces.resources.dll\" />",
+                "      <VSIXSourceItem Include=\"@(_MissingRazorServiceHubPayload)\">",
+                "        <VSIXSubPath Condition=\"'%(_MissingRazorServiceHubPayload.RecursiveDir)' == ''\">$(ServiceHubCoreSubPath)</VSIXSubPath>",
+                "        <VSIXSubPath Condition=\"'%(_MissingRazorServiceHubPayload.RecursiveDir)' != ''\">$(ServiceHubCoreSubPath)\\%(_MissingRazorServiceHubPayload.RecursiveDir)</VSIXSubPath>",
+                "      </VSIXSourceItem>",
+                "    </ItemGroup>",
+                "  </Target>",
+                string.Empty,
+                "  <Target Name=\"RemoveMergedRoslynVsixSourceItems\">",
+                "    <ItemGroup>",
+                "      <_MergedRoslynVsixSourceItemToRemove Include=\"@(VSIXSourceItem)\"",
+                "                                            Condition=\"'%(VSIXSourceItem.Filename)%(VSIXSourceItem.Extension)' == 'EULA.rtf'",
+                "                                                    Or '%(VSIXSourceItem.Filename)%(VSIXSourceItem.Extension)' == 'ThirdPartyNotices.rtf'",
+                "                                                    Or '%(VSIXSourceItem.Filename)%(VSIXSourceItem.Extension)' == 'roslynSettings.registration.json'",
+                "                                                    Or '%(VSIXSourceItem.Filename)%(VSIXSourceItem.Extension)' == 'Microsoft.VisualStudio.LanguageServer.Client.Implementation.dll'\" />",
+                "      <VSIXSourceItem Remove=\"@(_MergedRoslynVsixSourceItemToRemove)\" />",
+                "      <_MergedRoslynVsixCopyLocalToRemove Include=\"@(VSIXCopyLocalReferenceSourceItem)\"",
+                "                                           Condition=\"'%(VSIXCopyLocalReferenceSourceItem.Filename)%(VSIXCopyLocalReferenceSourceItem.Extension)' == 'Microsoft.VisualStudio.LanguageServer.Client.Implementation.dll'\" />",
+                "      <VSIXCopyLocalReferenceSourceItem Remove=\"@(_MergedRoslynVsixCopyLocalToRemove)\" />",
+                "      <_MergedRoslynVsixLocalOnlyToRemove Include=\"@(VSIXSourceItemLocalOnly)\"",
+                "                                           Condition=\"'%(VSIXSourceItemLocalOnly.Filename)%(VSIXSourceItemLocalOnly.Extension)' == 'roslynSettings.registration.json'\" />",
+                "      <VSIXSourceItemLocalOnly Remove=\"@(_MergedRoslynVsixLocalOnlyToRemove)\" />",
+                "      <_MergedRoslynContentToRemove Include=\"@(Content)\"",
+                "                                     Condition=\"'%(Content.Filename)%(Content.Extension)' == 'EULA.rtf'",
+                "                                             Or '%(Content.Filename)%(Content.Extension)' == 'ThirdPartyNotices.rtf'",
+                "                                             Or '%(Content.Link)' == 'UnifiedSettings\\roslynSettings.registration.json'\" />",
+                "      <Content Remove=\"@(_MergedRoslynContentToRemove)\" />",
+                "    </ItemGroup>",
+                "  </Target>",
+            ]);
+
+        return updatedContent.Replace(
+            $"{Environment.NewLine}</Project>",
+            $"{Environment.NewLine}{Environment.NewLine}{mergedRoslynCleanupBlock}{Environment.NewLine}</Project>",
+            StringComparison.Ordinal);
+    }
+
+    private static async Task<string> BuildRazorBrokeredServicesPkgDefTargetsContentAsync(string sourcePath)
+    {
+        var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
+        return sourceContent
+            .Replace(
+                "Name=\"_InitializeBrokeredServiceEntries\"",
+                "Name=\"_InitializeRazorBrokeredServiceEntries\"",
+                StringComparison.Ordinal)
+            .Replace(
+                "BeforeTargets=\"GenerateBrokeredServicesPkgDef\"",
+                "BeforeTargets=\"GenerateRazorBrokeredServicesPkgDef\"",
+                StringComparison.Ordinal)
+            .Replace(
+                "Name=\"GenerateBrokeredServicesPkgDef\"",
+                "Name=\"GenerateRazorBrokeredServicesPkgDef\"",
+                StringComparison.Ordinal)
+            .Replace(
+                "DependsOnTargets=\"$(GeneratePkgDefDependsOn)\"",
+                string.Empty,
+                StringComparison.Ordinal)
+            .Replace(
+                "BeforeTargets=\"GeneratePkgDef\"",
+                "BeforeTargets=\"CreateVsixContainer\"",
+                StringComparison.Ordinal)
+            .Replace(
+                "_GeneratePkgDefOutputFile",
+                "_RazorBrokeredServicesPkgDefOutputFile",
+                StringComparison.Ordinal);
     }
 
     private static async Task SaveXmlAsync(XDocument document, string path)
