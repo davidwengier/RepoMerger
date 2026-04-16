@@ -394,6 +394,12 @@ internal static class PostMergeCleanupRunner
             "Suppress SemanticTokenTypes CA1802",
             "AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over SemanticTokenTypes' non-public static fields, so the merged Roslyn tree should suppress CA1802 in that file instead of converting those fields to const and changing the reflected field set.",
             SuppressSemanticTokenTypesCA1802Async),
+        new(
+            "fix-abstract-memory-logger-buffer-ide0044",
+            "Make AbstractMemoryLoggerProvider.Buffer._memory readonly.",
+            "Fix AbstractMemoryLoggerProvider.Buffer IDE0044",
+            "AbstractMemoryLoggerProvider.Buffer only assigns its _memory array during construction and mutates the array contents afterward, so the merged Roslyn tree can safely make the field readonly to satisfy IDE0044 without changing behavior.",
+            FixAbstractMemoryLoggerProviderBufferIDE0044Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1726,6 +1732,36 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(semanticTokenTypesPath, updatedContent, templatePath: semanticTokenTypesPath).ConfigureAwait(false);
         return $"Suppressed CA1802 in '{Path.GetRelativePath(targetRepoRoot, semanticTokenTypesPath)}' because SemanticTokenTypes fields are discovered via reflection when building Razor's semantic token legend.";
+    }
+
+    private static async Task<string> FixAbstractMemoryLoggerProviderBufferIDE0044Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var bufferPath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Razor.Workspaces",
+            "Logging",
+            "AbstractMemoryLoggerProvider.Buffer.cs");
+
+        if (!File.Exists(bufferPath))
+            return "No AbstractMemoryLoggerProvider.Buffer.cs file was found for IDE0044 cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(bufferPath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(
+            "        private string[] _memory = new string[bufferSize];",
+            "        private readonly string[] _memory = new string[bufferSize];",
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No AbstractMemoryLoggerProvider.Buffer IDE0044 cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(bufferPath, updatedContent, templatePath: bufferPath).ConfigureAwait(false);
+        return $"Made '{Path.GetRelativePath(targetRepoRoot, bufferPath)}' use a readonly backing array field for IDE0044 compliance.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
