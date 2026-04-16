@@ -352,12 +352,6 @@ internal static class PostMergeCleanupRunner
             "Restore Razor version props",
             @"Standalone Razor defines its own MajorVersion, MinorVersion, PatchVersion, and PreReleaseVersionLabel in eng\Versions.props, so the merged Razor subtree should restore those values locally instead of inheriting Roslyn's 5.7 package version line.",
             RestoreRazorVersionPropsAsync),
-        new(
-            "restore-razor-test-package-ids",
-            "Restore the standalone Razor package IDs for the packable test projects renamed to Roslyn's UnitTests convention.",
-            "Restore Razor test package IDs",
-            @"Roslyn renames Razor's packable *.Test projects to *.UnitTests during post-merge cleanup, so those projects need explicit PackageId values to keep producing the standalone Razor package names.",
-            RestoreRazorTestPackageIdsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2220,53 +2214,6 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(directoryBuildPropsPath, updatedContent, templatePath: directoryBuildPropsPath).ConfigureAwait(false);
         return $"Restored Razor's local version props in '{Path.GetRelativePath(targetRepoRoot, directoryBuildPropsPath)}'.";
-    }
-
-    private static async Task<string> RestoreRazorTestPackageIdsAsync(StageContext context)
-    {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var targetRoot = context.TargetRoot;
-        var replacements = new (string Path, string PackageId, string AnchorLine)[]
-        {
-            (
-                Path.Combine(targetRoot, "src", "Shared", "Microsoft.AspNetCore.Razor.Utilities.Shared.UnitTests", "Microsoft.AspNetCore.Razor.Utilities.Shared.UnitTests.csproj"),
-                "Microsoft.AspNetCore.Razor.Utilities.Shared.Test",
-                "    <IsShipping>false</IsShipping>"
-            ),
-            (
-                Path.Combine(targetRoot, "src", "Analyzers", "Razor.Diagnostics.Analyzers.UnitTests", "Razor.Diagnostics.Analyzers.UnitTests.csproj"),
-                "Razor.Diagnostics.Analyzers.Test",
-                "    <IsShippingPackage>false</IsShippingPackage>"
-            ),
-        };
-
-        var changedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var replacement in replacements)
-        {
-            if (!File.Exists(replacement.Path))
-                continue;
-
-            var originalContent = await File.ReadAllTextAsync(replacement.Path).ConfigureAwait(false);
-            if (originalContent.Contains($"<PackageId>{replacement.PackageId}</PackageId>", StringComparison.Ordinal))
-                continue;
-
-            var updatedContent = originalContent.Replace(
-                replacement.AnchorLine,
-                replacement.AnchorLine + Environment.NewLine +
-                $"    <PackageId>{replacement.PackageId}</PackageId>",
-                StringComparison.Ordinal);
-
-            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-                continue;
-
-            await WriteTextPreservingUtf8BomAsync(replacement.Path, updatedContent, templatePath: replacement.Path).ConfigureAwait(false);
-            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, replacement.Path));
-        }
-
-        return changedFiles.Count == 0
-            ? "No Razor test package ID restores were needed."
-            : $"Restored standalone Razor test package IDs in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
