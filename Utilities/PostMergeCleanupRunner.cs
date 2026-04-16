@@ -418,6 +418,12 @@ internal static class PostMergeCleanupRunner
             "Fix SnippetCache IDE0044",
             "SnippetCache initializes its dictionary and lock once and only mutates their contents afterward, so the merged Roslyn tree can safely mark those fields readonly to satisfy IDE0044 without changing behavior.",
             FixSnippetCacheIDE0044Async),
+        new(
+            "fix-renameprojecttreehandler-rs0030",
+            "Switch RenameProjectTreeHandler from ThreadHelper to JoinableTaskContext.",
+            "Fix RenameProjectTreeHandler RS0030",
+            "Roslyn bans ThreadHelper.JoinableTaskFactory in Visual Studio code. This Razor project already uses JoinableTaskContext elsewhere, so the merged tree should inject JoinableTaskContext into RenameProjectTreeHandler and use its Factory for the UI-thread switch instead.",
+            FixRenameProjectTreeHandlerRS0030Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1965,6 +1971,82 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(snippetCachePath, updatedContent, templatePath: snippetCachePath).ConfigureAwait(false);
         return $"Marked the backing cache fields in '{Path.GetRelativePath(targetRepoRoot, snippetCachePath)}' as readonly for IDE0044 compliance.";
+    }
+
+    private static async Task<string> FixRenameProjectTreeHandlerRS0030Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var renameProjectTreeHandlerPath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.LanguageServices.Razor",
+            "ProjectSystem",
+            "RenameProjectTreeHandler.cs");
+
+        if (!File.Exists(renameProjectTreeHandlerPath))
+            return "No RenameProjectTreeHandler.cs file was found for RS0030 cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(renameProjectTreeHandlerPath).ConfigureAwait(false);
+        var updatedContent = originalContent;
+
+        updatedContent = updatedContent
+            .Replace(
+                "using Microsoft.CodeAnalysis.Editor.Shared.Utilities;" + Environment.NewLine,
+                string.Empty,
+                StringComparison.Ordinal)
+            .Replace(
+                "    Lazy<LSPRequestInvokerWrapper> requestInvoker," + Environment.NewLine +
+                "    ILoggerFactory loggerFactory) : ProjectTreeActionHandlerBase",
+                "    Lazy<LSPRequestInvokerWrapper> requestInvoker," + Environment.NewLine +
+                "    JoinableTaskContext joinableTaskContext," + Environment.NewLine +
+                "    ILoggerFactory loggerFactory) : ProjectTreeActionHandlerBase",
+                StringComparison.Ordinal)
+            .Replace(
+                "    Lazy<LSPRequestInvokerWrapper> requestInvoker," + Environment.NewLine +
+                "    IThreadingContext threadingContext," + Environment.NewLine +
+                "    ILoggerFactory loggerFactory) : ProjectTreeActionHandlerBase",
+                "    Lazy<LSPRequestInvokerWrapper> requestInvoker," + Environment.NewLine +
+                "    JoinableTaskContext joinableTaskContext," + Environment.NewLine +
+                "    ILoggerFactory loggerFactory) : ProjectTreeActionHandlerBase",
+                StringComparison.Ordinal)
+            .Replace(
+                "    private readonly Lazy<LSPRequestInvokerWrapper> _requestInvoker = requestInvoker;" + Environment.NewLine +
+                "    private readonly ILogger _logger = loggerFactory.GetOrCreateLogger<RenameProjectTreeHandler>();",
+                "    private readonly Lazy<LSPRequestInvokerWrapper> _requestInvoker = requestInvoker;" + Environment.NewLine +
+                "    private readonly JoinableTaskFactory _jtf = joinableTaskContext.Factory;" + Environment.NewLine +
+                "    private readonly ILogger _logger = loggerFactory.GetOrCreateLogger<RenameProjectTreeHandler>();",
+                StringComparison.Ordinal)
+            .Replace(
+                "    private readonly Lazy<LSPRequestInvokerWrapper> _requestInvoker = requestInvoker;" + Environment.NewLine +
+                "    private readonly IThreadingContext _threadingContext = threadingContext;" + Environment.NewLine +
+                "    private readonly ILogger _logger = loggerFactory.GetOrCreateLogger<RenameProjectTreeHandler>();",
+                "    private readonly Lazy<LSPRequestInvokerWrapper> _requestInvoker = requestInvoker;" + Environment.NewLine +
+                "    private readonly JoinableTaskFactory _jtf = joinableTaskContext.Factory;" + Environment.NewLine +
+                "    private readonly ILogger _logger = loggerFactory.GetOrCreateLogger<RenameProjectTreeHandler>();",
+                StringComparison.Ordinal)
+            .Replace(
+                "            await _threadingContext.JoinableTaskFactory.SwitchToMainThreadAsync();",
+                "            await _jtf.SwitchToMainThreadAsync();",
+                StringComparison.Ordinal)
+            .Replace(
+                "            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();",
+                "            await _jtf.SwitchToMainThreadAsync();",
+                StringComparison.Ordinal)
+            .Replace(
+                "            await _jtf.SwitchToMainThreadAsync();" + Environment.NewLine +
+                "            await _jtf.SwitchToMainThreadAsync();",
+                "            await _jtf.SwitchToMainThreadAsync();",
+                StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No RenameProjectTreeHandler RS0030 cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(renameProjectTreeHandlerPath, updatedContent, templatePath: renameProjectTreeHandlerPath).ConfigureAwait(false);
+        return $"Updated '{Path.GetRelativePath(targetRepoRoot, renameProjectTreeHandlerPath)}' to switch from ThreadHelper.JoinableTaskFactory to an injected JoinableTaskContext.Factory.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
