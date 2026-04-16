@@ -170,23 +170,11 @@ internal static class PostMergeCleanupRunner
             "Razor's shared SpecializedTasks helper mirrors Roslyn's cached Task-wrapper APIs, so the merged tree should suppress VSTHRD200 on those members instead of renaming the established utility surface.",
             SuppressRazorSpecializedTasksVSTHRD200Async),
         new(
-            "fix-razor-stringextensions-modifier-ordering",
-            "Normalize Razor's StringExtensions modifier ordering to satisfy Roslyn's style analyzers.",
-            "Fix Razor StringExtensions modifier ordering",
-            "The merged Roslyn tree expects `static` and `unsafe` modifiers in Roslyn's preferred order, so Razor's StringExtensions helper should rewrite its legacy declaration accordingly.",
-            FixRazorStringExtensionsModifierOrderingAsync),
-        new(
             "fix-razor-enum-gethashcode-ban",
             "Rewrite Razor's DocumentationId hash-code calculation to cast the enum to an integral type instead of calling Enum.GetHashCode().",
             "Fix Razor enum hash-code ban",
             "Roslyn bans Enum.GetHashCode because it can box on .NET Framework, so the merged Razor tree should cast DocumentationId to int in DocumentationDescriptor.SimpleDescriptor.ComputeHashCode instead.",
             FixRazorEnumGetHashCodeBanAsync),
-        new(
-            "disable-containedlanguage-ca2007",
-            "Disable CA2007 for Razor's ContainedLanguage project via its local editorconfig.",
-            "Disable ContainedLanguage CA2007",
-            "The merged Roslyn build surfaces CA2007 in Microsoft.VisualStudio.LanguageServer.ContainedLanguage, so Razor should suppress that rule in the project's local editorconfig instead of churning async-call sites during post-merge cleanup.",
-            DisableContainedLanguageCA2007Async),
         new(
             "make-razorsyntaxgenerator-program-static",
             "Make RazorSyntaxGenerator.Program static to satisfy Roslyn's style analyzers.",
@@ -263,11 +251,11 @@ internal static class PostMergeCleanupRunner
             "Razor's syntax visualizer and related Visual Studio extension code should reference Roslyn's in-repo Microsoft.VisualStudio.LanguageServices and Workspaces projects explicitly when building inside the merged Roslyn tree.",
             NormalizeRazorVisualStudioWorkspaceReferencesAsync),
         new(
-            "fix-containedlanguage-modifier-ordering",
-            "Normalize ContainedLanguage modifier ordering to satisfy Roslyn's IDE0036 analyzer.",
-            "Fix ContainedLanguage modifier ordering",
-            "Razor's ContainedLanguage project still carries a few legacy modifier-order spellings such as `public async override` and `readonly static`, but the merged Roslyn tree enforces Roslyn's preferred modifier order for those declarations.",
-            FixContainedLanguageModifierOrderingAsync),
+            "fix-razor-modifier-ordering",
+            "Normalize Razor modifier ordering to satisfy Roslyn's IDE0036 analyzer.",
+            "Fix Razor modifier ordering",
+            "Razor's StringExtensions helper and ContainedLanguage project still carry a few legacy modifier-order spellings such as `public unsafe static`, `public async override`, and `readonly static`, but the merged Roslyn tree enforces Roslyn's preferred modifier order for those declarations.",
+            FixRazorModifierOrderingAsync),
         new(
             "suppress-razorpackage-vssdk003",
             "Suppress VSSDK003 on RazorPackage's legacy syntax visualizer tool-window registration.",
@@ -280,18 +268,6 @@ internal static class PostMergeCleanupRunner
             "Suppress NestedFile ThreadHelper RS0030",
             "Razor's NestedFileCommandHandler still uses ThreadHelper.JoinableTaskFactory in two legacy Visual Studio extension call sites, and the merged Roslyn tree bans that API in favor of IThreadingContext.JoinableTaskFactory. The post-merge cleanup should suppress those two warning sites locally instead of broadening the suppression scope.",
             SuppressNestedFileThreadHelperRS0030Async),
-        new(
-            "disable-razorextension-ca2007",
-            "Disable CA2007 for Razor's Microsoft.VisualStudio.RazorExtension project via a local editorconfig.",
-            "Disable RazorExtension CA2007",
-            "The merged Roslyn build surfaces CA2007 throughout Microsoft.VisualStudio.RazorExtension, so Razor should suppress that rule in the project's local editorconfig instead of churning many Visual Studio extension async-call sites during post-merge cleanup.",
-            DisableRazorExtensionCA2007Async),
-        new(
-            "fix-syntaxvisualizer-readonly-field",
-            "Make Razor's SyntaxVisualizerControl temp-path field readonly to satisfy IDE0044.",
-            "Fix SyntaxVisualizer readonly field",
-            "Razor's SyntaxVisualizerControl temp-path field is initialized once and never reassigned, so the merged Roslyn tree expects it to be marked readonly.",
-            FixSyntaxVisualizerReadonlyFieldAsync),
         new(
             "normalize-razor-parsetext-sourcetext",
             "Rewrite Razor's string-based CSharpSyntaxTree.ParseText calls to use SourceText.",
@@ -329,12 +305,6 @@ internal static class PostMergeCleanupRunner
             "Roslyn's shared xUnit analyzers flag Assert.Empty calls that check for filtered matches, so Razor tests should use Assert.DoesNotContain with a predicate instead of materializing a filtered sequence and asserting emptiness.",
             FixRazorXunit2029AssertEmptyWhereAsync),
         new(
-            "remove-razor-unused-moq-using",
-            "Remove the unused Moq using from Razor's ViewCodeCommandHandlerTests.",
-            "Remove Razor unused Moq using",
-            "After the earlier Mock.Of cleanup, ViewCodeCommandHandlerTests no longer uses Moq directly, so Razor should remove the stale using directive instead of carrying an IDE0005 warning in the merged Roslyn tree.",
-            RemoveRazorUnusedMoqUsingAsync),
-        new(
             "rewrite-razor-pack-content-paths",
             "Rewrite Razor pack content includes to consume Roslyn artifact outputs instead of relying on local OutDir and PublishDir copies.",
             "Rewrite Razor pack content paths",
@@ -371,17 +341,11 @@ internal static class PostMergeCleanupRunner
             "Arcade source-package packing regenerates SourceLink targets from the repo's Git metadata on clean runs. RepoMerger's merged worktree keeps Roslyn under a target remote, so adding a matching origin remote lets SourceLink populate the repo-root ScmRepositoryUrl metadata that clean build.cmd -pack runs require.",
             EnsureOriginRemoteAsync),
         new(
-            "disable-language-services-razor-ca2007",
-            "Disable CA2007 for Razor's Microsoft.VisualStudio.LanguageServices.Razor project via a local editorconfig.",
-            "Disable LanguageServices.Razor CA2007",
-            "The merged Roslyn build surfaces CA2007 throughout Microsoft.VisualStudio.LanguageServices.Razor, so Razor should suppress that rule in a project-local editorconfig instead of churning established Visual Studio integration code to satisfy Roslyn's repo-wide ConfigureAwait guidance.",
-            DisableLanguageServicesRazorCA2007Async),
-        new(
-            "suppress-semantic-token-modifiers-ca1802",
-            "Suppress CA1802 in SemanticTokenModifiers.cs so reflection-based field discovery keeps working.",
-            "Suppress SemanticTokenModifiers CA1802",
-            "AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over SemanticTokenModifiers' non-public static fields, so the merged Roslyn tree should suppress CA1802 in that file instead of converting those fields to const and changing the reflected field set.",
-            SuppressSemanticTokenModifiersCA1802Async),
+            "disable-visualstudio-razor-ca2007",
+            "Disable CA2007 across Razor's Visual Studio-facing projects via local editorconfigs.",
+            "Disable Visual Studio Razor CA2007",
+            "The merged Roslyn build surfaces CA2007 across Microsoft.VisualStudio.LanguageServer.ContainedLanguage, Microsoft.VisualStudio.RazorExtension, and Microsoft.VisualStudio.LanguageServices.Razor, so Razor should suppress that rule in project-local editorconfigs instead of churning established Visual Studio async code during post-merge cleanup.",
+            DisableVisualStudioRazorCA2007Async),
         new(
             "fix-razor-formattingservice-ca1802",
             "Rewrite RazorFormattingService.FirstTriggerCharacter from static readonly to const.",
@@ -389,17 +353,11 @@ internal static class PostMergeCleanupRunner
             "RazorFormattingService.FirstTriggerCharacter is a simple string literal used as a trigger-character value, so the merged Roslyn tree can safely make it const to satisfy CA1802 without changing behavior.",
             FixRazorFormattingServiceCA1802Async),
         new(
-            "suppress-semantic-token-types-ca1802",
-            "Suppress CA1802 in SemanticTokenTypes.cs so reflection-based field discovery keeps working.",
-            "Suppress SemanticTokenTypes CA1802",
-            "AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over SemanticTokenTypes' non-public static fields, so the merged Roslyn tree should suppress CA1802 in that file instead of converting those fields to const and changing the reflected field set.",
-            SuppressSemanticTokenTypesCA1802Async),
-        new(
-            "fix-abstract-memory-logger-buffer-ide0044",
-            "Make AbstractMemoryLoggerProvider.Buffer._memory readonly.",
-            "Fix AbstractMemoryLoggerProvider.Buffer IDE0044",
-            "AbstractMemoryLoggerProvider.Buffer only assigns its _memory array during construction and mutates the array contents afterward, so the merged Roslyn tree can safely make the field readonly to satisfy IDE0044 without changing behavior.",
-            FixAbstractMemoryLoggerProviderBufferIDE0044Async),
+            "suppress-semantic-token-field-ca1802",
+            "Suppress CA1802 in semantic-token field containers that are discovered via reflection.",
+            "Suppress semantic token field CA1802",
+            "AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over SemanticTokenModifiers and SemanticTokenTypes static fields, so the merged Roslyn tree should suppress CA1802 in those files instead of converting the fields to const and changing the reflected field set.",
+            SuppressSemanticTokenFieldCA1802Async),
         new(
             "use-formattingoptions2-for-razor-formatting",
             "Route Razor's C# formatting interaction path through a Razor-facing indent-style wrapper.",
@@ -413,35 +371,23 @@ internal static class PostMergeCleanupRunner
             "Roslyn bans Project.AddDocument overloads that take raw strings because they lose encoding and checksum information. The merged tree should create SourceText with explicit UTF-8 and SHA-256 metadata and pass that to AddDocument instead.",
             FixRoslynCodeActionHelpersRS0030Async),
         new(
-            "fix-snippetcache-ide0044",
-            "Make SnippetCache backing fields readonly.",
-            "Fix SnippetCache IDE0044",
-            "SnippetCache initializes its dictionary and lock once and only mutates their contents afterward, so the merged Roslyn tree can safely mark those fields readonly to satisfy IDE0044 without changing behavior.",
-            FixSnippetCacheIDE0044Async),
-        new(
             "fix-renameprojecttreehandler-rs0030",
             "Switch RenameProjectTreeHandler from ThreadHelper to JoinableTaskContext.",
             "Fix RenameProjectTreeHandler RS0030",
             "Roslyn bans ThreadHelper.JoinableTaskFactory in Visual Studio code. This Razor project already uses JoinableTaskContext elsewhere, so the merged tree should inject JoinableTaskContext into RenameProjectTreeHandler and use its Factory for the UI-thread switch instead.",
             FixRenameProjectTreeHandlerRS0030Async),
         new(
-            "fix-renameprojecttree-waitindicator-ide0044",
-            "Make RenameProjectTreeHandler.WaitIndicator message field readonly.",
-            "Fix RenameProjectTreeHandler.WaitIndicator IDE0044",
-            "WaitIndicator assigns its message once during construction and only reads it afterward when starting the dialog, so the merged Roslyn tree can safely mark that field readonly to satisfy IDE0044 without changing behavior.",
-            FixRenameProjectTreeWaitIndicatorIDE0044Async),
+            "fix-razor-readonly-fields-ide0044",
+            "Make Razor fields readonly where they are only assigned during initialization.",
+            "Fix Razor readonly fields IDE0044",
+            "Several Razor fields in SyntaxVisualizerControl, AbstractMemoryLoggerProvider.Buffer, SnippetCache, and RenameProjectTreeHandler.WaitIndicator are assigned only during initialization and only their contents are mutated afterward, so the merged Roslyn tree can safely mark them readonly to satisfy IDE0044 without changing behavior.",
+            FixRazorReadonlyFieldsIDE0044Async),
         new(
-            "remove-visualstudio-languageserver-featureoptions-unused-using",
-            "Remove the unused Microsoft.VisualStudio.Shell using from VisualStudioLanguageServerFeatureOptions.",
-            "Remove VisualStudioLanguageServerFeatureOptions unused using",
-            "VisualStudioLanguageServerFeatureOptions fully qualifies Microsoft.VisualStudio.Shell.Package.GetGlobalService, so the extra using directive is redundant and should be removed rather than carrying an IDE0005 warning in Roslyn's stricter build.",
-            RemoveVisualStudioLanguageServerFeatureOptionsUnusedUsingAsync),
-        new(
-            "remove-defaultlspdocumenttest-unused-moq-using",
-            "Remove the unused Moq using from DefaultLSPDocumentTest.",
-            "Remove DefaultLSPDocumentTest unused Moq using",
-            "DefaultLSPDocumentTest now uses StrictMock helpers from Razor's shared test infrastructure rather than Moq APIs directly, so the stale using should be removed instead of leaving IDE0005 warnings in Roslyn's test build.",
-            RemoveDefaultLSPDocumentTestUnusedMoqUsingAsync),
+            "remove-razor-unused-usings",
+            "Remove known stale using directives left behind by earlier Razor compatibility cleanups.",
+            "Remove Razor unused usings",
+            "A few Razor files end up with redundant using directives after the Moq and Visual Studio service-lookup normalizations, so the merged Roslyn tree should remove those exact stale usings instead of carrying IDE0005 warnings.",
+            RemoveRazorUnusedUsingsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1388,32 +1334,6 @@ internal static class PostMergeCleanupRunner
         return $"Added VSTHRD200 suppressions to '{Path.GetRelativePath(targetRepoRoot, specializedTasksPath)}' for Razor's cached Task helper APIs.";
     }
 
-    private static async Task<string> FixRazorStringExtensionsModifierOrderingAsync(StageContext context)
-    {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var stringExtensionsPath = Path.Combine(
-            context.TargetRoot,
-            "src",
-            "Shared",
-            "Microsoft.AspNetCore.Razor.Utilities.Shared",
-            "StringExtensions.cs");
-
-        if (!File.Exists(stringExtensionsPath))
-            return "No Razor StringExtensions.cs file was found for modifier-order cleanup.";
-
-        var originalContent = await File.ReadAllTextAsync(stringExtensionsPath).ConfigureAwait(false);
-        var updatedContent = originalContent.Replace(
-            "public unsafe static string Create<TState>(int length, TState state, SpanAction<char, TState> action)",
-            "public static unsafe string Create<TState>(int length, TState state, SpanAction<char, TState> action)",
-            StringComparison.Ordinal);
-
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No Razor StringExtensions modifier-order cleanup changes were needed.";
-
-        await WriteTextPreservingUtf8BomAsync(stringExtensionsPath, updatedContent, templatePath: stringExtensionsPath).ConfigureAwait(false);
-        return $"Fixed modifier ordering in '{Path.GetRelativePath(targetRepoRoot, stringExtensionsPath)}' to match Roslyn's analyzer expectations.";
-    }
-
     private static async Task<string> FixRazorEnumGetHashCodeBanAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -1440,30 +1360,6 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(documentationDescriptorPath, updatedContent, templatePath: documentationDescriptorPath).ConfigureAwait(false);
         return $"Rewrote DocumentationId hash-code calculation in '{Path.GetRelativePath(targetRepoRoot, documentationDescriptorPath)}' to avoid Enum.GetHashCode() boxing.";
-    }
-
-    private static async Task<string> DisableContainedLanguageCA2007Async(StageContext context)
-    {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var editorConfigPath = Path.Combine(
-            context.TargetRoot,
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.VisualStudio.LanguageServer.ContainedLanguage",
-            ".editorconfig");
-
-        if (!File.Exists(editorConfigPath))
-            return "No ContainedLanguage .editorconfig file was found for CA2007 suppression.";
-
-        var originalContent = await File.ReadAllTextAsync(editorConfigPath).ConfigureAwait(false);
-        var updatedContent = SetEditorConfigSeverity(originalContent, "CA2007", "none");
-
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No ContainedLanguage CA2007 editorconfig changes were needed.";
-
-        await WriteTextPreservingUtf8BomAsync(editorConfigPath, updatedContent, templatePath: editorConfigPath).ConfigureAwait(false);
-        return $"Disabled CA2007 in '{Path.GetRelativePath(targetRepoRoot, editorConfigPath)}' via Razor's local editorconfig.";
     }
 
     private static async Task<string> MakeRazorSyntaxGeneratorProgramStaticAsync(StageContext context)
@@ -1493,58 +1389,40 @@ internal static class PostMergeCleanupRunner
         return $"Made '{Path.GetRelativePath(targetRepoRoot, programPath)}' static to satisfy Roslyn's analyzer expectations.";
     }
 
-    private static async Task<string> FixContainedLanguageModifierOrderingAsync(StageContext context)
+    private static async Task<string> FixRazorModifierOrderingAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
-        var containedLanguageRoot = Path.Combine(
+        var targetRoot = context.TargetRoot;
+        var (changedFiles, replacementCount) = await ApplyKnownFileTextReplacementsAsync(
             targetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.VisualStudio.LanguageServer.ContainedLanguage");
-        var replacements = new (string RelativePath, string OldText, string NewText)[]
-        {
-            (
-                "DefaultLSPRequestInvoker.cs",
-                "    public async override Task<ReinvokeResponse<TOut>> ReinvokeRequestOnServerAsync<TIn, TOut>(",
-                "    public override async Task<ReinvokeResponse<TOut>> ReinvokeRequestOnServerAsync<TIn, TOut>("),
-            (
-                "InviolableEditTag.cs",
-                "    public readonly static IInviolableEditTag Instance = new InviolableEditTag();",
-                "    public static readonly IInviolableEditTag Instance = new InviolableEditTag();"),
-            (
-                Path.Combine("MessageInterception", "DefaultInterceptorManager.cs"),
-                "    public async override Task<TJsonToken?> ProcessGenericInterceptorsAsync<TJsonToken>(string methodName, TJsonToken message, string contentType, CancellationToken cancellationToken)",
-                "    public override async Task<TJsonToken?> ProcessGenericInterceptorsAsync<TJsonToken>(string methodName, TJsonToken message, string contentType, CancellationToken cancellationToken)"),
-        };
+            (Path.Combine(targetRoot, "src", "Shared", "Microsoft.AspNetCore.Razor.Utilities.Shared", "StringExtensions.cs"),
+            [
+                (
+                    "public unsafe static string Create<TState>(int length, TState state, SpanAction<char, TState> action)",
+                    "public static unsafe string Create<TState>(int length, TState state, SpanAction<char, TState> action)")
+            ]),
+            (Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServer.ContainedLanguage", "DefaultLSPRequestInvoker.cs"),
+            [
+                (
+                    "    public async override Task<ReinvokeResponse<TOut>> ReinvokeRequestOnServerAsync<TIn, TOut>(",
+                    "    public override async Task<ReinvokeResponse<TOut>> ReinvokeRequestOnServerAsync<TIn, TOut>(")
+            ]),
+            (Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServer.ContainedLanguage", "InviolableEditTag.cs"),
+            [
+                (
+                    "    public readonly static IInviolableEditTag Instance = new InviolableEditTag();",
+                    "    public static readonly IInviolableEditTag Instance = new InviolableEditTag();")
+            ]),
+            (Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServer.ContainedLanguage", "MessageInterception", "DefaultInterceptorManager.cs"),
+            [
+                (
+                    "    public async override Task<TJsonToken?> ProcessGenericInterceptorsAsync<TJsonToken>(string methodName, TJsonToken message, string contentType, CancellationToken cancellationToken)",
+                    "    public override async Task<TJsonToken?> ProcessGenericInterceptorsAsync<TJsonToken>(string methodName, TJsonToken message, string contentType, CancellationToken cancellationToken)")
+            ])).ConfigureAwait(false);
 
-        var changedFiles = new List<string>();
-
-        foreach (var replacement in replacements)
-        {
-            var filePath = Path.Combine(containedLanguageRoot, replacement.RelativePath);
-            if (!File.Exists(filePath))
-                continue;
-
-            var originalContent = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
-            var updatedContent = originalContent.Replace(
-                replacement.OldText,
-                replacement.NewText,
-                StringComparison.Ordinal);
-
-            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-                continue;
-
-            await WriteTextPreservingUtf8BomAsync(filePath, updatedContent, templatePath: filePath).ConfigureAwait(false);
-            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, filePath));
-        }
-
-        if (changedFiles.Count == 0)
-            return "No ContainedLanguage modifier-order cleanup changes were needed.";
-
-        return $"Fixed modifier ordering in {changedFiles.Count} ContainedLanguage file(s): {string.Join(", ", changedFiles)}.";
+        return changedFiles.Count == 0
+            ? "No Razor modifier-order cleanup changes were needed."
+            : $"Fixed {replacementCount} modifier-order declaration(s) in {changedFiles.Count} Razor file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> SuppressRazorPackageVSSDK003Async(StageContext context)
@@ -1633,79 +1511,42 @@ internal static class PostMergeCleanupRunner
         return $"Suppressed RS0030 in '{Path.GetRelativePath(targetRepoRoot, nestedFileCommandHandlerPath)}' at Razor's legacy ThreadHelper.JoinableTaskFactory call sites.";
     }
 
-    private static async Task<string> DisableRazorExtensionCA2007Async(StageContext context)
-    {
-        var razorExtensionDirectory = Path.Combine(
-            context.TargetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.VisualStudio.RazorExtension");
-        return await EnsureProjectLocalEditorConfigSuppressionAsync(
-            context,
-            razorExtensionDirectory,
-            "Microsoft.VisualStudio.RazorExtension",
-            "CA2007",
-            "Call ConfigureAwait").ConfigureAwait(false);
-    }
-
-    private static async Task<string> DisableLanguageServicesRazorCA2007Async(StageContext context)
-    {
-        var languageServicesRazorDirectory = Path.Combine(
-            context.TargetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.VisualStudio.LanguageServices.Razor");
-
-        return await EnsureProjectLocalEditorConfigSuppressionAsync(
-            context,
-            languageServicesRazorDirectory,
-            "Microsoft.VisualStudio.LanguageServices.Razor",
-            "CA2007",
-            "Call ConfigureAwait").ConfigureAwait(false);
-    }
-
-    private static async Task<string> SuppressSemanticTokenModifiersCA1802Async(StageContext context)
+    private static async Task<string> DisableVisualStudioRazorCA2007Async(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
-        var semanticTokenModifiersPath = Path.Combine(
-            targetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.CodeAnalysis.Razor.Workspaces",
-            "SemanticTokens",
-            "SemanticTokenModifiers.cs");
+        var targetRoot = context.TargetRoot;
+        var changedEditorConfigs = new List<string>();
+        var projectSuppressions = new (string ProjectDirectory, string ProjectDisplayName)[]
+        {
+            (
+                Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServer.ContainedLanguage"),
+                "Microsoft.VisualStudio.LanguageServer.ContainedLanguage"),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension"),
+                "Microsoft.VisualStudio.RazorExtension"),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor"),
+                "Microsoft.VisualStudio.LanguageServices.Razor"),
+        };
 
-        if (!File.Exists(semanticTokenModifiersPath))
-            return "No SemanticTokenModifiers.cs file was found for CA1802 suppression.";
+        foreach (var projectSuppression in projectSuppressions)
+        {
+            var result = await EnsureProjectLocalEditorConfigSuppressionAsync(
+                context,
+                projectSuppression.ProjectDirectory,
+                projectSuppression.ProjectDisplayName,
+                "CA2007",
+                "Call ConfigureAwait").ConfigureAwait(false);
 
-        var originalContent = await File.ReadAllTextAsync(semanticTokenModifiersPath).ConfigureAwait(false);
-        if (originalContent.Contains("#pragma warning disable CA1802", StringComparison.Ordinal))
-            return "No SemanticTokenModifiers CA1802 suppression changes were needed.";
+            if (!result.StartsWith("Disabled ", StringComparison.Ordinal))
+                continue;
 
-        var usingIndex = originalContent.IndexOf("using ", StringComparison.Ordinal);
-        if (usingIndex < 0)
-            return "No SemanticTokenModifiers using-directive anchor was found for CA1802 suppression.";
+            changedEditorConfigs.Add(Path.GetRelativePath(targetRepoRoot, Path.Combine(projectSuppression.ProjectDirectory, ".editorconfig")));
+        }
 
-        var pragmaBlock = string.Join(
-            Environment.NewLine,
-            [
-                "// AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over",
-                "// SemanticTokenModifiers' static fields, so they must remain fields instead of consts.",
-                "#pragma warning disable CA1802",
-            ]) + Environment.NewLine + Environment.NewLine;
-        var updatedContent = originalContent.Insert(usingIndex, pragmaBlock);
-
-        await WriteTextPreservingUtf8BomAsync(semanticTokenModifiersPath, updatedContent, templatePath: semanticTokenModifiersPath).ConfigureAwait(false);
-        return $"Suppressed CA1802 in '{Path.GetRelativePath(targetRepoRoot, semanticTokenModifiersPath)}' because SemanticTokenModifiers fields are discovered via reflection when building Razor's semantic token legend.";
+        return changedEditorConfigs.Count == 0
+            ? "No Visual Studio Razor CA2007 editorconfig changes were needed."
+            : $"Disabled CA2007 in {changedEditorConfigs.Count} Visual Studio Razor editorconfig file(s): {string.Join(", ", changedEditorConfigs)}.";
     }
 
     private static async Task<string> FixRazorFormattingServiceCA1802Async(StageContext context)
@@ -1738,72 +1579,50 @@ internal static class PostMergeCleanupRunner
         return $"Rewrote '{Path.GetRelativePath(targetRepoRoot, razorFormattingServicePath)}' to use a const trigger-character field for CA1802 compliance.";
     }
 
-    private static async Task<string> SuppressSemanticTokenTypesCA1802Async(StageContext context)
+    private static async Task<string> SuppressSemanticTokenFieldCA1802Async(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
-        var semanticTokenTypesPath = Path.Combine(
-            targetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.CodeAnalysis.Razor.Workspaces",
-            "SemanticTokens",
-            "SemanticTokenTypes.cs");
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+        var suppressions = new (string FilePath, string TypeName)[]
+        {
+            (
+                Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.CodeAnalysis.Razor.Workspaces", "SemanticTokens", "SemanticTokenModifiers.cs"),
+                "SemanticTokenModifiers"),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.CodeAnalysis.Razor.Workspaces", "SemanticTokens", "SemanticTokenTypes.cs"),
+                "SemanticTokenTypes"),
+        };
 
-        if (!File.Exists(semanticTokenTypesPath))
-            return "No SemanticTokenTypes.cs file was found for CA1802 suppression.";
+        foreach (var suppression in suppressions)
+        {
+            if (!File.Exists(suppression.FilePath))
+                continue;
 
-        var originalContent = await File.ReadAllTextAsync(semanticTokenTypesPath).ConfigureAwait(false);
-        if (originalContent.Contains("#pragma warning disable CA1802", StringComparison.Ordinal))
-            return "No SemanticTokenTypes CA1802 suppression changes were needed.";
+            var originalContent = await File.ReadAllTextAsync(suppression.FilePath).ConfigureAwait(false);
+            if (originalContent.Contains("#pragma warning disable CA1802", StringComparison.Ordinal))
+                continue;
 
-        var usingIndex = originalContent.IndexOf("using ", StringComparison.Ordinal);
-        if (usingIndex < 0)
-            return "No SemanticTokenTypes using-directive anchor was found for CA1802 suppression.";
+            var usingIndex = originalContent.IndexOf("using ", StringComparison.Ordinal);
+            if (usingIndex < 0)
+                return $"No {suppression.TypeName} using-directive anchor was found for CA1802 suppression.";
 
-        var pragmaBlock = string.Join(
-            Environment.NewLine,
-            [
-                "// AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over",
-                "// SemanticTokenTypes' static fields, so they must remain fields instead of consts.",
-                "#pragma warning disable CA1802",
-            ]) + Environment.NewLine + Environment.NewLine;
-        var updatedContent = originalContent.Insert(usingIndex, pragmaBlock);
+            var pragmaBlock = string.Join(
+                Environment.NewLine,
+                [
+                    "// AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over",
+                    $"// {suppression.TypeName}' static fields, so they must remain fields instead of consts.",
+                    "#pragma warning disable CA1802",
+                ]) + Environment.NewLine + Environment.NewLine;
+            var updatedContent = originalContent.Insert(usingIndex, pragmaBlock);
 
-        await WriteTextPreservingUtf8BomAsync(semanticTokenTypesPath, updatedContent, templatePath: semanticTokenTypesPath).ConfigureAwait(false);
-        return $"Suppressed CA1802 in '{Path.GetRelativePath(targetRepoRoot, semanticTokenTypesPath)}' because SemanticTokenTypes fields are discovered via reflection when building Razor's semantic token legend.";
-    }
+            await WriteTextPreservingUtf8BomAsync(suppression.FilePath, updatedContent, templatePath: suppression.FilePath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, suppression.FilePath));
+        }
 
-    private static async Task<string> FixAbstractMemoryLoggerProviderBufferIDE0044Async(StageContext context)
-    {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var bufferPath = Path.Combine(
-            targetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.CodeAnalysis.Razor.Workspaces",
-            "Logging",
-            "AbstractMemoryLoggerProvider.Buffer.cs");
-
-        if (!File.Exists(bufferPath))
-            return "No AbstractMemoryLoggerProvider.Buffer.cs file was found for IDE0044 cleanup.";
-
-        var originalContent = await File.ReadAllTextAsync(bufferPath).ConfigureAwait(false);
-        var updatedContent = originalContent.Replace(
-            "        private string[] _memory = new string[bufferSize];",
-            "        private readonly string[] _memory = new string[bufferSize];",
-            StringComparison.Ordinal);
-
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No AbstractMemoryLoggerProvider.Buffer IDE0044 cleanup changes were needed.";
-
-        await WriteTextPreservingUtf8BomAsync(bufferPath, updatedContent, templatePath: bufferPath).ConfigureAwait(false);
-        return $"Made '{Path.GetRelativePath(targetRepoRoot, bufferPath)}' use a readonly backing array field for IDE0044 compliance.";
+        return changedFiles.Count == 0
+            ? "No semantic-token CA1802 suppression changes were needed."
+            : $"Suppressed CA1802 in {changedFiles.Count} semantic-token field file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> UseFormattingOptions2ForRazorFormattingAsync(StageContext context)
@@ -1956,41 +1775,6 @@ internal static class PostMergeCleanupRunner
         return $"Updated '{Path.GetRelativePath(targetRepoRoot, roslynCodeActionHelpersPath)}' to add the temporary document from SourceText with explicit encoding and checksum metadata.";
     }
 
-    private static async Task<string> FixSnippetCacheIDE0044Async(StageContext context)
-    {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var snippetCachePath = Path.Combine(
-            targetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.VisualStudio.LanguageServices.Razor",
-            "Snippets",
-            "SnippetCache.cs");
-
-        if (!File.Exists(snippetCachePath))
-            return "No SnippetCache.cs file was found for IDE0044 cleanup.";
-
-        var originalContent = await File.ReadAllTextAsync(snippetCachePath).ConfigureAwait(false);
-        var updatedContent = originalContent
-            .Replace(
-                "    private Dictionary<SnippetLanguage, ImmutableArray<SnippetInfo>> _snippetCache = new();",
-                "    private readonly Dictionary<SnippetLanguage, ImmutableArray<SnippetInfo>> _snippetCache = new();",
-                StringComparison.Ordinal)
-            .Replace(
-                "    private ReadWriterLocker _lock = new();",
-                "    private readonly ReadWriterLocker _lock = new();",
-                StringComparison.Ordinal);
-
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No SnippetCache IDE0044 cleanup changes were needed.";
-
-        await WriteTextPreservingUtf8BomAsync(snippetCachePath, updatedContent, templatePath: snippetCachePath).ConfigureAwait(false);
-        return $"Marked the backing cache fields in '{Path.GetRelativePath(targetRepoRoot, snippetCachePath)}' as readonly for IDE0044 compliance.";
-    }
-
     private static async Task<string> FixRenameProjectTreeHandlerRS0030Async(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -2067,116 +1851,73 @@ internal static class PostMergeCleanupRunner
         return $"Updated '{Path.GetRelativePath(targetRepoRoot, renameProjectTreeHandlerPath)}' to switch from ThreadHelper.JoinableTaskFactory to an injected JoinableTaskContext.Factory.";
     }
 
-    private static async Task<string> FixRenameProjectTreeWaitIndicatorIDE0044Async(StageContext context)
+    private static async Task<string> FixRazorReadonlyFieldsIDE0044Async(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
-        var waitIndicatorPath = Path.Combine(
+        var targetRoot = context.TargetRoot;
+        var (changedFiles, replacementCount) = await ApplyKnownFileTextReplacementsAsync(
             targetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.VisualStudio.LanguageServices.Razor",
-            "ProjectSystem",
-            "RenameProjectTreeActionHandler.WaitIndicator.cs");
+            (Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension", "SyntaxVisualizer", "SyntaxVisualizerControl.xaml.cs"),
+            [
+                (
+                    "    private static string s_baseTempPath = Path.Combine(Path.GetTempPath(), \"RazorDevTools\");",
+                    "    private static readonly string s_baseTempPath = Path.Combine(Path.GetTempPath(), \"RazorDevTools\");")
+            ]),
+            (Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.CodeAnalysis.Razor.Workspaces", "Logging", "AbstractMemoryLoggerProvider.Buffer.cs"),
+            [
+                (
+                    "        private string[] _memory = new string[bufferSize];",
+                    "        private readonly string[] _memory = new string[bufferSize];")
+            ]),
+            (Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "Snippets", "SnippetCache.cs"),
+            [
+                (
+                    "    private Dictionary<SnippetLanguage, ImmutableArray<SnippetInfo>> _snippetCache = new();",
+                    "    private readonly Dictionary<SnippetLanguage, ImmutableArray<SnippetInfo>> _snippetCache = new();"),
+                (
+                    "    private ReadWriterLocker _lock = new();",
+                    "    private readonly ReadWriterLocker _lock = new();")
+            ]),
+            (Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "ProjectSystem", "RenameProjectTreeActionHandler.WaitIndicator.cs"),
+            [
+                (
+                    "        private string _message;",
+                    "        private readonly string _message;")
+            ])).ConfigureAwait(false);
 
-        if (!File.Exists(waitIndicatorPath))
-            return "No RenameProjectTreeActionHandler.WaitIndicator.cs file was found for IDE0044 cleanup.";
-
-        var originalContent = await File.ReadAllTextAsync(waitIndicatorPath).ConfigureAwait(false);
-        var updatedContent = originalContent.Replace(
-            "        private string _message;",
-            "        private readonly string _message;",
-            StringComparison.Ordinal);
-
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No RenameProjectTreeActionHandler.WaitIndicator IDE0044 cleanup changes were needed.";
-
-        await WriteTextPreservingUtf8BomAsync(waitIndicatorPath, updatedContent, templatePath: waitIndicatorPath).ConfigureAwait(false);
-        return $"Marked the message field in '{Path.GetRelativePath(targetRepoRoot, waitIndicatorPath)}' as readonly for IDE0044 compliance.";
+        return changedFiles.Count == 0
+            ? "No Razor IDE0044 readonly-field cleanup changes were needed."
+            : $"Marked {replacementCount} Razor field{(replacementCount == 1 ? string.Empty : "s")} readonly across {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
-    private static async Task<string> RemoveVisualStudioLanguageServerFeatureOptionsUnusedUsingAsync(StageContext context)
+    private static async Task<string> RemoveRazorUnusedUsingsAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
-        var filePath = Path.Combine(
+        var targetRoot = context.TargetRoot;
+        var viewCodeCommandHandlerTestsPath = GetExistingPath(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "LanguageClient", "ViewCodeCommandHandlerTests.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "LanguageClient", "ViewCodeCommandHandlerTests.cs"));
+        var defaultLspDocumentTestPath = GetExistingPath(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServer.ContainedLanguage.UnitTests", "DefaultLSPDocumentTest.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServer.ContainedLanguage.Test", "DefaultLSPDocumentTest.cs"));
+        var (changedFiles, replacementCount) = await ApplyKnownFileTextReplacementsAsync(
             targetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.VisualStudio.LanguageServices.Razor",
-            "VisualStudioLanguageServerFeatureOptions.cs");
+            (viewCodeCommandHandlerTestsPath,
+            [
+                ("using Moq;" + Environment.NewLine, string.Empty)
+            ]),
+            (Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.LanguageServices.Razor", "VisualStudioLanguageServerFeatureOptions.cs"),
+            [
+                ("using Microsoft.VisualStudio.Shell;" + Environment.NewLine, string.Empty)
+            ]),
+            (defaultLspDocumentTestPath,
+            [
+                ("using Moq;" + Environment.NewLine, string.Empty)
+            ])).ConfigureAwait(false);
 
-        if (!File.Exists(filePath))
-            return "No VisualStudioLanguageServerFeatureOptions file was found for unused using cleanup.";
-
-        var originalContent = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
-        var updatedContent = originalContent.Replace("using Microsoft.VisualStudio.Shell;" + Environment.NewLine, string.Empty, StringComparison.Ordinal);
-
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No unused Microsoft.VisualStudio.Shell using remained in VisualStudioLanguageServerFeatureOptions.";
-
-        await WriteTextPreservingUtf8BomAsync(filePath, updatedContent, templatePath: filePath).ConfigureAwait(false);
-        return $"Removed the unused Microsoft.VisualStudio.Shell using from '{Path.GetRelativePath(targetRepoRoot, filePath)}'.";
-    }
-
-    private static async Task<string> RemoveDefaultLSPDocumentTestUnusedMoqUsingAsync(StageContext context)
-    {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var filePath = Path.Combine(
-            targetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "test",
-            "Microsoft.VisualStudio.LanguageServer.ContainedLanguage.UnitTests",
-            "DefaultLSPDocumentTest.cs");
-
-        if (!File.Exists(filePath))
-            return "No DefaultLSPDocumentTest file was found for unused using cleanup.";
-
-        var originalContent = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
-        var updatedContent = originalContent.Replace("using Moq;" + Environment.NewLine, string.Empty, StringComparison.Ordinal);
-
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No unused Moq using remained in DefaultLSPDocumentTest.";
-
-        await WriteTextPreservingUtf8BomAsync(filePath, updatedContent, templatePath: filePath).ConfigureAwait(false);
-        return $"Removed the unused Moq using from '{Path.GetRelativePath(targetRepoRoot, filePath)}'.";
-    }
-
-    private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
-    {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var syntaxVisualizerControlPath = Path.Combine(
-            targetRepoRoot,
-            "src",
-            "Razor",
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.VisualStudio.RazorExtension",
-            "SyntaxVisualizer",
-            "SyntaxVisualizerControl.xaml.cs");
-
-        if (!File.Exists(syntaxVisualizerControlPath))
-            return "No SyntaxVisualizerControl.xaml.cs file was found for readonly-field cleanup.";
-
-        var originalContent = await File.ReadAllTextAsync(syntaxVisualizerControlPath).ConfigureAwait(false);
-        var updatedContent = originalContent.Replace(
-            "    private static string s_baseTempPath = Path.Combine(Path.GetTempPath(), \"RazorDevTools\");",
-            "    private static readonly string s_baseTempPath = Path.Combine(Path.GetTempPath(), \"RazorDevTools\");",
-            StringComparison.Ordinal);
-
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No SyntaxVisualizer readonly-field cleanup changes were needed.";
-
-        await WriteTextPreservingUtf8BomAsync(syntaxVisualizerControlPath, updatedContent, templatePath: syntaxVisualizerControlPath).ConfigureAwait(false);
-        return $"Made the temp-path field readonly in '{Path.GetRelativePath(targetRepoRoot, syntaxVisualizerControlPath)}' to satisfy Roslyn's IDE0044 analyzer.";
+        return changedFiles.Count == 0
+            ? "No Razor unused-using cleanup changes were needed."
+            : $"Removed {replacementCount} known unused using directive{(replacementCount == 1 ? string.Empty : "s")} from {changedFiles.Count} Razor file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
@@ -2647,30 +2388,6 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor xUnit2029 Assert.Empty rewrites were needed."
             : $"Rewrote {replacementCount} Razor Assert.Empty(...Where(...)) call(s) in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
-    }
-
-    private static async Task<string> RemoveRazorUnusedMoqUsingAsync(StageContext context)
-    {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var testFilePath = Path.Combine(
-            context.TargetRoot,
-            "src",
-            "Razor",
-            "test",
-            "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests",
-            "LanguageClient",
-            "ViewCodeCommandHandlerTests.cs");
-
-        if (!File.Exists(testFilePath))
-            return "No ViewCodeCommandHandlerTests file was found for unused using cleanup.";
-
-        var originalContent = await File.ReadAllTextAsync(testFilePath).ConfigureAwait(false);
-        var updatedContent = originalContent.Replace("using Moq;" + Environment.NewLine, string.Empty, StringComparison.Ordinal);
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No unused Moq using remained in ViewCodeCommandHandlerTests.";
-
-        await WriteTextPreservingUtf8BomAsync(testFilePath, updatedContent, templatePath: testFilePath).ConfigureAwait(false);
-        return $"Removed the unused Moq using from '{Path.GetRelativePath(targetRepoRoot, testFilePath)}'.";
     }
 
     private static async Task<string> RewriteRazorPackContentPathsAsync(StageContext context)
@@ -5184,6 +4901,43 @@ public class SurveyPrompt : ComponentBase
 
         await GitRunner.RunGitAsync(targetRepoRoot, "add", "--", relativeEditorConfigPath).ConfigureAwait(false);
         return $"Disabled {diagnosticId} in '{relativeEditorConfigPath}' via Razor's local editorconfig.";
+    }
+
+    private static async Task<(IReadOnlyList<string> ChangedFiles, int ReplacementCount)> ApplyKnownFileTextReplacementsAsync(
+        string targetRepoRoot,
+        params (string FilePath, (string OldText, string NewText)[] Replacements)[] fileReplacements)
+    {
+        var changedFiles = new List<string>();
+        var replacementCount = 0;
+
+        foreach (var fileReplacement in fileReplacements)
+        {
+            if (!File.Exists(fileReplacement.FilePath))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(fileReplacement.FilePath).ConfigureAwait(false);
+            var updatedContent = originalContent;
+            var fileChanged = false;
+
+            foreach (var replacement in fileReplacement.Replacements)
+            {
+                var nextContent = updatedContent.Replace(replacement.OldText, replacement.NewText, StringComparison.Ordinal);
+                if (string.Equals(updatedContent, nextContent, StringComparison.Ordinal))
+                    continue;
+
+                updatedContent = nextContent;
+                replacementCount++;
+                fileChanged = true;
+            }
+
+            if (!fileChanged)
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(fileReplacement.FilePath, updatedContent, templatePath: fileReplacement.FilePath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, fileReplacement.FilePath));
+        }
+
+        return (changedFiles, replacementCount);
     }
 
     private static string SetBooleanPropertyValue(string content, string propertyName, bool value)
