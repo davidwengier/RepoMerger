@@ -328,6 +328,12 @@ internal static class PostMergeCleanupRunner
             "Fix Razor xUnit2029 Assert.Empty usage",
             "Roslyn's shared xUnit analyzers flag Assert.Empty calls that check for filtered matches, so Razor tests should use Assert.DoesNotContain with a predicate instead of materializing a filtered sequence and asserting emptiness.",
             FixRazorXunit2029AssertEmptyWhereAsync),
+        new(
+            "remove-razor-unused-moq-using",
+            "Remove the unused Moq using from Razor's ViewCodeCommandHandlerTests.",
+            "Remove Razor unused Moq using",
+            "After the earlier Mock.Of cleanup, ViewCodeCommandHandlerTests no longer uses Moq directly, so Razor should remove the stale using directive instead of carrying an IDE0005 warning in the merged Roslyn tree.",
+            RemoveRazorUnusedMoqUsingAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2022,6 +2028,30 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor xUnit2029 Assert.Empty rewrites were needed."
             : $"Rewrote {replacementCount} Razor Assert.Empty(...Where(...)) call(s) in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> RemoveRazorUnusedMoqUsingAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var testFilePath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "test",
+            "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests",
+            "LanguageClient",
+            "ViewCodeCommandHandlerTests.cs");
+
+        if (!File.Exists(testFilePath))
+            return "No ViewCodeCommandHandlerTests file was found for unused using cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(testFilePath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace("using Moq;" + Environment.NewLine, string.Empty, StringComparison.Ordinal);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No unused Moq using remained in ViewCodeCommandHandlerTests.";
+
+        await WriteTextPreservingUtf8BomAsync(testFilePath, updatedContent, templatePath: testFilePath).ConfigureAwait(false);
+        return $"Removed the unused Moq using from '{Path.GetRelativePath(targetRepoRoot, testFilePath)}'.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
