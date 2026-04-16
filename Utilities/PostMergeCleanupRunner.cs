@@ -322,6 +322,12 @@ internal static class PostMergeCleanupRunner
             "Fix Razor xUnit2031 Assert.Single usage",
             "Roslyn's shared xUnit analyzers flag Assert.Single calls that filter with Where first, so Razor tests should use Assert.Single's predicate overload directly instead of materializing a filtered sequence.",
             FixRazorXunit2031AssertSingleWhereAsync),
+        new(
+            "fix-razor-xunit2029-assertempty-where",
+            "Rewrite Razor Assert.Empty(...Where(...)) usages to xUnit's Assert.DoesNotContain predicate overload.",
+            "Fix Razor xUnit2029 Assert.Empty usage",
+            "Roslyn's shared xUnit analyzers flag Assert.Empty calls that check for filtered matches, so Razor tests should use Assert.DoesNotContain with a predicate instead of materializing a filtered sequence and asserting emptiness.",
+            FixRazorXunit2029AssertEmptyWhereAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1965,6 +1971,57 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor xUnit2031 Assert.Single rewrites were needed."
             : $"Rewrote {replacementCount} Razor Assert.Single(...Where(...)) call(s) in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> FixRazorXunit2029AssertEmptyWhereAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var replacements = new (string Path, string OldText, string NewText)[]
+        {
+            (
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "CodeActions", "CohostCodeActionsEndpointTestBase.cs"),
+                "Assert.Empty(input.NamedSpans.Where(kvp => kvp.Key.Length > 0));",
+                "Assert.DoesNotContain(input.NamedSpans, kvp => kvp.Key.Length > 0);"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.CodeAnalysis.Razor", "test", "DefaultTagHelperProducerTest.cs"),
+                "Assert.Empty(result.Where(f => f.TypeName == testTagHelper));",
+                "Assert.DoesNotContain(result, f => f.TypeName == testTagHelper);"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.CodeAnalysis.Razor", "test", "ComponentTagHelperProducerTest.cs"),
+                "Assert.Empty(result.Where(f => f.TypeName == testComponent));",
+                "Assert.DoesNotContain(result, f => f.TypeName == testComponent);"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.CodeAnalysis.Razor", "test", "ComponentTagHelperProducerTest.cs"),
+                "Assert.Empty(result.Where(f => f.TypeName == routerComponent));",
+                "Assert.DoesNotContain(result, f => f.TypeName == routerComponent);"
+            ),
+        };
+
+        var changedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var replacementCount = 0;
+
+        foreach (var replacement in replacements)
+        {
+            if (!File.Exists(replacement.Path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(replacement.Path).ConfigureAwait(false);
+            var updatedContent = originalContent.Replace(replacement.OldText, replacement.NewText, StringComparison.Ordinal);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(replacement.Path, updatedContent, templatePath: replacement.Path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, replacement.Path));
+            replacementCount++;
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor xUnit2029 Assert.Empty rewrites were needed."
+            : $"Rewrote {replacementCount} Razor Assert.Empty(...Where(...)) call(s) in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
