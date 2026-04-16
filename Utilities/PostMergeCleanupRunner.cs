@@ -304,6 +304,12 @@ internal static class PostMergeCleanupRunner
             "Rewrite Razor SDK package asset paths",
             @"The merged Roslyn tree consumes Microsoft.NET.Sdk.Razor assets from $(PkgMicrosoft_NET_Sdk_Razor)\targets, so Razor projects and VSIX content should stop referencing the old build\netstandard2.0 layout.",
             RewriteSdkRazorPackagePathsAsync),
+        new(
+            "remove-duplicate-razor-banned-moq-ctor",
+            "Remove Razor's duplicate Moq.Mock<T> constructor ban so Roslyn's shared banned-symbol list stays authoritative.",
+            "Remove duplicate Razor Moq banned-symbol entry",
+            @"Roslyn already bans the Moq.Mock<T> constructor through its shared test banned-symbol list, so Razor's local src\Razor\BannedSymbols.txt overlay should drop the duplicate entry to avoid RS0031 duplicate banned API warnings.",
+            RemoveDuplicateRazorBannedMoqConstructorAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1846,6 +1852,22 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? @"No Razor SDK package paths referencing $(PkgMicrosoft_NET_Sdk_Razor)\build\netstandard2.0 were found."
             : $@"Updated {updatedReferenceCount} Razor SDK package path reference(s) in {changedFiles.Count} file(s) to use $(PkgMicrosoft_NET_Sdk_Razor)\targets: {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> RemoveDuplicateRazorBannedMoqConstructorAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var bannedSymbolsPath = Path.Combine(context.TargetRoot, "BannedSymbols.txt");
+        if (!File.Exists(bannedSymbolsPath))
+            return "No Razor BannedSymbols.txt file was found for duplicate Moq cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(bannedSymbolsPath).ConfigureAwait(false);
+        var updatedContent = RazorBannedMoqConstructorPattern.Replace(originalContent, string.Empty, count: 1);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No duplicate Razor-local Moq constructor banned-symbol entry was found.";
+
+        await WriteTextPreservingUtf8BomAsync(bannedSymbolsPath, updatedContent, templatePath: bannedSymbolsPath).ConfigureAwait(false);
+        return $"Removed Razor's duplicate Moq constructor banned-symbol entry from '{Path.GetRelativePath(targetRepoRoot, bannedSymbolsPath)}'.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
@@ -3952,6 +3974,10 @@ public class SurveyPrompt : ComponentBase
     private static readonly Regex SdkRazorBuildNetstandardPathPattern = new(
         Regex.Escape("$(PkgMicrosoft_NET_Sdk_Razor)") + @"(?<separator>[\\/])build\k<separator>netstandard2\.0",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex RazorBannedMoqConstructorPattern = new(
+        @"^[ \t]*M:Moq\.Mock`1\.\#ctor;.*\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex BrokeredServicesBeforeTargetsPattern = new(
         @"BeforeTargets=""GenerateBrokeredServicesPkgDef""",
