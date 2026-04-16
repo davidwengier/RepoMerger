@@ -424,6 +424,12 @@ internal static class PostMergeCleanupRunner
             "Fix RenameProjectTreeHandler RS0030",
             "Roslyn bans ThreadHelper.JoinableTaskFactory in Visual Studio code. This Razor project already uses JoinableTaskContext elsewhere, so the merged tree should inject JoinableTaskContext into RenameProjectTreeHandler and use its Factory for the UI-thread switch instead.",
             FixRenameProjectTreeHandlerRS0030Async),
+        new(
+            "fix-renameprojecttree-waitindicator-ide0044",
+            "Make RenameProjectTreeHandler.WaitIndicator message field readonly.",
+            "Fix RenameProjectTreeHandler.WaitIndicator IDE0044",
+            "WaitIndicator assigns its message once during construction and only reads it afterward when starting the dialog, so the merged Roslyn tree can safely mark that field readonly to satisfy IDE0044 without changing behavior.",
+            FixRenameProjectTreeWaitIndicatorIDE0044Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2047,6 +2053,36 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(renameProjectTreeHandlerPath, updatedContent, templatePath: renameProjectTreeHandlerPath).ConfigureAwait(false);
         return $"Updated '{Path.GetRelativePath(targetRepoRoot, renameProjectTreeHandlerPath)}' to switch from ThreadHelper.JoinableTaskFactory to an injected JoinableTaskContext.Factory.";
+    }
+
+    private static async Task<string> FixRenameProjectTreeWaitIndicatorIDE0044Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var waitIndicatorPath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.LanguageServices.Razor",
+            "ProjectSystem",
+            "RenameProjectTreeActionHandler.WaitIndicator.cs");
+
+        if (!File.Exists(waitIndicatorPath))
+            return "No RenameProjectTreeActionHandler.WaitIndicator.cs file was found for IDE0044 cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(waitIndicatorPath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(
+            "        private string _message;",
+            "        private readonly string _message;",
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No RenameProjectTreeActionHandler.WaitIndicator IDE0044 cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(waitIndicatorPath, updatedContent, templatePath: waitIndicatorPath).ConfigureAwait(false);
+        return $"Marked the message field in '{Path.GetRelativePath(targetRepoRoot, waitIndicatorPath)}' as readonly for IDE0044 compliance.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
