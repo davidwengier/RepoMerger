@@ -128,29 +128,11 @@ internal static class PostMergeCleanupRunner
             "Microsoft.VisualStudio.LanguageServices.Razor still uses Microsoft.VisualStudio.ProjectSystem APIs, but in the merged Roslyn tree it should consume Roslyn's shared Microsoft.VisualStudio.ProjectSystem package instead of keeping Razor's separate ProjectSystem.SDK reference.",
             RemoveProjectSystemSdkPackageReferencesAsync),
         new(
-            "normalize-sdk-razor-package-version",
-            "Rewrite Razor's Microsoft.NET.Sdk.Razor package version to the restore-compatible preview expected by the merged Roslyn tree.",
-            "Normalize Razor Microsoft.NET.Sdk.Razor version",
-            "The merged Roslyn restore expects Microsoft.NET.Sdk.Razor 7.0.0-preview.5.22368.1, so Razor's Directory.Packages.props should normalize that PackageVersion to the restore-compatible preview instead of keeping the older source-repo pin.",
-            NormalizeSdkRazorPackageVersionAsync),
-        new(
-            "normalize-objectpool-package-version",
-            "Rewrite Razor's Microsoft.Extensions.ObjectPool package version to use the shared Microsoft.Extensions version.",
-            "Normalize Razor ObjectPool package version",
-            "Razor should use Roslyn's shared Microsoft.Extensions versioning instead of carrying its own ObjectPool package version entry in the merged repository.",
-            NormalizeObjectPoolPackageVersionAsync),
-        new(
-            "normalize-basic-reference-assemblies-version",
-            "Remove Razor's local Basic.Reference.Assemblies version override so the merged tree uses Roslyn's shared version.",
-            "Normalize Razor Basic.Reference.Assemblies version",
-            "Razor's src\\Razor\\Directory.Packages.props should inherit Roslyn's shared Basic.Reference.Assemblies version instead of pinning its older local 1.7.2 value, which triggers restore failures in the merged tree.",
-            NormalizeBasicReferenceAssembliesVersionAsync),
-        new(
-            "remove-roslyn-testing-package-overrides",
-            "Rewrite Razor's local Microsoft.CodeAnalysis.Analyzer.Testing version pin to Roslyn's shared testing-version property.",
-            "Normalize Razor testing package version",
-            "Razor still needs a local PackageVersion entry for Microsoft.CodeAnalysis.Analyzer.Testing, but in the merged tree it should use Roslyn's shared $(MicrosoftCodeAnalysisTestingVersion) instead of pinning an older preview version that causes package downgrade errors.",
-            RemoveRoslynTestingPackageOverridesAsync),
+            "align-razor-directory-packages-versions",
+            "Align Razor's local Directory.Packages.props version entries with Roslyn's shared package versions.",
+            "Align Razor Directory.Packages.props versions",
+            "Razor's local Microsoft.NET.Sdk.Razor, Microsoft.Extensions.ObjectPool, Basic.Reference.Assemblies, and Microsoft.CodeAnalysis.Analyzer.Testing version entries should align with Roslyn's shared package versioning so the merged tree uses one coherent set of package pins.",
+            AlignRazorDirectoryPackagesVersionsAsync),
         new(
             "normalize-razor-benchmarkdotnet-apis",
             "Rewrite Razor microbenchmark runners to avoid BenchmarkDotNet APIs newer than Roslyn's shared package version.",
@@ -206,12 +188,6 @@ internal static class PostMergeCleanupRunner
             "Razor's Visual Studio integration tests use IVsSolutionRestoreService APIs from NuGet.SolutionRestoreManager, so the merged tree should reference the same NuGet.SolutionRestoreManager.Interop package that Roslyn's own Visual Studio integration tests already carry.",
             NormalizeRazorVisualStudioRestoreManagerReferencesAsync),
         new(
-            "normalize-razor-moq-apis",
-            "Rewrite Razor test Moq usage to stay compatible with Roslyn's shared Moq package version.",
-            "Normalize Razor Moq APIs",
-            "Razor test helpers and test code in the merged Roslyn tree should use Moq APIs that exist in Roslyn's shared version, instead of relying on newer Mock.Of(..., MockBehavior.Strict) overloads that Roslyn does not carry.",
-            NormalizeRazorMoqApisAsync),
-        new(
             "normalize-razor-warning-cleanups",
             "Adjust Razor Live Share helpers and the code-folding integration test to compile cleanly under Roslyn's warning set.",
             "Normalize Razor warning cleanup",
@@ -226,12 +202,6 @@ internal static class PostMergeCleanupRunner
             "Razor brings its own analyzer and style expectations, but the merged Roslyn tree enables additional repo-wide rules that surface hundreds of non-functional warnings. The post-merge cleanup should localize those severities under src\\Razor so build validation stays focused on real merge regressions.",
             NormalizeRazorWarningBaselineAsync),
         */
-        new(
-            "normalize-razor-xunit-theorydata",
-            "Rewrite Razor language test TheoryData declarations to satisfy Roslyn's shared xUnit analyzer version.",
-            "Normalize Razor xUnit TheoryData",
-            "A few Razor language tests still declare bare TheoryData properties even though their theory methods are strongly typed. In the merged Roslyn tree, Roslyn's shared xUnit analyzer flags those as xUnit1037, so the declarations should be made explicit.",
-            NormalizeRazorXunitTheoryDataAsync),
         new(
             "normalize-razor-projectsystem-apis",
             "Remove Razor's unused dependency on newer CPS subscription service APIs that Roslyn's shared ProjectSystem package does not provide.",
@@ -281,29 +251,17 @@ internal static class PostMergeCleanupRunner
             @"The merged Roslyn tree consumes Microsoft.NET.Sdk.Razor assets from $(PkgMicrosoft_NET_Sdk_Razor)\targets, so Razor projects and VSIX content should stop referencing the old build\netstandard2.0 layout.",
             RewriteSdkRazorPackagePathsAsync),
         new(
-            "remove-duplicate-razor-banned-moq-ctor",
-            "Remove Razor's duplicate Moq.Mock<T> constructor ban so Roslyn's shared banned-symbol list stays authoritative.",
-            "Remove duplicate Razor Moq banned-symbol entry",
-            @"Roslyn already bans the Moq.Mock<T> constructor through its shared test banned-symbol list, so Razor's local src\Razor\BannedSymbols.txt overlay should drop the duplicate entry to avoid RS0031 duplicate banned API warnings.",
-            RemoveDuplicateRazorBannedMoqConstructorAsync),
+            "normalize-razor-moq-compatibility",
+            "Normalize Razor's Moq usage and Moq-related banned-symbol state for Roslyn's shared test stack.",
+            "Normalize Razor Moq compatibility",
+            "Razor test code in the merged Roslyn tree should use only the Moq APIs Roslyn's shared package version exposes, express strict Mock.Of behavior explicitly, and defer duplicate constructor bans to Roslyn's shared banned-symbol list.",
+            NormalizeRazorMoqCompatibilityAsync),
         new(
-            "normalize-razor-mockof-strictness",
-            "Rewrite Razor Mock.Of(...) calls to explicit strict Moq constructs that satisfy Roslyn's banned-symbol policy.",
-            "Normalize Razor Mock.Of strict usage",
-            @"Roslyn bans Mock.Of<T> convenience calls unless MockBehavior.Strict is explicit, so Razor test code in the merged tree should use explicit strict Mock and MockRepository constructs instead of the loose Mock.Of overloads.",
-            NormalizeRazorMockOfStrictnessAsync),
-        new(
-            "fix-razor-xunit2031-assertsingle-where",
-            "Rewrite Razor Assert.Single(...Where(...)) usages to xUnit's predicate overload.",
-            "Fix Razor xUnit2031 Assert.Single usage",
-            "Roslyn's shared xUnit analyzers flag Assert.Single calls that filter with Where first, so Razor tests should use Assert.Single's predicate overload directly instead of materializing a filtered sequence.",
-            FixRazorXunit2031AssertSingleWhereAsync),
-        new(
-            "fix-razor-xunit2029-assertempty-where",
-            "Rewrite Razor Assert.Empty(...Where(...)) usages to xUnit's Assert.DoesNotContain predicate overload.",
-            "Fix Razor xUnit2029 Assert.Empty usage",
-            "Roslyn's shared xUnit analyzers flag Assert.Empty calls that check for filtered matches, so Razor tests should use Assert.DoesNotContain with a predicate instead of materializing a filtered sequence and asserting emptiness.",
-            FixRazorXunit2029AssertEmptyWhereAsync),
+            "normalize-razor-xunit-analyzers",
+            "Normalize Razor test patterns that Roslyn's shared xUnit analyzers flag.",
+            "Normalize Razor xUnit analyzers",
+            "Razor tests in the merged Roslyn tree should use explicit TheoryData types and xUnit's direct predicate overloads instead of older TheoryData and filtered Assert.Single/Assert.Empty patterns that Roslyn's shared xUnit analyzers flag.",
+            NormalizeRazorXunitAnalyzersAsync),
         new(
             "rewrite-razor-pack-content-paths",
             "Rewrite Razor pack content includes to consume Roslyn artifact outputs instead of relying on local OutDir and PublishDir copies.",
@@ -317,17 +275,11 @@ internal static class PostMergeCleanupRunner
             @"Roslyn's release-packaging pass repacks every *.nupkg in the Shipping package directory after build.cmd -pack, so Razor's legacy .symbols.nupkg files should be moved aside after pack instead of colliding with the release repack step.",
             MoveRazorShippingSymbolPackagesAsync),
         new(
-            "restore-razor-version-props",
-            "Restore Razor's local version props so Razor packages keep the standalone Razor 10.0 version line after the merge.",
-            "Restore Razor version props",
-            @"Standalone Razor defines its own MajorVersion, MinorVersion, PatchVersion, and PreReleaseVersionLabel in eng\Versions.props, so the merged Razor subtree should restore those values locally instead of inheriting Roslyn's 5.7 package version line.",
-            RestoreRazorVersionPropsAsync),
-        new(
-            "restore-razor-vsix-version-props",
-            "Restore Razor's local VSIX tooling version props so official VSIX builds keep Razor's standalone version line.",
-            "Restore Razor VSIX version props",
-            @"Standalone Razor defines its own VsixVersionPrefix, AddinMajorVersion, and AddinVersion in eng\Versions.props, so the merged Razor subtree should restore those values locally instead of defaulting VSIX versioning to Roslyn's 10.0 package version line in official builds.",
-            RestoreRazorVsixVersionPropsAsync),
+            "restore-razor-versioning-props",
+            "Restore Razor's local package and VSIX versioning props in the merged root Directory.Build.props.",
+            "Restore Razor versioning props",
+            @"Standalone Razor defines both its package version line and its VSIX tooling version line in eng\Versions.props, so the merged Razor subtree should restore those property groups locally instead of inheriting Roslyn's package and VSIX version defaults.",
+            RestoreRazorVersioningPropsAsync),
         new(
             "restore-razor-vsix-dev-assets",
             "Restore Razor's local VSIX packaging targets and strip Roslyn-only VSIX content so developer builds match standalone Razor.",
@@ -2210,6 +2162,38 @@ internal static class PostMergeCleanupRunner
             $"in '{Path.GetRelativePath(targetRepoRoot, razorPackagesPath)}' to use {RazorSdkPackageVersion}.";
     }
 
+    private static async Task<string> AlignRazorDirectoryPackagesVersionsAsync(StageContext context)
+    {
+        var razorPackagesPath = Path.Combine(context.TargetRoot, "Directory.Packages.props");
+        if (!File.Exists(razorPackagesPath))
+            return "No Razor Directory.Packages.props file was found for package-version alignment.";
+
+        var summaries = new List<string>();
+
+        AddSummaryIfChanged(
+            summaries,
+            await NormalizeSdkRazorPackageVersionAsync(context).ConfigureAwait(false),
+            $"Razor Microsoft.NET.Sdk.Razor already uses {RazorSdkPackageVersion}.",
+            "No Razor Microsoft.NET.Sdk.Razor package version entry was found.");
+        AddSummaryIfChanged(
+            summaries,
+            await NormalizeObjectPoolPackageVersionAsync(context).ConfigureAwait(false),
+            "Razor Microsoft.Extensions.ObjectPool already uses the shared Microsoft.Extensions version.",
+            "No Razor Microsoft.Extensions.ObjectPool package version entry was found.");
+        AddSummaryIfChanged(
+            summaries,
+            await NormalizeBasicReferenceAssembliesVersionAsync(context).ConfigureAwait(false),
+            "No Razor Basic.Reference.Assemblies version override was found.");
+        AddSummaryIfChanged(
+            summaries,
+            await RemoveRoslynTestingPackageOverridesAsync(context).ConfigureAwait(false),
+            "No Razor Microsoft.CodeAnalysis.Analyzer.Testing version override was found.");
+
+        return summaries.Count == 0
+            ? "No Razor Directory.Packages.props version alignment changes were needed."
+            : string.Join(" ", summaries);
+    }
+
     private static async Task<string> RewriteSdkRazorPackagePathsAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -2276,6 +2260,28 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor Mock.Of strictness rewrites were needed."
             : $"Rewrote {rewrittenCallCount} Razor Mock.Of call(s) in {changedFiles.Count} file(s) to use explicit strict Moq constructs: {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorMoqCompatibilityAsync(StageContext context)
+    {
+        var summaries = new List<string>();
+
+        AddSummaryIfChanged(
+            summaries,
+            await NormalizeRazorMoqApisAsync(context).ConfigureAwait(false),
+            "No Razor Moq compatibility rewrites were needed.");
+        AddSummaryIfChanged(
+            summaries,
+            await RemoveDuplicateRazorBannedMoqConstructorAsync(context).ConfigureAwait(false),
+            "No duplicate Razor-local Moq constructor banned-symbol entry was found.");
+        AddSummaryIfChanged(
+            summaries,
+            await NormalizeRazorMockOfStrictnessAsync(context).ConfigureAwait(false),
+            "No Razor Mock.Of strictness rewrites were needed.");
+
+        return summaries.Count == 0
+            ? "No Razor Moq compatibility cleanup changes were needed."
+            : string.Join(" ", summaries);
     }
 
     private static async Task<string> FixRazorXunit2031AssertSingleWhereAsync(StageContext context)
@@ -2579,6 +2585,28 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(directoryBuildPropsPath, updatedContent, templatePath: directoryBuildPropsPath).ConfigureAwait(false);
         return $"Restored Razor's local VSIX version props in '{Path.GetRelativePath(targetRepoRoot, directoryBuildPropsPath)}'.";
+    }
+
+    private static async Task<string> RestoreRazorVersioningPropsAsync(StageContext context)
+    {
+        var directoryBuildPropsPath = Path.Combine(context.TargetRoot, "Directory.Build.props");
+        if (!File.Exists(directoryBuildPropsPath))
+            return "No Razor root Directory.Build.props file was found for versioning-props restoration.";
+
+        var summaries = new List<string>();
+
+        AddSummaryIfChanged(
+            summaries,
+            await RestoreRazorVersionPropsAsync(context).ConfigureAwait(false),
+            "No Razor version props restore was needed.");
+        AddSummaryIfChanged(
+            summaries,
+            await RestoreRazorVsixVersionPropsAsync(context).ConfigureAwait(false),
+            "No Razor VSIX version props restore was needed.");
+
+        return summaries.Count == 0
+            ? "No Razor versioning-props restoration changes were needed."
+            : string.Join(" ", summaries);
     }
 
     private static async Task<string> RestoreRazorVsixDevAssetsAsync(StageContext context)
@@ -3120,6 +3148,28 @@ public class SurveyPrompt : ComponentBase
         return changedFiles.Count == 0
             ? "No Razor xUnit TheoryData cleanup changes were needed."
             : $"Normalized Razor xUnit TheoryData declarations in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> NormalizeRazorXunitAnalyzersAsync(StageContext context)
+    {
+        var summaries = new List<string>();
+
+        AddSummaryIfChanged(
+            summaries,
+            await NormalizeRazorXunitTheoryDataAsync(context).ConfigureAwait(false),
+            "No Razor xUnit TheoryData cleanup changes were needed.");
+        AddSummaryIfChanged(
+            summaries,
+            await FixRazorXunit2031AssertSingleWhereAsync(context).ConfigureAwait(false),
+            "No Razor xUnit2031 Assert.Single rewrites were needed.");
+        AddSummaryIfChanged(
+            summaries,
+            await FixRazorXunit2029AssertEmptyWhereAsync(context).ConfigureAwait(false),
+            "No Razor xUnit2029 Assert.Empty rewrites were needed.");
+
+        return summaries.Count == 0
+            ? "No Razor xUnit analyzer cleanup changes were needed."
+            : string.Join(" ", summaries);
     }
 
     private static async Task<string> NormalizeRazorWarningBaselineAsync(StageContext context)
@@ -4938,6 +4988,17 @@ public class SurveyPrompt : ComponentBase
         }
 
         return (changedFiles, replacementCount);
+    }
+
+    private static void AddSummaryIfChanged(List<string> summaries, string summary, params string[] noChangeSummaries)
+    {
+        foreach (var noChangeSummary in noChangeSummaries)
+        {
+            if (string.Equals(summary, noChangeSummary, StringComparison.Ordinal))
+                return;
+        }
+
+        summaries.Add(summary);
     }
 
     private static string SetBooleanPropertyValue(string content, string propertyName, bool value)
