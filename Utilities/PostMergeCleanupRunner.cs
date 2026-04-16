@@ -376,6 +376,12 @@ internal static class PostMergeCleanupRunner
             "Disable LanguageServices.Razor CA2007",
             "The merged Roslyn build surfaces CA2007 throughout Microsoft.VisualStudio.LanguageServices.Razor, so Razor should suppress that rule in a project-local editorconfig instead of churning established Visual Studio integration code to satisfy Roslyn's repo-wide ConfigureAwait guidance.",
             DisableLanguageServicesRazorCA2007Async),
+        new(
+            "suppress-semantic-token-modifiers-ca1802",
+            "Suppress CA1802 in SemanticTokenModifiers.cs so reflection-based field discovery keeps working.",
+            "Suppress SemanticTokenModifiers CA1802",
+            "AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over SemanticTokenModifiers' non-public static fields, so the merged Roslyn tree should suppress CA1802 in that file instead of converting those fields to const and changing the reflected field set.",
+            SuppressSemanticTokenModifiersCA1802Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1602,6 +1608,44 @@ internal static class PostMergeCleanupRunner
             "Microsoft.VisualStudio.LanguageServices.Razor",
             "CA2007",
             "Call ConfigureAwait").ConfigureAwait(false);
+    }
+
+    private static async Task<string> SuppressSemanticTokenModifiersCA1802Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var semanticTokenModifiersPath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Razor.Workspaces",
+            "SemanticTokens",
+            "SemanticTokenModifiers.cs");
+
+        if (!File.Exists(semanticTokenModifiersPath))
+            return "No SemanticTokenModifiers.cs file was found for CA1802 suppression.";
+
+        var originalContent = await File.ReadAllTextAsync(semanticTokenModifiersPath).ConfigureAwait(false);
+        if (originalContent.Contains("#pragma warning disable CA1802", StringComparison.Ordinal))
+            return "No SemanticTokenModifiers CA1802 suppression changes were needed.";
+
+        var usingIndex = originalContent.IndexOf("using ", StringComparison.Ordinal);
+        if (usingIndex < 0)
+            return "No SemanticTokenModifiers using-directive anchor was found for CA1802 suppression.";
+
+        var pragmaBlock = string.Join(
+            Environment.NewLine,
+            [
+                "// AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over",
+                "// SemanticTokenModifiers' static fields, so they must remain fields instead of consts.",
+                "#pragma warning disable CA1802",
+            ]) + Environment.NewLine + Environment.NewLine;
+        var updatedContent = originalContent.Insert(usingIndex, pragmaBlock);
+
+        await WriteTextPreservingUtf8BomAsync(semanticTokenModifiersPath, updatedContent, templatePath: semanticTokenModifiersPath).ConfigureAwait(false);
+        return $"Suppressed CA1802 in '{Path.GetRelativePath(targetRepoRoot, semanticTokenModifiersPath)}' because SemanticTokenModifiers fields are discovered via reflection when building Razor's semantic token legend.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
