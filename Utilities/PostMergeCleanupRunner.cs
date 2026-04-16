@@ -436,6 +436,12 @@ internal static class PostMergeCleanupRunner
             "Remove VisualStudioLanguageServerFeatureOptions unused using",
             "VisualStudioLanguageServerFeatureOptions fully qualifies Microsoft.VisualStudio.Shell.Package.GetGlobalService, so the extra using directive is redundant and should be removed rather than carrying an IDE0005 warning in Roslyn's stricter build.",
             RemoveVisualStudioLanguageServerFeatureOptionsUnusedUsingAsync),
+        new(
+            "remove-defaultlspdocumenttest-unused-moq-using",
+            "Remove the unused Moq using from DefaultLSPDocumentTest.",
+            "Remove DefaultLSPDocumentTest unused Moq using",
+            "DefaultLSPDocumentTest now uses StrictMock helpers from Razor's shared test infrastructure rather than Moq APIs directly, so the stale using should be removed instead of leaving IDE0005 warnings in Roslyn's test build.",
+            RemoveDefaultLSPDocumentTestUnusedMoqUsingAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2115,6 +2121,32 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(filePath, updatedContent, templatePath: filePath).ConfigureAwait(false);
         return $"Removed the unused Microsoft.VisualStudio.Shell using from '{Path.GetRelativePath(targetRepoRoot, filePath)}'.";
+    }
+
+    private static async Task<string> RemoveDefaultLSPDocumentTestUnusedMoqUsingAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var filePath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "test",
+            "Microsoft.VisualStudio.LanguageServer.ContainedLanguage.UnitTests",
+            "DefaultLSPDocumentTest.cs");
+
+        if (!File.Exists(filePath))
+            return "No DefaultLSPDocumentTest file was found for unused using cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace("using Moq;" + Environment.NewLine, string.Empty, StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No unused Moq using remained in DefaultLSPDocumentTest.";
+
+        await WriteTextPreservingUtf8BomAsync(filePath, updatedContent, templatePath: filePath).ConfigureAwait(false);
+        return $"Removed the unused Moq using from '{Path.GetRelativePath(targetRepoRoot, filePath)}'.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
