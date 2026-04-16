@@ -412,6 +412,12 @@ internal static class PostMergeCleanupRunner
             "Fix RoslynCodeActionHelpers RS0030",
             "Roslyn bans Project.AddDocument overloads that take raw strings because they lose encoding and checksum information. The merged tree should create SourceText with explicit UTF-8 and SHA-256 metadata and pass that to AddDocument instead.",
             FixRoslynCodeActionHelpersRS0030Async),
+        new(
+            "fix-snippetcache-ide0044",
+            "Make SnippetCache backing fields readonly.",
+            "Fix SnippetCache IDE0044",
+            "SnippetCache initializes its dictionary and lock once and only mutates their contents afterward, so the merged Roslyn tree can safely mark those fields readonly to satisfy IDE0044 without changing behavior.",
+            FixSnippetCacheIDE0044Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1924,6 +1930,41 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(roslynCodeActionHelpersPath, updatedContent, templatePath: roslynCodeActionHelpersPath).ConfigureAwait(false);
         return $"Updated '{Path.GetRelativePath(targetRepoRoot, roslynCodeActionHelpersPath)}' to add the temporary document from SourceText with explicit encoding and checksum metadata.";
+    }
+
+    private static async Task<string> FixSnippetCacheIDE0044Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var snippetCachePath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.LanguageServices.Razor",
+            "Snippets",
+            "SnippetCache.cs");
+
+        if (!File.Exists(snippetCachePath))
+            return "No SnippetCache.cs file was found for IDE0044 cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(snippetCachePath).ConfigureAwait(false);
+        var updatedContent = originalContent
+            .Replace(
+                "    private Dictionary<SnippetLanguage, ImmutableArray<SnippetInfo>> _snippetCache = new();",
+                "    private readonly Dictionary<SnippetLanguage, ImmutableArray<SnippetInfo>> _snippetCache = new();",
+                StringComparison.Ordinal)
+            .Replace(
+                "    private ReadWriterLocker _lock = new();",
+                "    private readonly ReadWriterLocker _lock = new();",
+                StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No SnippetCache IDE0044 cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(snippetCachePath, updatedContent, templatePath: snippetCachePath).ConfigureAwait(false);
+        return $"Marked the backing cache fields in '{Path.GetRelativePath(targetRepoRoot, snippetCachePath)}' as readonly for IDE0044 compliance.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
