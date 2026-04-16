@@ -334,6 +334,12 @@ internal static class PostMergeCleanupRunner
             "Remove Razor unused Moq using",
             "After the earlier Mock.Of cleanup, ViewCodeCommandHandlerTests no longer uses Moq directly, so Razor should remove the stale using directive instead of carrying an IDE0005 warning in the merged Roslyn tree.",
             RemoveRazorUnusedMoqUsingAsync),
+        new(
+            "rewrite-razor-pack-content-paths",
+            "Rewrite Razor pack content includes to consume Roslyn artifact outputs instead of relying on local OutDir and PublishDir copies.",
+            "Rewrite Razor pack content paths",
+            @"Roslyn's build layout keeps Razor project outputs under artifacts\bin instead of copying them into the local pack project's OutDir or PublishDir, so Razor pack projects should reference those artifact paths directly when packaging compiler and workspace binaries.",
+            RewriteRazorPackContentPathsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2052,6 +2058,55 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(testFilePath, updatedContent, templatePath: testFilePath).ConfigureAwait(false);
         return $"Removed the unused Moq using from '{Path.GetRelativePath(targetRepoRoot, testFilePath)}'.";
+    }
+
+    private static async Task<string> RewriteRazorPackContentPathsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var replacements = new (string Path, string OldText, string NewText)[]
+        {
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "tools", "Microsoft.CodeAnalysis.Razor.Tooling.Internal", "Microsoft.CodeAnalysis.Razor.Tooling.Internal.csproj"),
+                "    <Content Include=\"$(OutDir)Microsoft.CodeAnalysis.Razor.Compiler.dll\" PackagePath=\"lib\\$(TargetFramework)\" />" + Environment.NewLine +
+                "    <Content Include=\"$(OutDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll\" PackagePath=\"lib\\$(TargetFramework)\" />",
+                "    <Content Include=\"$(ArtifactsDir)bin\\Microsoft.CodeAnalysis.Razor.Compiler\\$(Configuration)\\$(TargetFramework)\\Microsoft.CodeAnalysis.Razor.Compiler.dll\" PackagePath=\"lib\\$(TargetFramework)\" />" + Environment.NewLine +
+                "    <Content Include=\"$(ArtifactsDir)bin\\Microsoft.AspNetCore.Razor.Utilities.Shared\\$(Configuration)\\$(TargetFramework)\\Microsoft.AspNetCore.Razor.Utilities.Shared.dll\" PackagePath=\"lib\\$(TargetFramework)\" />"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudioCode.RazorExtension", "Microsoft.VisualStudioCode.RazorExtension.csproj"),
+                "      <Content Include=\"$(PublishDir)\\Microsoft.AspNetCore.Razor.Utilities.Shared.dll\" Pack=\"true\" PackagePath=\"content\" CopyToOutputDirectory=\"PreserveNewest\" />" + Environment.NewLine +
+                "      <Content Include=\"$(PublishDir)\\Microsoft.CodeAnalysis.Razor.Compiler.dll\" Pack=\"true\" PackagePath=\"content\" CopyToOutputDirectory=\"PreserveNewest\" />" + Environment.NewLine +
+                "      <Content Include=\"$(PublishDir)\\Microsoft.CodeAnalysis.Razor.Workspaces.dll\" Pack=\"true\" PackagePath=\"content\" CopyToOutputDirectory=\"PreserveNewest\" />" + Environment.NewLine +
+                "      <Content Include=\"$(PublishDir)\\Microsoft.CodeAnalysis.Remote.Razor.dll\" Pack=\"true\" PackagePath=\"content\" CopyToOutputDirectory=\"PreserveNewest\" />",
+                "      <Content Include=\"$(ArtifactsDir)bin\\Microsoft.AspNetCore.Razor.Utilities.Shared\\$(Configuration)\\$(TargetFramework)\\Microsoft.AspNetCore.Razor.Utilities.Shared.dll\" Pack=\"true\" PackagePath=\"content\" CopyToOutputDirectory=\"PreserveNewest\" />" + Environment.NewLine +
+                "      <Content Include=\"$(ArtifactsDir)bin\\Microsoft.CodeAnalysis.Razor.Compiler\\$(Configuration)\\$(TargetFramework)\\Microsoft.CodeAnalysis.Razor.Compiler.dll\" Pack=\"true\" PackagePath=\"content\" CopyToOutputDirectory=\"PreserveNewest\" />" + Environment.NewLine +
+                "      <Content Include=\"$(ArtifactsDir)bin\\Microsoft.CodeAnalysis.Razor.Workspaces\\$(Configuration)\\$(TargetFramework)\\Microsoft.CodeAnalysis.Razor.Workspaces.dll\" Pack=\"true\" PackagePath=\"content\" CopyToOutputDirectory=\"PreserveNewest\" />" + Environment.NewLine +
+                "      <Content Include=\"$(ArtifactsDir)bin\\Microsoft.CodeAnalysis.Remote.Razor\\$(Configuration)\\$(TargetFramework)\\Microsoft.CodeAnalysis.Remote.Razor.dll\" Pack=\"true\" PackagePath=\"content\" CopyToOutputDirectory=\"PreserveNewest\" />"
+            ),
+        };
+
+        var changedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var replacementCount = 0;
+
+        foreach (var replacement in replacements)
+        {
+            if (!File.Exists(replacement.Path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(replacement.Path).ConfigureAwait(false);
+            var updatedContent = originalContent.Replace(replacement.OldText, replacement.NewText, StringComparison.Ordinal);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(replacement.Path, updatedContent, templatePath: replacement.Path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, replacement.Path));
+            replacementCount++;
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor pack content path rewrites were needed."
+            : $"Rewrote Razor pack content paths in {changedFiles.Count} file(s) to use Roslyn artifact outputs: {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
