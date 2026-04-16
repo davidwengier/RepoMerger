@@ -406,6 +406,12 @@ internal static class PostMergeCleanupRunner
             "Use FormattingOptions2 for Razor formatting",
             "Roslyn bans FormattingOptions in workspaces code, but FormattingOptions2 is not visible to Razor's workspaces layer. The merged tree should route the indent-style choice through a Razor-facing enum in the external-access bridge and convert to FormattingOptions2 inside that bridge.",
             UseFormattingOptions2ForRazorFormattingAsync),
+        new(
+            "fix-roslyn-codeactionhelpers-rs0030",
+            "Use SourceText when creating the temporary document in RoslynCodeActionHelpers.",
+            "Fix RoslynCodeActionHelpers RS0030",
+            "Roslyn bans Project.AddDocument overloads that take raw strings because they lose encoding and checksum information. The merged tree should create SourceText with explicit UTF-8 and SHA-256 metadata and pass that to AddDocument instead.",
+            FixRoslynCodeActionHelpersRS0030Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1866,6 +1872,58 @@ internal static class PostMergeCleanupRunner
             return "No Razor FormattingOptions2 cleanup changes were needed.";
 
         return $"Switched Razor's C# formatting path to use a Razor-facing indent-style wrapper that bridges to FormattingOptions2 in {string.Join(" and ", changedPaths.Select(path => $"'{path}'"))}.";
+    }
+
+    private static async Task<string> FixRoslynCodeActionHelpersRS0030Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var roslynCodeActionHelpersPath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Remote.Razor",
+            "CodeActions",
+            "RoslynCodeActionHelpers.cs");
+
+        if (!File.Exists(roslynCodeActionHelpersPath))
+            return "No RoslynCodeActionHelpers.cs file was found for RS0030 cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(roslynCodeActionHelpersPath).ConfigureAwait(false);
+        var updatedContent = originalContent;
+
+        if (!updatedContent.Contains("using System.Text;", StringComparison.Ordinal))
+        {
+            updatedContent = updatedContent.Replace(
+                "using System.Linq;" + Environment.NewLine,
+                "using System.Linq;" + Environment.NewLine + "using System.Text;" + Environment.NewLine,
+                StringComparison.Ordinal);
+        }
+
+        if (!updatedContent.Contains("using Microsoft.CodeAnalysis.Text;", StringComparison.Ordinal))
+        {
+            updatedContent = updatedContent.Replace(
+                "using Microsoft.CodeAnalysis.Remote.Razor.ProjectSystem;" + Environment.NewLine,
+                "using Microsoft.CodeAnalysis.Remote.Razor.ProjectSystem;" + Environment.NewLine + "using Microsoft.CodeAnalysis.Text;" + Environment.NewLine,
+                StringComparison.Ordinal);
+        }
+
+        updatedContent = updatedContent.Replace(
+            "        var document = project.AddDocument(RazorUri.GetDocumentFilePathFromUri(csharpFileUri), newFileContent);" + Environment.NewLine + Environment.NewLine +
+            "        return ExternalHandlers.CodeActions.GetFormattedNewFileContentAsync(document, cancellationToken);",
+            "        var filePath = RazorUri.GetDocumentFilePathFromUri(csharpFileUri);" + Environment.NewLine +
+            "        var source = SourceText.From(newFileContent, Encoding.UTF8, checksumAlgorithm: SourceHashAlgorithm.Sha256);" + Environment.NewLine +
+            "        var document = project.AddDocument(filePath, source, filePath: filePath);" + Environment.NewLine + Environment.NewLine +
+            "        return ExternalHandlers.CodeActions.GetFormattedNewFileContentAsync(document, cancellationToken);",
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No RoslynCodeActionHelpers RS0030 cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(roslynCodeActionHelpersPath, updatedContent, templatePath: roslynCodeActionHelpersPath).ConfigureAwait(false);
+        return $"Updated '{Path.GetRelativePath(targetRepoRoot, roslynCodeActionHelpersPath)}' to add the temporary document from SourceText with explicit encoding and checksum metadata.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
