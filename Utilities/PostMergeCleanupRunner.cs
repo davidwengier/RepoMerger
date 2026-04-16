@@ -316,6 +316,12 @@ internal static class PostMergeCleanupRunner
             "Normalize Razor Mock.Of strict usage",
             @"Roslyn bans Mock.Of<T> convenience calls unless MockBehavior.Strict is explicit, so Razor test code in the merged tree should use explicit strict Mock and MockRepository constructs instead of the loose Mock.Of overloads.",
             NormalizeRazorMockOfStrictnessAsync),
+        new(
+            "fix-razor-xunit2031-assertsingle-where",
+            "Rewrite Razor Assert.Single(...Where(...)) usages to xUnit's predicate overload.",
+            "Fix Razor xUnit2031 Assert.Single usage",
+            "Roslyn's shared xUnit analyzers flag Assert.Single calls that filter with Where first, so Razor tests should use Assert.Single's predicate overload directly instead of materializing a filtered sequence.",
+            FixRazorXunit2031AssertSingleWhereAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1898,6 +1904,67 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor Mock.Of strictness rewrites were needed."
             : $"Rewrote {rewrittenCallCount} Razor Mock.Of call(s) in {changedFiles.Count} file(s) to use explicit strict Moq constructs: {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> FixRazorXunit2031AssertSingleWhereAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var replacements = new (string Path, string OldText, string NewText)[]
+        {
+            (
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.Workspaces.UnitTests", "Utilities", "MemoryCacheTest.cs"),
+                "Assert.Single(keys.Where(key => cache.TryGetValue(key, out _)));",
+                "Assert.Single(keys, key => cache.TryGetValue(key, out _));"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Endpoints", "CohostFindAllReferencesEndpointTest.cs"),
+                "Assert.Single(input.Spans.Where(s => inputText.GetRange(s).Equals(location.Range)));",
+                "Assert.Single(input.Spans, s => inputText.GetRange(s).Equals(location.Range));"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Endpoints", "CohostFindAllReferencesEndpointTest.cs"),
+                "var (fileName, testCode) = Assert.Single(additionalFiles.Where(f => FilePathNormalizingComparer.Instance.Equals(f.fileName, location.DocumentUri.GetRequiredParsedUri().AbsolutePath)));",
+                "var (fileName, testCode) = Assert.Single(additionalFiles, f => FilePathNormalizingComparer.Instance.Equals(f.fileName, location.DocumentUri.GetRequiredParsedUri().AbsolutePath));"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Endpoints", "CohostFindAllReferencesEndpointTest.cs"),
+                "Assert.Single(testCode.Spans.Where(s => text.GetRange(s).Equals(location.Range)));",
+                "Assert.Single(testCode.Spans, s => text.GetRange(s).Equals(location.Range));"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Endpoints", "CohostDocumentCompletionEndpointTest.cs"),
+                "var item = Assert.Single(result.Items.Where(i => i.Label == itemToResolve));",
+                "var item = Assert.Single(result.Items, i => i.Label == itemToResolve);"
+            ),
+            (
+                Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test", "RazorSyntaxTreeTest.cs"),
+                "Assert.Single(root.DescendantNodes().OfType<RazorDirectiveBodySyntax>().Where(body => body.Keyword.GetContent() == \"tagHelperPrefix\"));",
+                "Assert.Single(root.DescendantNodes().OfType<RazorDirectiveBodySyntax>(), body => body.Keyword.GetContent() == \"tagHelperPrefix\");"
+            ),
+        };
+
+        var changedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var replacementCount = 0;
+
+        foreach (var replacement in replacements)
+        {
+            if (!File.Exists(replacement.Path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(replacement.Path).ConfigureAwait(false);
+            var updatedContent = originalContent.Replace(replacement.OldText, replacement.NewText, StringComparison.Ordinal);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(replacement.Path, updatedContent, templatePath: replacement.Path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, replacement.Path));
+            replacementCount++;
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor xUnit2031 Assert.Single rewrites were needed."
+            : $"Rewrote {replacementCount} Razor Assert.Single(...Where(...)) call(s) in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
