@@ -346,6 +346,12 @@ internal static class PostMergeCleanupRunner
             "Ensure Razor CODEOWNERS ownership",
             "Standalone Razor routes src/Razor changes to @dotnet/razor-tooling, and the merged Roslyn tree should preserve that reviewer ownership in .github\\CODEOWNERS so Razor changes still request the correct team.",
             EnsureRazorCodeOwnersAsync),
+        new(
+            "copy-razor-skills",
+            "Copy selected Razor Copilot skills into Roslyn's .github\\skills tree and rewrite them for the merged layout.",
+            "Copy Razor skills into Roslyn",
+            "Razor carries repo-local Copilot skills for toolset validation and formatting-log investigations, and the merged Roslyn tree should preserve those workflows under .github\\skills with their paths rewritten to Roslyn's nested src\\Razor layout and RepoMerger source-checkout workflow.",
+            CopyRazorSkillsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1903,6 +1909,138 @@ internal static class PostMergeCleanupRunner
 
         return @"Updated .github\CODEOWNERS so src\Razor is owned by @dotnet/razor-tooling.";
     }
+
+    private static async Task<string> CopyRazorSkillsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var sourceSkillsRoot = Path.Combine(context.State.SourceCloneDirectory, ".github", "skills");
+        var changedFiles = new List<string>();
+
+        foreach (var skillName in ImportedRazorSkillNames)
+        {
+            var skillChanged = await SyncImportedRazorSkillAsync(
+                targetRepoRoot,
+                sourceSkillsRoot,
+                skillName,
+                changedFiles).ConfigureAwait(false);
+            if (!skillChanged)
+                continue;
+
+            await GitRunner.RunGitAsync(
+                targetRepoRoot,
+                "add",
+                "--",
+                Path.Combine(".github", "skills", skillName)).ConfigureAwait(false);
+        }
+
+        return changedFiles.Count == 0
+            ? @"No Razor skill copy changes were needed."
+            : $"Copied Razor skill updates into {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<bool> SyncImportedRazorSkillAsync(
+        string targetRepoRoot,
+        string sourceSkillsRoot,
+        string skillName,
+        List<string> changedFiles)
+    {
+        var sourceSkillRoot = Path.Combine(sourceSkillsRoot, skillName);
+        if (!Directory.Exists(sourceSkillRoot))
+        {
+            throw new InvalidOperationException(
+                $"Expected Razor skill directory at '{sourceSkillRoot}', but it was not found in the preserved source checkout.");
+        }
+
+        var targetSkillRoot = Path.Combine(targetRepoRoot, ".github", "skills", skillName);
+        Directory.CreateDirectory(targetSkillRoot);
+
+        var skillChanged = false;
+        foreach (var sourcePath in Directory.EnumerateFiles(sourceSkillRoot, "*", SearchOption.AllDirectories))
+        {
+            var skillRelativePath = Path.GetRelativePath(sourceSkillRoot, sourcePath);
+            var targetPath = Path.Combine(targetSkillRoot, skillRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+
+            var changed = await CopyImportedRazorSkillFileAsync(
+                sourcePath,
+                targetPath,
+                skillName,
+                skillRelativePath).ConfigureAwait(false);
+            if (!changed)
+                continue;
+
+            skillChanged = true;
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, targetPath));
+        }
+
+        return skillChanged;
+    }
+
+    private static async Task<bool> CopyImportedRazorSkillFileAsync(
+        string sourcePath,
+        string targetPath,
+        string skillName,
+        string skillRelativePath)
+    {
+        var normalizedSkillRelativePath = skillRelativePath.Replace('\\', '/');
+        if (ShouldRewriteImportedRazorSkillFile(normalizedSkillRelativePath))
+        {
+            var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
+            var rewrittenContent = RewriteImportedRazorSkillContent(skillName, normalizedSkillRelativePath, sourceContent);
+            var targetContent = File.Exists(targetPath)
+                ? await File.ReadAllTextAsync(targetPath).ConfigureAwait(false)
+                : null;
+            if (string.Equals(rewrittenContent, targetContent, StringComparison.Ordinal))
+                return false;
+
+            await WriteTextPreservingUtf8BomAsync(targetPath, rewrittenContent, templatePath: sourcePath).ConfigureAwait(false);
+            return true;
+        }
+
+        return await CopyFileIfDifferentAsync(sourcePath, targetPath).ConfigureAwait(false);
+    }
+
+    private static bool ShouldRewriteImportedRazorSkillFile(string skillRelativePath)
+        => skillRelativePath.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
+            || skillRelativePath.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase);
+
+    private static string RewriteImportedRazorSkillContent(string skillName, string skillRelativePath, string content)
+        => skillName switch
+        {
+            "formatting-log" => RewriteFormattingLogSkillContent(content),
+            "run-toolset-tests" when string.Equals(skillRelativePath, "SKILL.md", StringComparison.OrdinalIgnoreCase)
+                => RewriteRunToolsetTestsSkillContent(content),
+            _ => content
+        };
+
+    private static string RewriteFormattingLogSkillContent(string content)
+        => content
+            .Replace(
+                @"src\Razor\test\Microsoft.VisualStudio.LanguageServices.Razor.Test",
+                @"src\Razor\src\Razor\test\Microsoft.VisualStudio.LanguageServices.Razor.UnitTests",
+                StringComparison.Ordinal)
+            .Replace(
+                "Microsoft.VisualStudio.LanguageServices.Razor.Test.csproj",
+                "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests.csproj",
+                StringComparison.Ordinal)
+            .Replace(
+                @"src\Razor\test\Microsoft.CodeAnalysis.Razor.CohostingShared.Test",
+                @"src\Razor\src\Razor\test\Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests",
+                StringComparison.Ordinal);
+
+    private static string RewriteRunToolsetTestsSkillContent(string content)
+        => content
+            .Replace("`dotnet/razor`", "`dotnet/roslyn`", StringComparison.Ordinal)
+            .Replace("https://github.com/dotnet/razor.git", "https://github.com/dotnet/roslyn.git", StringComparison.Ordinal)
+            .Replace("github.com/dotnet/razor", "github.com/dotnet/roslyn", StringComparison.Ordinal)
+            .Replace(
+                "1. Builds `Microsoft.Net.Compilers.Razor.Toolset` from the Razor repo",
+                "1. Builds `Microsoft.Net.Compilers.Razor.Toolset` from the merged Roslyn repo",
+                StringComparison.Ordinal)
+            .Replace(
+                "- Confirm we're in the razor repository (look for `src/Compiler` or check git remotes).",
+                "- Confirm we're in the merged Roslyn repository (look for `src/Razor/src/Compiler` or check git remotes).",
+                StringComparison.Ordinal);
 
     private static async Task<string> NormalizeRazorUnitTestDetectionAsync(StageContext context)
     {
@@ -5748,6 +5886,12 @@ public class SurveyPrompt : ComponentBase
     private static readonly Regex BareGetGlobalServicePattern = new(
         @"(?<![\w.])Package\.GetGlobalService\(",
         RegexOptions.CultureInvariant);
+
+    private static readonly string[] ImportedRazorSkillNames =
+    [
+        "run-toolset-tests",
+        "formatting-log",
+    ];
 
     private const string RazorCodeOwnersPath = "src/Razor/";
     private const string RazorCodeOwnersEntry = "src/Razor/ @dotnet/razor-tooling";
