@@ -340,6 +340,12 @@ internal static class PostMergeCleanupRunner
             "Rewrite Razor pack content paths",
             @"Roslyn's build layout keeps Razor project outputs under artifacts\bin instead of copying them into the local pack project's OutDir or PublishDir, so Razor pack projects should reference those artifact paths directly when packaging compiler and workspace binaries.",
             RewriteRazorPackContentPathsAsync),
+        new(
+            "move-razor-shipping-symbol-packages",
+            "Move Razor shipping .symbols.nupkg files out of the Shipping package directory before Roslyn's release repack runs.",
+            "Move Razor shipping symbols packages",
+            @"Roslyn's release-packaging pass repacks every *.nupkg in the Shipping package directory after build.cmd -pack, so Razor's legacy .symbols.nupkg files should be moved aside after pack instead of colliding with the release repack step.",
+            MoveRazorShippingSymbolPackagesAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2107,6 +2113,58 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor pack content path rewrites were needed."
             : $"Rewrote Razor pack content paths in {changedFiles.Count} file(s) to use Roslyn artifact outputs: {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> MoveRazorShippingSymbolPackagesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var directoryBuildTargetsPath = Path.Combine(targetRoot, "Directory.Build.targets");
+        if (!File.Exists(directoryBuildTargetsPath))
+            return "No Razor root Directory.Build.targets file was found for shipping symbols cleanup.";
+
+        var targetBlock = string.Join(
+            Environment.NewLine,
+            [
+                "  <Target Name=\"MoveRazorShippingSymbolsPackageToNonShipping\" AfterTargets=\"Pack\" Condition=\"'$(IsPackable)' == 'true' and '$(PackageOutputPath)' != '' and $([System.String]::Copy('$(PackageOutputPath)').Contains('\\Shipping\\'))\">",
+                "    <ItemGroup>",
+                "      <_RazorShippingSymbolsPackage Include=\"$(PackageOutputPath)$(PackageId).$(PackageVersion).symbols.nupkg\"",
+                "                                   Condition=\"Exists('$(PackageOutputPath)$(PackageId).$(PackageVersion).symbols.nupkg')\" />",
+                "      <_MovedRazorShippingSymbolsPackage Include=\"@(_RazorShippingSymbolsPackage)\">",
+                "        <TargetPath>$(ArtifactsNonShippingPackagesDir)%(_RazorShippingSymbolsPackage.Filename)%(_RazorShippingSymbolsPackage.Extension)</TargetPath>",
+                "      </_MovedRazorShippingSymbolsPackage>",
+                "    </ItemGroup>",
+                "    <Delete Files=\"@(_MovedRazorShippingSymbolsPackage->'%(TargetPath)')\" Condition=\"'@(_MovedRazorShippingSymbolsPackage)' != ''\" />",
+                "    <Move SourceFiles=\"@(_RazorShippingSymbolsPackage)\"",
+                "          DestinationFiles=\"@(_MovedRazorShippingSymbolsPackage->'%(TargetPath)')\"",
+                "          Condition=\"'@(_RazorShippingSymbolsPackage)' != ''\">",
+                "      <Output TaskParameter=\"DestinationFiles\" ItemName=\"_FilesWritten\" />",
+                "    </Move>",
+                "  </Target>",
+            ]) + Environment.NewLine;
+
+        var anchor = string.Join(
+            Environment.NewLine,
+            [
+                "  <PropertyGroup>",
+                "    <PackageVersion Condition=\" '$(PackageVersion)' == '' \">$(Version)</PackageVersion>",
+                "  </PropertyGroup>",
+            ]);
+
+        var originalContent = await File.ReadAllTextAsync(directoryBuildTargetsPath).ConfigureAwait(false);
+        if (originalContent.Contains("MoveRazorShippingSymbolsPackageToNonShipping", StringComparison.Ordinal))
+            return "No Razor shipping symbols package move was needed.";
+
+        var updatedContent = originalContent.Replace(
+            anchor,
+            anchor + Environment.NewLine + Environment.NewLine + targetBlock.TrimEnd('\r', '\n'),
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor shipping symbols package move was needed.";
+
+        await WriteTextPreservingUtf8BomAsync(directoryBuildTargetsPath, updatedContent, templatePath: directoryBuildTargetsPath).ConfigureAwait(false);
+        return $"Added a shipping symbols package move target to '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}'.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
