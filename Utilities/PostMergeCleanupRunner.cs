@@ -388,6 +388,12 @@ internal static class PostMergeCleanupRunner
             "Fix RazorFormattingService CA1802",
             "RazorFormattingService.FirstTriggerCharacter is a simple string literal used as a trigger-character value, so the merged Roslyn tree can safely make it const to satisfy CA1802 without changing behavior.",
             FixRazorFormattingServiceCA1802Async),
+        new(
+            "suppress-semantic-token-types-ca1802",
+            "Suppress CA1802 in SemanticTokenTypes.cs so reflection-based field discovery keeps working.",
+            "Suppress SemanticTokenTypes CA1802",
+            "AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over SemanticTokenTypes' non-public static fields, so the merged Roslyn tree should suppress CA1802 in that file instead of converting those fields to const and changing the reflected field set.",
+            SuppressSemanticTokenTypesCA1802Async),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1682,6 +1688,44 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(razorFormattingServicePath, updatedContent, templatePath: razorFormattingServicePath).ConfigureAwait(false);
         return $"Rewrote '{Path.GetRelativePath(targetRepoRoot, razorFormattingServicePath)}' to use a const trigger-character field for CA1802 compliance.";
+    }
+
+    private static async Task<string> SuppressSemanticTokenTypesCA1802Async(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var semanticTokenTypesPath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Razor.Workspaces",
+            "SemanticTokens",
+            "SemanticTokenTypes.cs");
+
+        if (!File.Exists(semanticTokenTypesPath))
+            return "No SemanticTokenTypes.cs file was found for CA1802 suppression.";
+
+        var originalContent = await File.ReadAllTextAsync(semanticTokenTypesPath).ConfigureAwait(false);
+        if (originalContent.Contains("#pragma warning disable CA1802", StringComparison.Ordinal))
+            return "No SemanticTokenTypes CA1802 suppression changes were needed.";
+
+        var usingIndex = originalContent.IndexOf("using ", StringComparison.Ordinal);
+        if (usingIndex < 0)
+            return "No SemanticTokenTypes using-directive anchor was found for CA1802 suppression.";
+
+        var pragmaBlock = string.Join(
+            Environment.NewLine,
+            [
+                "// AbstractRazorSemanticTokensLegendService.GetStaticFieldValues reflects over",
+                "// SemanticTokenTypes' static fields, so they must remain fields instead of consts.",
+                "#pragma warning disable CA1802",
+            ]) + Environment.NewLine + Environment.NewLine;
+        var updatedContent = originalContent.Insert(usingIndex, pragmaBlock);
+
+        await WriteTextPreservingUtf8BomAsync(semanticTokenTypesPath, updatedContent, templatePath: semanticTokenTypesPath).ConfigureAwait(false);
+        return $"Suppressed CA1802 in '{Path.GetRelativePath(targetRepoRoot, semanticTokenTypesPath)}' because SemanticTokenTypes fields are discovered via reflection when building Razor's semantic token legend.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
