@@ -310,6 +310,12 @@ internal static class PostMergeCleanupRunner
             "Remove duplicate Razor Moq banned-symbol entry",
             @"Roslyn already bans the Moq.Mock<T> constructor through its shared test banned-symbol list, so Razor's local src\Razor\BannedSymbols.txt overlay should drop the duplicate entry to avoid RS0031 duplicate banned API warnings.",
             RemoveDuplicateRazorBannedMoqConstructorAsync),
+        new(
+            "normalize-razor-mockof-strictness",
+            "Rewrite Razor Mock.Of(...) calls to explicit strict Moq constructs that satisfy Roslyn's banned-symbol policy.",
+            "Normalize Razor Mock.Of strict usage",
+            @"Roslyn bans Mock.Of<T> convenience calls unless MockBehavior.Strict is explicit, so Razor test code in the merged tree should use explicit strict Mock and MockRepository constructs instead of the loose Mock.Of overloads.",
+            NormalizeRazorMockOfStrictnessAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1868,6 +1874,30 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(bannedSymbolsPath, updatedContent, templatePath: bannedSymbolsPath).ConfigureAwait(false);
         return $"Removed Razor's duplicate Moq constructor banned-symbol entry from '{Path.GetRelativePath(targetRepoRoot, bannedSymbolsPath)}'.";
+    }
+
+    private static async Task<string> NormalizeRazorMockOfStrictnessAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+        var rewrittenCallCount = 0;
+
+        foreach (var path in Directory.EnumerateFiles(targetRoot, "*.cs", SearchOption.AllDirectories))
+        {
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var (updatedContent, replacementCount) = RewriteMockOfCallsWithExplicitStrictness(originalContent);
+            if (replacementCount == 0)
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+            rewrittenCallCount += replacementCount;
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor Mock.Of strictness rewrites were needed."
+            : $"Rewrote {rewrittenCallCount} Razor Mock.Of call(s) in {changedFiles.Count} file(s) to use explicit strict Moq constructs: {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
@@ -3550,6 +3580,446 @@ public class SurveyPrompt : ComponentBase
         }
 
         return content;
+    }
+
+    private static (string UpdatedContent, int ReplacementCount) RewriteMockOfCallsWithExplicitStrictness(string content)
+    {
+        var builder = new StringBuilder(content.Length);
+        var replacementCount = 0;
+        var copyStart = 0;
+        var searchIndex = 0;
+
+        while (TryFindNextMockOfCallToRewrite(content, searchIndex, out var invocationStart, out var invocationEnd, out var replacement))
+        {
+            builder.Append(content, copyStart, invocationStart - copyStart);
+            builder.Append(replacement);
+            copyStart = invocationEnd;
+            searchIndex = invocationEnd;
+            replacementCount++;
+        }
+
+        if (replacementCount == 0)
+            return (content, 0);
+
+        builder.Append(content, copyStart, content.Length - copyStart);
+        return (builder.ToString(), replacementCount);
+    }
+
+    private static bool TryFindNextMockOfCallToRewrite(
+        string content,
+        int startIndex,
+        out int invocationStart,
+        out int invocationEnd,
+        out string replacement)
+    {
+        const string token = "Mock.Of<";
+
+        for (var candidateIndex = content.IndexOf(token, startIndex, StringComparison.Ordinal);
+             candidateIndex >= 0;
+             candidateIndex = content.IndexOf(token, candidateIndex + 1, StringComparison.Ordinal))
+        {
+            if (candidateIndex > 0)
+            {
+                var precedingCharacter = content[candidateIndex - 1];
+                if (char.IsLetterOrDigit(precedingCharacter) || precedingCharacter is '_' or '.' or ':')
+                    continue;
+            }
+
+            if (!TryFindMatchingDelimiter(content, candidateIndex + token.Length - 1, '<', '>', out var typeCloseIndex))
+                continue;
+
+            var typeStartIndex = candidateIndex + token.Length;
+            var currentIndex = typeCloseIndex + 1;
+            while (currentIndex < content.Length && char.IsWhiteSpace(content[currentIndex]))
+                currentIndex++;
+
+            if (currentIndex >= content.Length || content[currentIndex] != '(')
+                continue;
+
+            if (!TryFindMatchingDelimiter(content, currentIndex, '(', ')', out var invocationCloseIndex))
+                continue;
+
+            var argumentsText = content[(currentIndex + 1)..invocationCloseIndex];
+            if (!TrySplitTopLevelArguments(argumentsText, out var arguments))
+                continue;
+
+            var typeArguments = content[typeStartIndex..typeCloseIndex];
+            if (!TryBuildMockOfReplacement(typeArguments, arguments, out replacement))
+                continue;
+
+            invocationStart = candidateIndex;
+            invocationEnd = invocationCloseIndex + 1;
+            return true;
+        }
+
+        invocationStart = -1;
+        invocationEnd = -1;
+        replacement = string.Empty;
+        return false;
+    }
+
+    private static bool TryBuildMockOfReplacement(string typeArguments, IReadOnlyList<string> arguments, out string replacement)
+    {
+        switch (arguments.Count)
+        {
+            case 0:
+                replacement = $"new Mock<{typeArguments}>(MockBehavior.Strict).Object";
+                return true;
+
+            case 1:
+                if (string.Equals(arguments[0].Trim(), "MockBehavior.Strict", StringComparison.Ordinal))
+                {
+                    replacement = $"new Mock<{typeArguments}>(MockBehavior.Strict).Object";
+                    return true;
+                }
+
+                replacement = $"new MockRepository(MockBehavior.Strict).OneOf<{typeArguments}>({arguments[0]})";
+                return true;
+
+            case 2:
+                if (string.Equals(arguments[1].Trim(), "MockBehavior.Strict", StringComparison.Ordinal))
+                {
+                    replacement = $"new MockRepository(MockBehavior.Strict).OneOf<{typeArguments}>({arguments[0]})";
+                    return true;
+                }
+
+                break;
+        }
+
+        replacement = string.Empty;
+        return false;
+    }
+
+    private static bool TryFindMatchingDelimiter(string content, int openIndex, char openDelimiter, char closeDelimiter, out int closeIndex)
+    {
+        var delimiterDepth = 0;
+        var inSingleLineComment = false;
+        var inMultiLineComment = false;
+        var inString = false;
+        var inCharLiteral = false;
+        var isVerbatimString = false;
+
+        for (var i = openIndex; i < content.Length; i++)
+        {
+            var currentCharacter = content[i];
+            var nextCharacter = i + 1 < content.Length ? content[i + 1] : '\0';
+
+            if (inSingleLineComment)
+            {
+                if (currentCharacter is '\r' or '\n')
+                    inSingleLineComment = false;
+
+                continue;
+            }
+
+            if (inMultiLineComment)
+            {
+                if (currentCharacter == '*' && nextCharacter == '/')
+                {
+                    inMultiLineComment = false;
+                    i++;
+                }
+
+                continue;
+            }
+
+            if (inString)
+            {
+                if (isVerbatimString)
+                {
+                    if (currentCharacter == '"' && nextCharacter == '"')
+                    {
+                        i++;
+                        continue;
+                    }
+
+                    if (currentCharacter == '"')
+                    {
+                        inString = false;
+                        isVerbatimString = false;
+                    }
+
+                    continue;
+                }
+
+                if (currentCharacter == '\\')
+                {
+                    i++;
+                    continue;
+                }
+
+                if (currentCharacter == '"')
+                    inString = false;
+
+                continue;
+            }
+
+            if (inCharLiteral)
+            {
+                if (currentCharacter == '\\')
+                {
+                    i++;
+                    continue;
+                }
+
+                if (currentCharacter == '\'')
+                    inCharLiteral = false;
+
+                continue;
+            }
+
+            if (currentCharacter == '/' && nextCharacter == '/')
+            {
+                inSingleLineComment = true;
+                i++;
+                continue;
+            }
+
+            if (currentCharacter == '/' && nextCharacter == '*')
+            {
+                inMultiLineComment = true;
+                i++;
+                continue;
+            }
+
+            if (currentCharacter == '@' && nextCharacter == '"')
+            {
+                inString = true;
+                isVerbatimString = true;
+                i++;
+                continue;
+            }
+
+            if ((currentCharacter == '$' && nextCharacter == '"')
+                || (currentCharacter == '$' && nextCharacter == '@' && i + 2 < content.Length && content[i + 2] == '"')
+                || (currentCharacter == '@' && nextCharacter == '$' && i + 2 < content.Length && content[i + 2] == '"'))
+            {
+                inString = true;
+                isVerbatimString = currentCharacter == '@' || nextCharacter == '@';
+                if (i + 2 < content.Length && content[i + 2] == '"')
+                    i += 2;
+                else
+                    i++;
+
+                continue;
+            }
+
+            if (currentCharacter == '"')
+            {
+                inString = true;
+                isVerbatimString = false;
+                continue;
+            }
+
+            if (currentCharacter == '\'')
+            {
+                inCharLiteral = true;
+                continue;
+            }
+
+            if (currentCharacter == openDelimiter)
+            {
+                delimiterDepth++;
+                continue;
+            }
+
+            if (currentCharacter != closeDelimiter)
+                continue;
+
+            delimiterDepth--;
+            if (delimiterDepth == 0)
+            {
+                closeIndex = i;
+                return true;
+            }
+        }
+
+        closeIndex = -1;
+        return false;
+    }
+
+    private static bool TrySplitTopLevelArguments(string argumentsText, out List<string> arguments)
+    {
+        arguments = [];
+
+        var segmentStart = 0;
+        var parenthesisDepth = 0;
+        var angleDepth = 0;
+        var bracketDepth = 0;
+        var braceDepth = 0;
+        var inSingleLineComment = false;
+        var inMultiLineComment = false;
+        var inString = false;
+        var inCharLiteral = false;
+        var isVerbatimString = false;
+
+        for (var i = 0; i < argumentsText.Length; i++)
+        {
+            var currentCharacter = argumentsText[i];
+            var nextCharacter = i + 1 < argumentsText.Length ? argumentsText[i + 1] : '\0';
+
+            if (inSingleLineComment)
+            {
+                if (currentCharacter is '\r' or '\n')
+                    inSingleLineComment = false;
+
+                continue;
+            }
+
+            if (inMultiLineComment)
+            {
+                if (currentCharacter == '*' && nextCharacter == '/')
+                {
+                    inMultiLineComment = false;
+                    i++;
+                }
+
+                continue;
+            }
+
+            if (inString)
+            {
+                if (isVerbatimString)
+                {
+                    if (currentCharacter == '"' && nextCharacter == '"')
+                    {
+                        i++;
+                        continue;
+                    }
+
+                    if (currentCharacter == '"')
+                    {
+                        inString = false;
+                        isVerbatimString = false;
+                    }
+
+                    continue;
+                }
+
+                if (currentCharacter == '\\')
+                {
+                    i++;
+                    continue;
+                }
+
+                if (currentCharacter == '"')
+                    inString = false;
+
+                continue;
+            }
+
+            if (inCharLiteral)
+            {
+                if (currentCharacter == '\\')
+                {
+                    i++;
+                    continue;
+                }
+
+                if (currentCharacter == '\'')
+                    inCharLiteral = false;
+
+                continue;
+            }
+
+            if (currentCharacter == '/' && nextCharacter == '/')
+            {
+                inSingleLineComment = true;
+                i++;
+                continue;
+            }
+
+            if (currentCharacter == '/' && nextCharacter == '*')
+            {
+                inMultiLineComment = true;
+                i++;
+                continue;
+            }
+
+            if (currentCharacter == '@' && nextCharacter == '"')
+            {
+                inString = true;
+                isVerbatimString = true;
+                i++;
+                continue;
+            }
+
+            if ((currentCharacter == '$' && nextCharacter == '"')
+                || (currentCharacter == '$' && nextCharacter == '@' && i + 2 < argumentsText.Length && argumentsText[i + 2] == '"')
+                || (currentCharacter == '@' && nextCharacter == '$' && i + 2 < argumentsText.Length && argumentsText[i + 2] == '"'))
+            {
+                inString = true;
+                isVerbatimString = currentCharacter == '@' || nextCharacter == '@';
+                if (i + 2 < argumentsText.Length && argumentsText[i + 2] == '"')
+                    i += 2;
+                else
+                    i++;
+
+                continue;
+            }
+
+            switch (currentCharacter)
+            {
+                case '"':
+                    inString = true;
+                    isVerbatimString = false;
+                    continue;
+
+                case '\'':
+                    inCharLiteral = true;
+                    continue;
+
+                case '(':
+                    parenthesisDepth++;
+                    continue;
+
+                case ')':
+                    parenthesisDepth--;
+                    continue;
+
+                case '<':
+                    angleDepth++;
+                    continue;
+
+                case '>':
+                    angleDepth = Math.Max(0, angleDepth - 1);
+                    continue;
+
+                case '[':
+                    bracketDepth++;
+                    continue;
+
+                case ']':
+                    bracketDepth--;
+                    continue;
+
+                case '{':
+                    braceDepth++;
+                    continue;
+
+                case '}':
+                    braceDepth--;
+                    continue;
+
+                case ',' when parenthesisDepth == 0 && angleDepth == 0 && bracketDepth == 0 && braceDepth == 0:
+                    arguments.Add(argumentsText[segmentStart..i]);
+                    segmentStart = i + 1;
+                    continue;
+            }
+        }
+
+        if (parenthesisDepth != 0 || bracketDepth != 0 || braceDepth != 0)
+            return false;
+
+        if (angleDepth < 0)
+            return false;
+
+        var trailingSegment = argumentsText[segmentStart..];
+        if (arguments.Count == 0 && string.IsNullOrWhiteSpace(trailingSegment))
+            return true;
+
+        arguments.Add(trailingSegment);
+        return true;
     }
 
     private static string RemoveUnusedProjectSystemSubscriptionService(string content)
