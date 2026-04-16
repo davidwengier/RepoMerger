@@ -430,6 +430,12 @@ internal static class PostMergeCleanupRunner
             "Fix RenameProjectTreeHandler.WaitIndicator IDE0044",
             "WaitIndicator assigns its message once during construction and only reads it afterward when starting the dialog, so the merged Roslyn tree can safely mark that field readonly to satisfy IDE0044 without changing behavior.",
             FixRenameProjectTreeWaitIndicatorIDE0044Async),
+        new(
+            "remove-visualstudio-languageserver-featureoptions-unused-using",
+            "Remove the unused Microsoft.VisualStudio.Shell using from VisualStudioLanguageServerFeatureOptions.",
+            "Remove VisualStudioLanguageServerFeatureOptions unused using",
+            "VisualStudioLanguageServerFeatureOptions fully qualifies Microsoft.VisualStudio.Shell.Package.GetGlobalService, so the extra using directive is redundant and should be removed rather than carrying an IDE0005 warning in Roslyn's stricter build.",
+            RemoveVisualStudioLanguageServerFeatureOptionsUnusedUsingAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2083,6 +2089,32 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(waitIndicatorPath, updatedContent, templatePath: waitIndicatorPath).ConfigureAwait(false);
         return $"Marked the message field in '{Path.GetRelativePath(targetRepoRoot, waitIndicatorPath)}' as readonly for IDE0044 compliance.";
+    }
+
+    private static async Task<string> RemoveVisualStudioLanguageServerFeatureOptionsUnusedUsingAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var filePath = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Razor",
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.LanguageServices.Razor",
+            "VisualStudioLanguageServerFeatureOptions.cs");
+
+        if (!File.Exists(filePath))
+            return "No VisualStudioLanguageServerFeatureOptions file was found for unused using cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace("using Microsoft.VisualStudio.Shell;" + Environment.NewLine, string.Empty, StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No unused Microsoft.VisualStudio.Shell using remained in VisualStudioLanguageServerFeatureOptions.";
+
+        await WriteTextPreservingUtf8BomAsync(filePath, updatedContent, templatePath: filePath).ConfigureAwait(false);
+        return $"Removed the unused Microsoft.VisualStudio.Shell using from '{Path.GetRelativePath(targetRepoRoot, filePath)}'.";
     }
 
     private static async Task<string> FixSyntaxVisualizerReadonlyFieldAsync(StageContext context)
