@@ -346,6 +346,12 @@ internal static class PostMergeCleanupRunner
             "Move Razor shipping symbols packages",
             @"Roslyn's release-packaging pass repacks every *.nupkg in the Shipping package directory after build.cmd -pack, so Razor's legacy .symbols.nupkg files should be moved aside after pack instead of colliding with the release repack step.",
             MoveRazorShippingSymbolPackagesAsync),
+        new(
+            "restore-razor-version-props",
+            "Restore Razor's local version props so Razor packages keep the standalone Razor 10.0 version line after the merge.",
+            "Restore Razor version props",
+            @"Standalone Razor defines its own MajorVersion, MinorVersion, PatchVersion, and PreReleaseVersionLabel in eng\Versions.props, so the merged Razor subtree should restore those values locally instead of inheriting Roslyn's 5.7 package version line.",
+            RestoreRazorVersionPropsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2165,6 +2171,49 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(directoryBuildTargetsPath, updatedContent, templatePath: directoryBuildTargetsPath).ConfigureAwait(false);
         return $"Added a shipping symbols package move target to '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}'.";
+    }
+
+    private static async Task<string> RestoreRazorVersionPropsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var directoryBuildPropsPath = Path.Combine(targetRoot, "Directory.Build.props");
+        if (!File.Exists(directoryBuildPropsPath))
+            return "No Razor root Directory.Build.props file was found for version cleanup.";
+
+        var versionBlock = string.Join(
+            Environment.NewLine,
+            [
+                "  <PropertyGroup Label=\"Razor Versioning\">",
+                "    <MajorVersion>10</MajorVersion>",
+                "    <MinorVersion>0</MinorVersion>",
+                "    <PatchVersion>0</PatchVersion>",
+                "    <PreReleaseVersionLabel>preview</PreReleaseVersionLabel>",
+                "  </PropertyGroup>",
+            ]);
+
+        var anchor = string.Join(
+            Environment.NewLine,
+            [
+                "  <Import",
+                "    Project=\"$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildThisFileDirectory), AspNetCoreSettings.props))\\AspNetCoreSettings.props\"",
+                "    Condition=\" '$(CI)' != 'true' AND '$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildThisFileDirectory), AspNetCoreSettings.props))' != '' \" />",
+            ]);
+
+        var originalContent = await File.ReadAllTextAsync(directoryBuildPropsPath).ConfigureAwait(false);
+        if (originalContent.Contains("<PropertyGroup Label=\"Razor Versioning\">", StringComparison.Ordinal))
+            return "No Razor version props restore was needed.";
+
+        var updatedContent = originalContent.Replace(
+            anchor,
+            anchor + Environment.NewLine + Environment.NewLine + versionBlock,
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor version props restore was needed.";
+
+        await WriteTextPreservingUtf8BomAsync(directoryBuildPropsPath, updatedContent, templatePath: directoryBuildPropsPath).ConfigureAwait(false);
+        return $"Restored Razor's local version props in '{Path.GetRelativePath(targetRepoRoot, directoryBuildPropsPath)}'.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
