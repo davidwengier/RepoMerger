@@ -352,6 +352,12 @@ internal static class PostMergeCleanupRunner
             "Restore Razor version props",
             @"Standalone Razor defines its own MajorVersion, MinorVersion, PatchVersion, and PreReleaseVersionLabel in eng\Versions.props, so the merged Razor subtree should restore those values locally instead of inheriting Roslyn's 5.7 package version line.",
             RestoreRazorVersionPropsAsync),
+        new(
+            "restore-razor-vsix-version-props",
+            "Restore Razor's local VSIX tooling version props so official VSIX builds keep Razor's standalone version line.",
+            "Restore Razor VSIX version props",
+            @"Standalone Razor defines its own VsixVersionPrefix, AddinMajorVersion, and AddinVersion in eng\Versions.props, so the merged Razor subtree should restore those values locally instead of defaulting VSIX versioning to Roslyn's 10.0 package version line in official builds.",
+            RestoreRazorVsixVersionPropsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2214,6 +2220,53 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(directoryBuildPropsPath, updatedContent, templatePath: directoryBuildPropsPath).ConfigureAwait(false);
         return $"Restored Razor's local version props in '{Path.GetRelativePath(targetRepoRoot, directoryBuildPropsPath)}'.";
+    }
+
+    private static async Task<string> RestoreRazorVsixVersionPropsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var directoryBuildPropsPath = Path.Combine(targetRoot, "Directory.Build.props");
+        if (!File.Exists(directoryBuildPropsPath))
+            return "No Razor root Directory.Build.props file was found for VSIX version cleanup.";
+
+        var toolingVersionBlock = string.Join(
+            Environment.NewLine,
+            [
+                "  <PropertyGroup Label=\"Razor Tooling Versioning\">",
+                "    <VsixVersionPrefix>18.7.1</VsixVersionPrefix>",
+                "    <AddinMajorVersion>18.7</AddinMajorVersion>",
+                "    <AddinVersion>$(AddinMajorVersion)</AddinVersion>",
+                "    <AddinVersion Condition=\"'$(OfficialBuildId)' != ''\">$(AddinVersion).$(OfficialBuildId)</AddinVersion>",
+                "    <AddinVersion Condition=\"'$(OfficialBuildId)' == ''\">$(AddinVersion).42424242.42</AddinVersion>",
+                "  </PropertyGroup>",
+            ]);
+
+        var anchor = string.Join(
+            Environment.NewLine,
+            [
+                "  <PropertyGroup Label=\"Razor Versioning\">",
+                "    <MajorVersion>10</MajorVersion>",
+                "    <MinorVersion>0</MinorVersion>",
+                "    <PatchVersion>0</PatchVersion>",
+                "    <PreReleaseVersionLabel>preview</PreReleaseVersionLabel>",
+                "  </PropertyGroup>",
+            ]);
+
+        var originalContent = await File.ReadAllTextAsync(directoryBuildPropsPath).ConfigureAwait(false);
+        if (originalContent.Contains("<PropertyGroup Label=\"Razor Tooling Versioning\">", StringComparison.Ordinal))
+            return "No Razor VSIX version props restore was needed.";
+
+        var updatedContent = originalContent.Replace(
+            anchor,
+            anchor + Environment.NewLine + Environment.NewLine + toolingVersionBlock,
+            StringComparison.Ordinal);
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor VSIX version props restore was needed.";
+
+        await WriteTextPreservingUtf8BomAsync(directoryBuildPropsPath, updatedContent, templatePath: directoryBuildPropsPath).ConfigureAwait(false);
+        return $"Restored Razor's local VSIX version props in '{Path.GetRelativePath(targetRepoRoot, directoryBuildPropsPath)}'.";
     }
 
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
