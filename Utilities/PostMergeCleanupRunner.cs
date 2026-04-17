@@ -358,6 +358,12 @@ internal static class PostMergeCleanupRunner
             "Fix Razor test path probes",
             "The merged Roslyn tree nests Razor sources under src\\Razor and renames some test projects to UnitTests, so Razor tests should normalize hard-coded file paths and shared project-directory probes instead of assuming the standalone layout and old Tests names.",
             FixRazorLanguageConfigurationTestPathAsync),
+        new(
+            "fix-razor-diagnostic-errorcode-helper",
+            "Add Razor test-base helpers that convert shim ErrorCode values before calling Roslyn's Diagnostic helper.",
+            "Fix Razor diagnostic ErrorCode helpers",
+            "Standalone Razor tests use a public Microsoft.CodeAnalysis.ErrorCode shim because Roslyn's C# ErrorCode enum is internal, but inside the merged Roslyn tree Roslyn.Test.Utilities.TestHelpers.Diagnostic rejects that shim type, so shared Razor test bases should cast those codes to int before delegating to Roslyn's helper.",
+            FixRazorDiagnosticErrorCodeHelperAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2143,6 +2149,100 @@ internal static class PostMergeCleanupRunner
             StringComparison.Ordinal);
 
         return content;
+    }
+
+    private static async Task<string> FixRazorDiagnosticErrorCodeHelperAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var updatedFiles = new List<string>();
+
+        await AddRazorDiagnosticErrorCodeHelperAsync(
+            Path.Combine(targetRoot, "src", "Compiler", "test", "Microsoft.NET.Sdk.Razor.SourceGenerators.UnitTests", "RazorSourceGeneratorTestsBase.cs"),
+            "public abstract class RazorSourceGeneratorTestsBase",
+            targetRepoRoot,
+            updatedFiles).ConfigureAwait(false);
+        await AddRazorDiagnosticErrorCodeHelperAsync(
+            Path.Combine(targetRoot, "src", "Shared", "Microsoft.AspNetCore.Razor.Test.Common", "Language", "IntegrationTests", "IntegrationTestBase.cs"),
+            "public abstract class IntegrationTestBase",
+            targetRepoRoot,
+            updatedFiles).ConfigureAwait(false);
+        await AddRazorDiagnosticErrorCodeHelperAsync(
+            Path.Combine(targetRoot, "src", "Shared", "Microsoft.AspNetCore.Razor.Test.Common", "Language", "IntegrationTests", "RazorIntegrationTestBase.cs"),
+            "public class RazorIntegrationTestBase",
+            targetRepoRoot,
+            updatedFiles).ConfigureAwait(false);
+
+        return updatedFiles.Count == 0
+            ? "No Razor diagnostic ErrorCode helper changes were needed."
+            : $"Added Razor diagnostic ErrorCode shims in {updatedFiles.Count} file(s): {string.Join(", ", updatedFiles.Select(path => $"'{path}'"))}.";
+    }
+
+    private static async Task AddRazorDiagnosticErrorCodeHelperAsync(
+        string filePath,
+        string classDeclaration,
+        string targetRepoRoot,
+        List<string> updatedFiles)
+    {
+        if (!File.Exists(filePath))
+            return;
+
+        var originalContent = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
+        var updatedContent = AddRazorDiagnosticErrorCodeHelperContent(originalContent, classDeclaration);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return;
+
+        await WriteTextPreservingUtf8BomAsync(filePath, updatedContent, templatePath: filePath).ConfigureAwait(false);
+        updatedFiles.Add(Path.GetRelativePath(targetRepoRoot, filePath));
+    }
+
+    private static string AddRazorDiagnosticErrorCodeHelperContent(string content, string classDeclaration)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var anchor = $"{classDeclaration}\n{{";
+        var anchorIndex = normalizedContent.IndexOf(anchor, StringComparison.Ordinal);
+        if (anchorIndex < 0)
+            throw new InvalidOperationException($"Could not find class declaration '{classDeclaration}' for Razor diagnostic ErrorCode helper insertion.");
+
+        var insertIndex = anchorIndex + anchor.Length;
+        var remainder = RemoveLeadingRazorDiagnosticErrorCodeHelperBlocks(normalizedContent[insertIndex..]);
+        var updatedContent = normalizedContent[..insertIndex] + "\n" + RazorDiagnosticErrorCodeHelperBlock + remainder;
+
+        if (string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal))
+            return content;
+
+        return updatedContent;
+    }
+
+    private static string RemoveLeadingRazorDiagnosticErrorCodeHelperBlocks(string content)
+    {
+        var remainder = content;
+        while (TryRemoveLeadingRazorDiagnosticErrorCodeHelperBlock(ref remainder))
+        {
+        }
+
+        return remainder;
+    }
+
+    private static bool TryRemoveLeadingRazorDiagnosticErrorCodeHelperBlock(ref string content)
+    {
+        foreach (var block in RazorDiagnosticErrorCodeHelperLegacyBlocks.Prepend(RazorDiagnosticErrorCodeHelperBlock))
+        {
+            var prefixedBlock = "\n" + block;
+            if (!content.StartsWith(prefixedBlock, StringComparison.Ordinal))
+                continue;
+
+            content = content[prefixedBlock.Length..];
+            while (content.Length > 0 && content[0] == '\n')
+            {
+                content = content[1..];
+            }
+
+            content = "\n" + content;
+            return true;
+        }
+
+        return false;
     }
 
     private static async Task<bool> SyncImportedRazorSkillAsync(
@@ -6132,6 +6232,109 @@ public class SurveyPrompt : ComponentBase
             "    <AddPublicApiAnalyzers Condition=\"'$(IsTestProject)' == 'true' OR '$(IsUnitTestProject)' == 'true' OR '$(IsIntegrationTestProject)' == 'true'\">false</AddPublicApiAnalyzers>",
             "  </PropertyGroup>",
         ]) + Environment.NewLine;
+
+    private static readonly string RazorDiagnosticErrorCodeHelperBlock = string.Join(
+        "\n",
+        [
+            "    protected static DiagnosticDescription Diagnostic(",
+            "        object code,",
+            "        string squiggledText = null,",
+            "        object[] arguments = null,",
+            "        Microsoft.CodeAnalysis.Text.LinePosition? startLocation = null,",
+            "        Func<Microsoft.CodeAnalysis.SyntaxNode, bool> syntaxNodePredicate = null,",
+            "        bool argumentOrderDoesNotMatter = false,",
+            "        bool isSuppressed = false)",
+            "    {",
+            "        var normalizedCode = code is ErrorCode razorErrorCode",
+            "            ? (object)(int)razorErrorCode",
+            "            : code;",
+            "",
+            "        return Roslyn.Test.Utilities.TestHelpers.Diagnostic(",
+            "            normalizedCode,",
+            "            squiggledText,",
+            "            arguments,",
+            "            startLocation,",
+            "            syntaxNodePredicate,",
+            "            argumentOrderDoesNotMatter,",
+            "            isSuppressed);",
+            "    }",
+        ]);
+
+    private static readonly string[] RazorDiagnosticErrorCodeHelperLegacyBlocks =
+    [
+        string.Join(
+            "\n",
+            [
+                "    protected static DiagnosticDescription Diagnostic(",
+                "        object code,",
+                "        string squiggledText = null,",
+                "        object[] arguments = null,",
+                "        LinePosition? startLocation = null,",
+                "        Func<SyntaxNode, bool> syntaxNodePredicate = null,",
+                "        bool argumentOrderDoesNotMatter = false,",
+                "        bool isSuppressed = false)",
+                "    {",
+                "        var normalizedCode = code is ErrorCode razorErrorCode",
+                "            ? (object)(int)razorErrorCode",
+                "            : code;",
+                "",
+                "        return TestHelpers.Diagnostic(",
+                "            normalizedCode,",
+                "            squiggledText,",
+                "            arguments,",
+                "            startLocation,",
+                "            syntaxNodePredicate,",
+                "            argumentOrderDoesNotMatter,",
+                "            isSuppressed);",
+                "    }",
+            ]),
+        string.Join(
+            "\n",
+            [
+                "    protected static global::Microsoft.CodeAnalysis.Test.Utilities.DiagnosticDescription Diagnostic(",
+                "        object code,",
+                "        string squiggledText = null,",
+                "        object[] arguments = null,",
+                "        global::Microsoft.CodeAnalysis.Text.LinePosition? startLocation = null,",
+                "        Func<global::Microsoft.CodeAnalysis.SyntaxNode, bool> syntaxNodePredicate = null,",
+                "        bool argumentOrderDoesNotMatter = false,",
+                "        bool isSuppressed = false)",
+                "    {",
+                "        var normalizedCode = code is global::Microsoft.CodeAnalysis.ErrorCode razorErrorCode",
+                "            ? (object)(int)razorErrorCode",
+                "            : code;",
+                "",
+                "        return global::Roslyn.Test.Utilities.TestHelpers.Diagnostic(",
+                "            normalizedCode,",
+                "            squiggledText,",
+                "            arguments,",
+                "            startLocation,",
+                "            syntaxNodePredicate,",
+                "            argumentOrderDoesNotMatter,",
+                "            isSuppressed);",
+                "    }",
+            ]),
+        string.Join(
+            "\n",
+            [
+                "    protected static global::Microsoft.CodeAnalysis.Test.Utilities.DiagnosticDescription Diagnostic(",
+                "        global::Microsoft.CodeAnalysis.ErrorCode code,",
+                "        string squiggledText = null,",
+                "        object[] arguments = null,",
+                "        global::Microsoft.CodeAnalysis.Text.LinePosition? startLocation = null,",
+                "        Func<global::Microsoft.CodeAnalysis.SyntaxNode, bool> syntaxNodePredicate = null,",
+                "        bool argumentOrderDoesNotMatter = false,",
+                "        bool isSuppressed = false)",
+                "        => global::Roslyn.Test.Utilities.TestHelpers.Diagnostic(",
+                "            (int)code,",
+                "            squiggledText,",
+                "            arguments,",
+                "            startLocation,",
+                "            syntaxNodePredicate,",
+                "            argumentOrderDoesNotMatter,",
+                "            isSuppressed);",
+            ]),
+    ];
 
     private static readonly string RazorGlobalConfigItemGroupBlock = string.Join(
         Environment.NewLine,
