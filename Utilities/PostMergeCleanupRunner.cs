@@ -352,6 +352,12 @@ internal static class PostMergeCleanupRunner
             "Copy Razor skills into Roslyn",
             "Razor carries repo-local Copilot skills for toolset validation and formatting-log investigations, and the merged Roslyn tree should preserve those workflows under .github\\skills with their paths rewritten to Roslyn's nested src\\Razor layout and RepoMerger source-checkout workflow.",
             CopyRazorSkillsAsync),
+        new(
+            "fix-razor-language-configuration-test-path",
+            "Normalize Razor test path probes for the merged src\\Razor layout.",
+            "Fix Razor test path probes",
+            "The merged Roslyn tree nests Razor sources under src\\Razor and renames some test projects to UnitTests, so Razor tests should normalize hard-coded file paths and shared project-directory probes instead of assuming the standalone layout and old Tests names.",
+            FixRazorLanguageConfigurationTestPathAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -1936,6 +1942,207 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? @"No Razor skill copy changes were needed."
             : $"Copied Razor skill updates into {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> FixRazorLanguageConfigurationTestPathAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var summaries = new List<string>();
+        var languageConfigurationTestPath = GetExistingPath(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "LanguageConfigurationTest.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "LanguageConfigurationTest.cs"));
+        if (File.Exists(languageConfigurationTestPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(languageConfigurationTestPath).ConfigureAwait(false);
+            var updatedContent = RazorLanguageConfigurationTestPathPattern.Replace(
+                originalContent,
+                RazorLanguageConfigurationMergedPath);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    languageConfigurationTestPath,
+                    updatedContent,
+                    templatePath: languageConfigurationTestPath).ConfigureAwait(false);
+                summaries.Add($"Normalized Razor language-configuration test path in '{Path.GetRelativePath(targetRepoRoot, languageConfigurationTestPath)}'.");
+            }
+        }
+
+        var testProjectPath = Path.Combine(
+            targetRoot,
+            "src",
+            "Shared",
+            "Microsoft.AspNetCore.Razor.Test.Common",
+            "Language",
+            "TestProject.cs");
+        if (File.Exists(testProjectPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(testProjectPath).ConfigureAwait(false);
+            var updatedContent = NormalizeRazorTestProjectHelperContent(originalContent);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    testProjectPath,
+                    updatedContent,
+                    templatePath: testProjectPath).ConfigureAwait(false);
+                summaries.Add($"Normalized Razor test project directory probes in '{Path.GetRelativePath(targetRepoRoot, testProjectPath)}'.");
+            }
+        }
+
+        return summaries.Count == 0
+            ? "No Razor test path cleanup changes were needed."
+            : string.Join(" ", summaries);
+    }
+
+    private static string NormalizeRazorTestProjectHelperContent(string content)
+    {
+        content = content.Replace(
+            """
+                public static string GetProjectDirectory(string directoryHint, Layer layer, bool testDirectoryFirst = false)
+                {
+                    var repoRoot = SearchUp(AppContext.BaseDirectory, "global.json");
+                    var layerFolderName = GetLayerFolderName(layer);
+
+                    Debug.Assert(!testDirectoryFirst || layer != Layer.Tooling, "If testDirectoryFirst is true and we're in the tooling layer, that means the project directory ternary needs to be updated to handle the false case");
+                    var projectDirectory = testDirectoryFirst || layer == Layer.Tooling
+                        ? Path.Combine(repoRoot, "src", layerFolderName, "test", directoryHint)
+                        : Path.Combine(repoRoot, "src", layerFolderName, directoryHint, "test");
+
+                    if (string.Equals(directoryHint, "Microsoft.AspNetCore.Razor.Language.Test", StringComparison.Ordinal))
+                    {
+                        Debug.Assert(!testDirectoryFirst);
+                        Debug.Assert(layer == Layer.Compiler);
+                        projectDirectory = Path.Combine(repoRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test");
+                    }
+
+                    if (!Directory.Exists(projectDirectory))
+                    {
+                        throw new InvalidOperationException(
+                            $@"Could not locate project directory for type {directoryHint}. Directory probe path: {projectDirectory}.");
+                    }
+
+                    return projectDirectory;
+                }
+            """,
+            """
+                public static string GetProjectDirectory(string directoryHint, Layer layer, bool testDirectoryFirst = false)
+                {
+                    var repoRoot = SearchUp(AppContext.BaseDirectory, "global.json");
+                    var razorRepoRoot = Directory.Exists(Path.Combine(repoRoot, "src", "Razor", "src"))
+                        ? Path.Combine(repoRoot, "src", "Razor")
+                        : repoRoot;
+                    var layerFolderName = GetLayerFolderName(layer);
+                    var normalizedDirectoryHint = layer == Layer.Compiler && testDirectoryFirst && directoryHint.EndsWith(".Tests", StringComparison.Ordinal)
+                        ? directoryHint[..^".Tests".Length] + ".UnitTests"
+                        : directoryHint;
+
+                    Debug.Assert(!testDirectoryFirst || layer != Layer.Tooling, "If testDirectoryFirst is true and we're in the tooling layer, that means the project directory ternary needs to be updated to handle the false case");
+                    var projectDirectory = testDirectoryFirst || layer == Layer.Tooling
+                        ? Path.Combine(razorRepoRoot, "src", layerFolderName, "test", normalizedDirectoryHint)
+                        : Path.Combine(razorRepoRoot, "src", layerFolderName, normalizedDirectoryHint, "test");
+
+                    if (string.Equals(directoryHint, "Microsoft.AspNetCore.Razor.Language.Test", StringComparison.Ordinal))
+                    {
+                        Debug.Assert(!testDirectoryFirst);
+                        Debug.Assert(layer == Layer.Compiler);
+                        projectDirectory = Path.Combine(razorRepoRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test");
+                    }
+
+                    if (!Directory.Exists(projectDirectory))
+                    {
+                        throw new InvalidOperationException(
+                            $@"Could not locate project directory for type {directoryHint}. Directory probe path: {projectDirectory}.");
+                    }
+
+                    return projectDirectory;
+                }
+            """,
+            StringComparison.Ordinal);
+
+        content = content.Replace(
+            """
+                public static string GetProjectDirectory(Type type, Layer layer, bool useCurrentDirectory = false)
+                {
+                    var baseDir = useCurrentDirectory ? Directory.GetCurrentDirectory() : AppContext.BaseDirectory;
+                    var layerFolderName = GetLayerFolderName(layer);
+                    var repoRoot = SearchUp(baseDir, "global.json");
+                    var assemblyName = type.Assembly.GetName().Name;
+                    var projectDirectory = layer == Layer.Compiler
+                        ? Path.Combine(repoRoot, "src", layerFolderName, assemblyName, "test")
+                        : Path.Combine(repoRoot, "src", layerFolderName, "test", assemblyName);
+
+                    if (string.Equals(assemblyName, "Microsoft.AspNetCore.Razor.Language.Test", StringComparison.Ordinal))
+                    {
+                        Debug.Assert(layer == Layer.Compiler);
+                        projectDirectory = Path.Combine(repoRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test");
+                    }
+                    else if (string.Equals(assemblyName, "Microsoft.AspNetCore.Razor.Language.Legacy.Test", StringComparison.Ordinal))
+                    {
+                        Debug.Assert(layer == Layer.Compiler);
+                        projectDirectory = Path.Combine(repoRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "legacyTest");
+                    }
+
+                    if (!Directory.Exists(projectDirectory))
+                    {
+                        throw new InvalidOperationException(
+                            $@"Could not locate project directory for type {type.FullName}. Directory probe path: {projectDirectory}.");
+                    }
+
+                    return projectDirectory;
+                }
+            """,
+            """
+                public static string GetProjectDirectory(Type type, Layer layer, bool useCurrentDirectory = false)
+                {
+                    var baseDir = useCurrentDirectory ? Directory.GetCurrentDirectory() : AppContext.BaseDirectory;
+                    var layerFolderName = GetLayerFolderName(layer);
+                    var repoRoot = SearchUp(baseDir, "global.json");
+                    var razorRepoRoot = Directory.Exists(Path.Combine(repoRoot, "src", "Razor", "src"))
+                        ? Path.Combine(repoRoot, "src", "Razor")
+                        : repoRoot;
+                    var assemblyName = type.Assembly.GetName().Name;
+                    var normalizedAssemblyName = layer == Layer.Compiler && assemblyName.EndsWith(".UnitTests", StringComparison.Ordinal)
+                        ? assemblyName[..^".UnitTests".Length]
+                        : assemblyName;
+                    var projectDirectory = layer == Layer.Compiler
+                        ? Path.Combine(razorRepoRoot, "src", layerFolderName, normalizedAssemblyName, "test")
+                        : Path.Combine(razorRepoRoot, "src", layerFolderName, "test", assemblyName);
+
+                    if (string.Equals(assemblyName, "Microsoft.AspNetCore.Razor.Language.Test", StringComparison.Ordinal))
+                    {
+                        Debug.Assert(layer == Layer.Compiler);
+                        projectDirectory = Path.Combine(razorRepoRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test");
+                    }
+                    else if (string.Equals(assemblyName, "Microsoft.AspNetCore.Razor.Language.Legacy.Test", StringComparison.Ordinal) ||
+                             string.Equals(assemblyName, "Microsoft.AspNetCore.Razor.Language.Legacy.UnitTests", StringComparison.Ordinal))
+                    {
+                        Debug.Assert(layer == Layer.Compiler);
+                        projectDirectory = Path.Combine(razorRepoRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "legacyTest");
+                    }
+
+                    if (layer == Layer.Compiler &&
+                        !Directory.Exists(projectDirectory) &&
+                        assemblyName.EndsWith(".UnitTests", StringComparison.Ordinal))
+                    {
+                        var testDirectoryFirstProjectDirectory = Path.Combine(razorRepoRoot, "src", layerFolderName, "test", assemblyName);
+                        if (Directory.Exists(testDirectoryFirstProjectDirectory))
+                        {
+                            projectDirectory = testDirectoryFirstProjectDirectory;
+                        }
+                    }
+
+                    if (!Directory.Exists(projectDirectory))
+                    {
+                        throw new InvalidOperationException(
+                            $@"Could not locate project directory for type {type.FullName}. Directory probe path: {projectDirectory}.");
+                    }
+
+                    return projectDirectory;
+                }
+            """,
+            StringComparison.Ordinal);
+
+        return content;
     }
 
     private static async Task<bool> SyncImportedRazorSkillAsync(
@@ -5887,12 +6094,18 @@ public class SurveyPrompt : ComponentBase
         @"(?<![\w.])Package\.GetGlobalService\(",
         RegexOptions.CultureInvariant);
 
+    private static readonly Regex RazorLanguageConfigurationTestPathPattern = new(
+        @"src\\Razor\\(?:src\\Razor\\)*src\\Microsoft\.VisualStudio\.RazorExtension",
+        RegexOptions.CultureInvariant);
+
     private static readonly string[] ImportedRazorSkillNames =
     [
         "run-toolset-tests",
         "formatting-log",
     ];
 
+    private const string RazorLanguageConfigurationMergedPath =
+        @"src\Razor\src\Razor\src\Microsoft.VisualStudio.RazorExtension";
     private const string RazorCodeOwnersPath = "src/Razor/";
     private const string RazorCodeOwnersEntry = "src/Razor/ @dotnet/razor-tooling";
     private const string RazorSdkPackageVersion = "11.0.100-preview.4.26215.114";
