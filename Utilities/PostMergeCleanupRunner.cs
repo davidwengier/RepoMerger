@@ -6736,10 +6736,10 @@ public class SurveyPrompt : ComponentBase
         [
             "    protected static DiagnosticDescription Diagnostic(",
             "        object code,",
-            "        string squiggledText = null,",
-            "        object[] arguments = null,",
+            "        string? squiggledText = null,",
+            "        object[]? arguments = null,",
             "        Microsoft.CodeAnalysis.Text.LinePosition? startLocation = null,",
-            "        Func<Microsoft.CodeAnalysis.SyntaxNode, bool> syntaxNodePredicate = null,",
+            "        Func<Microsoft.CodeAnalysis.SyntaxNode, bool>? syntaxNodePredicate = null,",
             "        bool argumentOrderDoesNotMatter = false,",
             "        bool isSuppressed = false)",
             "    {",
