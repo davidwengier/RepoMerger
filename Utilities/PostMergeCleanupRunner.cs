@@ -382,6 +382,12 @@ internal static class PostMergeCleanupRunner
             "Fix Razor CI test assets",
             "Roslyn's CI test workitems rehydrate built outputs under a local global.json instead of running against the full merged src\\Razor source tree, so shared Razor test helpers should fall back to output-local assets and Razor test projects should copy their TestFiles baselines into those outputs.",
             FixRazorCiTestAssetsAsync),
+        new(
+            "fix-defaultlsprequestinvokertest-moq-null-return",
+            "Change DefaultLSPRequestInvokerTest mock setups to use an explicit object-typed null with ReturnsAsync.",
+            "Fix DefaultLSPRequestInvokerTest Moq null return",
+            "Moq's ReturnsAsync(null) in DefaultLSPRequestInvokerTest does not bind correctly in the merged Roslyn target, so the test should pass an explicit object-typed null to preserve the intended null response behavior and keep the mock setup compiling.",
+            FixDefaultLspRequestInvokerTestMoqNullReturnAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2567,6 +2573,26 @@ internal static class PostMergeCleanupRunner
         return summaries.Count == 0
             ? "No RazorEngine strict mock test changes were needed."
             : string.Join(" ", summaries);
+    }
+
+    private static async Task<string> FixDefaultLspRequestInvokerTestMoqNullReturnAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var defaultLspRequestInvokerTestPath = GetExistingPath(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "LanguageClient", "DefaultLSPRequestInvokerTest.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "LanguageClient", "DefaultLSPRequestInvokerTest.cs"));
+        var (changedFiles, replacementCount) = await ApplyKnownFileTextReplacementsAsync(
+            targetRepoRoot,
+            (defaultLspRequestInvokerTestPath,
+            [
+                ("ReturnsAsync(null)", "ReturnsAsync((object)null)"),
+                ("ReturnsAsync((null))", "ReturnsAsync((object)null)")
+            ])).ConfigureAwait(false);
+
+        return changedFiles.Count == 0
+            ? "No DefaultLSPRequestInvokerTest Moq null-return cleanup changes were needed."
+            : $"Normalized {replacementCount} DefaultLSPRequestInvokerTest Moq null-return setup(s) in {changedFiles.Count} Razor file(s): {string.Join(", ", changedFiles)}.";
     }
 
     private static async Task<string> DeferRazorTraceListenerToRoslynAsync(StageContext context)
