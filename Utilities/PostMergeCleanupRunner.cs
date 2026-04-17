@@ -376,6 +376,12 @@ internal static class PostMergeCleanupRunner
             "Defer Razor trace listener init to Roslyn",
             "The merged Roslyn tree already installs a ThrowingTraceListener through Microsoft.CodeAnalysis.Test.Utilities, and keeping Razor's duplicate module initializer deadlocks net472 xUnit discovery before CohostRenameEndpointTest can run. Razor's explicit ThrowingTraceListener.Initialize calls in integration tests still preserve Razor's fail collection where those tests need it.",
             DeferRazorTraceListenerToRoslynAsync),
+        new(
+            "fix-razor-ci-test-assets",
+            "Copy Razor test assets into test outputs and fall back to those output-local files when CI workitems do not include the full src\\Razor checkout.",
+            "Fix Razor CI test assets",
+            "Roslyn's CI test workitems rehydrate built outputs under a local global.json instead of running against the full merged src\\Razor source tree, so shared Razor test helpers should fall back to output-local assets and Razor test projects should copy their TestFiles baselines into those outputs.",
+            FixRazorCiTestAssetsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2042,8 +2048,30 @@ internal static class PostMergeCleanupRunner
 
     private static string NormalizeRazorTestProjectHelperContent(string content)
     {
-        content = content.Replace(
-            """
+        const string originalGetRepoRootMethod = """
+                public static string GetRepoRoot(bool useCurrentDirectory = false)
+                {
+                    var baseDir = useCurrentDirectory ? Directory.GetCurrentDirectory() : AppContext.BaseDirectory;
+                    return SearchUp(baseDir, "global.json");
+                }
+            """;
+
+        const string outputAwareGetRepoRootMethod = """
+                public static string GetRepoRoot(bool useCurrentDirectory = false)
+                {
+                    var baseDir = useCurrentDirectory ? Directory.GetCurrentDirectory() : AppContext.BaseDirectory;
+                    var repoRoot = SearchUp(baseDir, "global.json");
+                    if (File.Exists(Path.Combine(repoRoot, "eng", "targets", "RazorServices.props")))
+                    {
+                        return repoRoot;
+                    }
+
+                    var outputRelativeRepoRoot = TryGetAppContextRepositoryRoot();
+                    return outputRelativeRepoRoot ?? repoRoot;
+                }
+            """;
+
+        const string originalStringGetProjectDirectoryMethod = """
                 public static string GetProjectDirectory(string directoryHint, Layer layer, bool testDirectoryFirst = false)
                 {
                     var repoRoot = SearchUp(AppContext.BaseDirectory, "global.json");
@@ -2069,8 +2097,9 @@ internal static class PostMergeCleanupRunner
 
                     return projectDirectory;
                 }
-            """,
-            """
+            """;
+
+        const string mergedStringGetProjectDirectoryMethod = """
                 public static string GetProjectDirectory(string directoryHint, Layer layer, bool testDirectoryFirst = false)
                 {
                     var repoRoot = SearchUp(AppContext.BaseDirectory, "global.json");
@@ -2102,11 +2131,52 @@ internal static class PostMergeCleanupRunner
 
                     return projectDirectory;
                 }
-            """,
-            StringComparison.Ordinal);
+            """;
 
-        content = content.Replace(
-            """
+        const string outputAwareStringGetProjectDirectoryMethod = """
+                public static string GetProjectDirectory(string directoryHint, Layer layer, bool testDirectoryFirst = false)
+                {
+                    var repoRoot = SearchUp(AppContext.BaseDirectory, "global.json");
+                    var razorRepoRoot = Directory.Exists(Path.Combine(repoRoot, "src", "Razor", "src"))
+                        ? Path.Combine(repoRoot, "src", "Razor")
+                        : repoRoot;
+                    var layerFolderName = GetLayerFolderName(layer);
+                    var normalizedDirectoryHint = layer == Layer.Compiler && testDirectoryFirst && directoryHint.EndsWith(".Tests", StringComparison.Ordinal)
+                        ? directoryHint[..^".Tests".Length] + ".UnitTests"
+                        : directoryHint;
+
+                    Debug.Assert(!testDirectoryFirst || layer != Layer.Tooling, "If testDirectoryFirst is true and we're in the tooling layer, that means the project directory ternary needs to be updated to handle the false case");
+                    var projectDirectory = testDirectoryFirst || layer == Layer.Tooling
+                        ? Path.Combine(razorRepoRoot, "src", layerFolderName, "test", normalizedDirectoryHint)
+                        : Path.Combine(razorRepoRoot, "src", layerFolderName, normalizedDirectoryHint, "test");
+
+                    if (string.Equals(directoryHint, "Microsoft.AspNetCore.Razor.Language.Test", StringComparison.Ordinal))
+                    {
+                        Debug.Assert(!testDirectoryFirst);
+                        Debug.Assert(layer == Layer.Compiler);
+                        projectDirectory = Path.Combine(razorRepoRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test");
+                    }
+
+                    if (!Directory.Exists(projectDirectory))
+                    {
+                        var outputRelativeProjectDirectory = TryGetAppContextTestProjectDirectory();
+                        if (outputRelativeProjectDirectory is not null)
+                        {
+                            projectDirectory = outputRelativeProjectDirectory;
+                        }
+                    }
+
+                    if (!Directory.Exists(projectDirectory))
+                    {
+                        throw new InvalidOperationException(
+                            $@"Could not locate project directory for type {directoryHint}. Directory probe path: {projectDirectory}.");
+                    }
+
+                    return projectDirectory;
+                }
+            """;
+
+        const string originalTypeGetProjectDirectoryMethod = """
                 public static string GetProjectDirectory(Type type, Layer layer, bool useCurrentDirectory = false)
                 {
                     var baseDir = useCurrentDirectory ? Directory.GetCurrentDirectory() : AppContext.BaseDirectory;
@@ -2136,8 +2206,9 @@ internal static class PostMergeCleanupRunner
 
                     return projectDirectory;
                 }
-            """,
-            """
+            """;
+
+        const string mergedTypeGetProjectDirectoryMethod = """
                 public static string GetProjectDirectory(Type type, Layer layer, bool useCurrentDirectory = false)
                 {
                     var baseDir = useCurrentDirectory ? Directory.GetCurrentDirectory() : AppContext.BaseDirectory;
@@ -2185,10 +2256,250 @@ internal static class PostMergeCleanupRunner
 
                     return projectDirectory;
                 }
-            """,
+            """;
+
+        const string outputAwareTypeGetProjectDirectoryMethod = """
+                public static string GetProjectDirectory(Type type, Layer layer, bool useCurrentDirectory = false)
+                {
+                    var baseDir = useCurrentDirectory ? Directory.GetCurrentDirectory() : AppContext.BaseDirectory;
+                    var layerFolderName = GetLayerFolderName(layer);
+                    var repoRoot = SearchUp(baseDir, "global.json");
+                    var razorRepoRoot = Directory.Exists(Path.Combine(repoRoot, "src", "Razor", "src"))
+                        ? Path.Combine(repoRoot, "src", "Razor")
+                        : repoRoot;
+                    var assemblyName = type.Assembly.GetName().Name;
+                    var normalizedAssemblyName = layer == Layer.Compiler && assemblyName.EndsWith(".UnitTests", StringComparison.Ordinal)
+                        ? assemblyName[..^".UnitTests".Length]
+                        : assemblyName;
+                    var projectDirectory = layer == Layer.Compiler
+                        ? Path.Combine(razorRepoRoot, "src", layerFolderName, normalizedAssemblyName, "test")
+                        : Path.Combine(razorRepoRoot, "src", layerFolderName, "test", assemblyName);
+
+                    if (string.Equals(assemblyName, "Microsoft.AspNetCore.Razor.Language.Test", StringComparison.Ordinal))
+                    {
+                        Debug.Assert(layer == Layer.Compiler);
+                        projectDirectory = Path.Combine(razorRepoRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test");
+                    }
+                    else if (string.Equals(assemblyName, "Microsoft.AspNetCore.Razor.Language.Legacy.Test", StringComparison.Ordinal) ||
+                             string.Equals(assemblyName, "Microsoft.AspNetCore.Razor.Language.Legacy.UnitTests", StringComparison.Ordinal))
+                    {
+                        Debug.Assert(layer == Layer.Compiler);
+                        projectDirectory = Path.Combine(razorRepoRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "legacyTest");
+                    }
+
+                    if (layer == Layer.Compiler &&
+                        !Directory.Exists(projectDirectory) &&
+                        assemblyName.EndsWith(".UnitTests", StringComparison.Ordinal))
+                    {
+                        var testDirectoryFirstProjectDirectory = Path.Combine(razorRepoRoot, "src", layerFolderName, "test", assemblyName);
+                        if (Directory.Exists(testDirectoryFirstProjectDirectory))
+                        {
+                            projectDirectory = testDirectoryFirstProjectDirectory;
+                        }
+                    }
+
+                    if (!Directory.Exists(projectDirectory))
+                    {
+                        var outputRelativeProjectDirectory = TryGetAppContextTestProjectDirectory();
+                        if (outputRelativeProjectDirectory is not null)
+                        {
+                            projectDirectory = outputRelativeProjectDirectory;
+                        }
+                    }
+
+                    if (!Directory.Exists(projectDirectory))
+                    {
+                        throw new InvalidOperationException(
+                            $@"Could not locate project directory for type {type.FullName}. Directory probe path: {projectDirectory}.");
+                    }
+
+                    return projectDirectory;
+                }
+            """;
+
+        const string appContextFallbackHelpers = """
+                private static string TryGetAppContextTestProjectDirectory()
+                {
+                    var appContextBaseDirectory = AppContext.BaseDirectory;
+                    if (!Directory.Exists(appContextBaseDirectory))
+                    {
+                        return null;
+                    }
+
+                    if (Directory.Exists(Path.Combine(appContextBaseDirectory, "TestFiles")))
+                    {
+                        return appContextBaseDirectory;
+                    }
+
+                    foreach (var _ in Directory.EnumerateDirectories(appContextBaseDirectory, "TestFiles", SearchOption.AllDirectories))
+                    {
+                        return appContextBaseDirectory;
+                    }
+
+                    return null;
+                }
+
+                private static string TryGetAppContextRepositoryRoot()
+                {
+                    var appContextBaseDirectory = AppContext.BaseDirectory;
+                    return File.Exists(Path.Combine(appContextBaseDirectory, "eng", "targets", "RazorServices.props"))
+                        ? appContextBaseDirectory
+                        : null;
+                }
+
+            """;
+
+        const string searchUpMethodSignature = """
+                private static string SearchUp(string baseDirectory, string fileName)
+            """;
+
+        content = content.Replace(
+            originalGetRepoRootMethod,
+            outputAwareGetRepoRootMethod,
+            StringComparison.Ordinal);
+        content = content.Replace(
+            originalStringGetProjectDirectoryMethod,
+            outputAwareStringGetProjectDirectoryMethod,
+            StringComparison.Ordinal);
+        content = content.Replace(
+            mergedStringGetProjectDirectoryMethod,
+            outputAwareStringGetProjectDirectoryMethod,
+            StringComparison.Ordinal);
+        content = content.Replace(
+            originalTypeGetProjectDirectoryMethod,
+            outputAwareTypeGetProjectDirectoryMethod,
+            StringComparison.Ordinal);
+        content = content.Replace(
+            mergedTypeGetProjectDirectoryMethod,
+            outputAwareTypeGetProjectDirectoryMethod,
             StringComparison.Ordinal);
 
+        if (!content.Contains("private static string TryGetAppContextTestProjectDirectory(", StringComparison.Ordinal))
+        {
+            content = content.Replace(
+                searchUpMethodSignature,
+                appContextFallbackHelpers + searchUpMethodSignature,
+                StringComparison.Ordinal);
+        }
+
         return content;
+    }
+
+    private static async Task<string> FixRazorCiTestAssetsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var summaries = new List<string>();
+
+        var testProjectPath = Path.Combine(
+            targetRoot,
+            "src",
+            "Shared",
+            "Microsoft.AspNetCore.Razor.Test.Common",
+            "Language",
+            "TestProject.cs");
+        if (File.Exists(testProjectPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(testProjectPath).ConfigureAwait(false);
+            var updatedContent = NormalizeRazorTestProjectHelperContent(originalContent);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    testProjectPath,
+                    updatedContent,
+                    templatePath: testProjectPath).ConfigureAwait(false);
+                summaries.Add($"Normalized Razor CI test project directory probes in '{Path.GetRelativePath(targetRepoRoot, testProjectPath)}'.");
+            }
+        }
+
+        var directoryBuildTargetsPath = Path.Combine(targetRoot, "Directory.Build.targets");
+        if (File.Exists(directoryBuildTargetsPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(directoryBuildTargetsPath).ConfigureAwait(false);
+            var updatedContent = EnsureRazorTestAssetsCopiedToOutputContent(originalContent);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    directoryBuildTargetsPath,
+                    updatedContent,
+                    templatePath: directoryBuildTargetsPath).ConfigureAwait(false);
+                summaries.Add($"Copied Razor CI test assets into outputs from '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}'.");
+            }
+        }
+
+        return summaries.Count == 0
+            ? "No Razor CI test asset cleanup changes were needed."
+            : string.Join(" ", summaries);
+    }
+
+    private static string EnsureRazorTestAssetsCopiedToOutputContent(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+
+        const string legacyTestAssetsBlock = """
+  <Target Name="CopyRazorTestAssetsToOutput"
+          AfterTargets="Build"
+          Condition="'$(TargetFramework)' != '' and '$(TargetDir)' != '' and ('$(IsUnitTestProject)' == 'true' or '$(IsIntegrationTestProject)' == 'true')">
+    <ItemGroup>
+      <_RazorTestFilesToOutput Include="$(MSBuildProjectDirectory)\**\TestFiles\**\*"
+                               Exclude="$(MSBuildProjectDirectory)\bin\**\*;$(MSBuildProjectDirectory)\obj\**\*">
+        <TargetPath>$([System.IO.Path]::GetRelativePath('$(MSBuildProjectDirectory)', '%(Identity)'))</TargetPath>
+      </_RazorTestFilesToOutput>
+      <_RazorRepositoryFilesToOutput Include="$(RepositoryRoot)..\..\eng\targets\RazorServices.props"
+                                     Condition="Exists('$(RepositoryRoot)..\..\eng\targets\RazorServices.props')">
+        <TargetPath>eng\targets\RazorServices.props</TargetPath>
+      </_RazorRepositoryFilesToOutput>
+    </ItemGroup>
+    <Copy SourceFiles="@(_RazorTestFilesToOutput);@(_RazorRepositoryFilesToOutput)"
+          DestinationFiles="@(_RazorTestFilesToOutput->'$(TargetDir)%(TargetPath)');@(_RazorRepositoryFilesToOutput->'$(TargetDir)%(TargetPath)')"
+          SkipUnchangedFiles="true"
+          Condition="'@(_RazorTestFilesToOutput)' != '' or '@(_RazorRepositoryFilesToOutput)' != ''">
+      <Output TaskParameter="CopiedFiles" ItemName="FileWrites" />
+    </Copy>
+  </Target>
+""";
+
+        const string testAssetsBlock = """
+  <Target Name="CopyRazorTestAssetsToOutput"
+          AfterTargets="Build"
+          Condition="'$(TargetFramework)' != '' and '$(TargetDir)' != '' and ('$(IsUnitTestProject)' == 'true' or '$(IsIntegrationTestProject)' == 'true')">
+    <ItemGroup>
+      <_RazorTestFilesToOutput Include="$(MSBuildProjectDirectory)\**\TestFiles\**\*"
+                               Exclude="$(MSBuildProjectDirectory)\bin\**\*;$(MSBuildProjectDirectory)\obj\**\*" />
+      <_RazorRepositoryFilesToOutput Include="$(RepositoryRoot)..\..\eng\targets\RazorServices.props"
+                                     Condition="Exists('$(RepositoryRoot)..\..\eng\targets\RazorServices.props')">
+        <TargetPath>eng\targets\RazorServices.props</TargetPath>
+      </_RazorRepositoryFilesToOutput>
+    </ItemGroup>
+    <Copy SourceFiles="@(_RazorTestFilesToOutput)"
+          DestinationFiles="@(_RazorTestFilesToOutput->'$(TargetDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
+          Condition="'@(_RazorTestFilesToOutput)' != ''">
+      <Output TaskParameter="CopiedFiles" ItemName="FileWrites" />
+    </Copy>
+    <Copy SourceFiles="@(_RazorRepositoryFilesToOutput)"
+          DestinationFiles="@(_RazorRepositoryFilesToOutput->'$(TargetDir)%(TargetPath)')"
+          SkipUnchangedFiles="true"
+          Condition="'@(_RazorRepositoryFilesToOutput)' != ''">
+      <Output TaskParameter="CopiedFiles" ItemName="FileWrites" />
+    </Copy>
+  </Target>
+""";
+
+        normalizedContent = normalizedContent.Replace(
+            legacyTestAssetsBlock,
+            testAssetsBlock,
+            StringComparison.Ordinal);
+
+        if (normalizedContent.Contains("<Target Name=\"CopyRazorTestAssetsToOutput\"", StringComparison.Ordinal))
+        {
+            return normalizedContent;
+        }
+
+        return normalizedContent.Replace(
+            "\n</Project>",
+            $"\n\n{testAssetsBlock}\n</Project>",
+            StringComparison.Ordinal);
     }
 
     private static async Task<string> FixRazorDiagnosticErrorCodeHelperAsync(StageContext context)
