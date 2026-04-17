@@ -780,16 +780,9 @@ internal static class PostMergeCleanupRunner
     {
         var targetRepoRoot = context.TargetRepoRoot;
         var sourcePublishDataPath = Path.Combine(context.State.SourceCloneDirectory, "eng", "config", "PublishData.json");
-        if (!File.Exists(sourcePublishDataPath))
-            return "No Razor PublishData.json file was found for publish metadata cleanup.";
-
         var targetPublishDataPath = Path.Combine(targetRepoRoot, "eng", "config", "PublishData.json");
         if (!File.Exists(targetPublishDataPath))
             return "No repo-root eng\\config\\PublishData.json file was found for publish metadata cleanup.";
-
-        var sourcePublishData = await LoadJsonObjectAsync(sourcePublishDataPath).ConfigureAwait(false);
-        if (sourcePublishData["packages"] is not JsonObject sourcePackages || sourcePackages.Count == 0)
-            return "No Razor package publish entries were found in source PublishData.json.";
 
         var targetPublishData = await LoadJsonObjectAsync(targetPublishDataPath).ConfigureAwait(false);
         if (targetPublishData["packages"] is not JsonObject targetPackages)
@@ -798,33 +791,62 @@ internal static class PostMergeCleanupRunner
             targetPublishData["packages"] = targetPackages;
         }
 
-        var sourceFeeds = sourcePublishData["feeds"] as JsonObject;
-        var targetFeeds = targetPublishData["feeds"] as JsonObject;
-        var addedPackages = new List<string>();
-        var addedFeeds = new List<string>();
-
-        foreach (var packageEntry in EnumeratePublishDataPackageEntries(sourcePackages))
+        JsonObject? sourcePackages = null;
+        JsonObject? sourceFeeds = null;
+        if (File.Exists(sourcePublishDataPath))
         {
-            if (targetPackages.ContainsKey(packageEntry.Key))
-                continue;
-
-            targetPackages[packageEntry.Key] = packageEntry.Value?.DeepClone();
-            addedPackages.Add(packageEntry.Key);
-
-            if (sourceFeeds is null || targetFeeds is null || packageEntry.Value is not JsonValue feedNameNode)
-                continue;
-
-            if (!feedNameNode.TryGetValue<string>(out var feedName) || string.IsNullOrWhiteSpace(feedName))
-                continue;
-
-            if (targetFeeds.ContainsKey(feedName) || !sourceFeeds.TryGetPropertyValue(feedName, out var sourceFeedValue))
-                continue;
-
-            targetFeeds[feedName] = sourceFeedValue?.DeepClone();
-            addedFeeds.Add(feedName);
+            var sourcePublishData = await LoadJsonObjectAsync(sourcePublishDataPath).ConfigureAwait(false);
+            sourcePackages = sourcePublishData["packages"] as JsonObject;
+            sourceFeeds = sourcePublishData["feeds"] as JsonObject;
         }
 
-        if (addedPackages.Count == 0 && addedFeeds.Count == 0)
+        var targetFeeds = targetPublishData["feeds"] as JsonObject;
+        var addedPackages = new List<string>();
+        var updatedPackages = new List<string>();
+        var addedFeeds = new List<string>();
+
+        if (sourcePackages is not null)
+        {
+            foreach (var packageEntry in EnumeratePublishDataPackageEntries(sourcePackages))
+            {
+                if (targetPackages.ContainsKey(packageEntry.Key))
+                    continue;
+
+                targetPackages[packageEntry.Key] = packageEntry.Value?.DeepClone();
+                addedPackages.Add(packageEntry.Key);
+
+                if (sourceFeeds is null || targetFeeds is null || packageEntry.Value is not JsonValue feedNameNode)
+                    continue;
+
+                if (!feedNameNode.TryGetValue<string>(out var feedName) || string.IsNullOrWhiteSpace(feedName))
+                    continue;
+
+                if (targetFeeds.ContainsKey(feedName) || !sourceFeeds.TryGetPropertyValue(feedName, out var sourceFeedValue))
+                    continue;
+
+                targetFeeds[feedName] = sourceFeedValue?.DeepClone();
+                addedFeeds.Add(feedName);
+            }
+        }
+
+        foreach (var packageName in RazorArcadePublishDataPackages)
+        {
+            if (targetPackages.TryGetPropertyValue(packageName, out var existingValue) &&
+                existingValue is JsonValue existingFeedNode &&
+                existingFeedNode.TryGetValue<string>(out var existingFeed) &&
+                string.Equals(existingFeed, RazorArcadePublishFeed, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            targetPackages[packageName] = JsonValue.Create(RazorArcadePublishFeed);
+            if (existingValue is null)
+                addedPackages.Add(packageName);
+            else
+                updatedPackages.Add(packageName);
+        }
+
+        if (addedPackages.Count == 0 && updatedPackages.Count == 0 && addedFeeds.Count == 0)
             return "No Razor PublishData package merge was needed.";
 
         await SaveJsonAsync(targetPublishData, targetPublishDataPath).ConfigureAwait(false);
@@ -834,6 +856,12 @@ internal static class PostMergeCleanupRunner
         {
             summaryParts.Add(
                 $"Added {addedPackages.Count} Razor package publish entr{(addedPackages.Count == 1 ? "y" : "ies")} to '{Path.GetRelativePath(targetRepoRoot, targetPublishDataPath)}': {string.Join(", ", addedPackages)}.");
+        }
+
+        if (updatedPackages.Count > 0)
+        {
+            summaryParts.Add(
+                $"Updated {updatedPackages.Count} Razor package publish entr{(updatedPackages.Count == 1 ? "y" : "ies")} in '{Path.GetRelativePath(targetRepoRoot, targetPublishDataPath)}' to use '{RazorArcadePublishFeed}': {string.Join(", ", updatedPackages)}.");
         }
 
         if (addedFeeds.Count > 0)
@@ -6349,7 +6377,16 @@ public class SurveyPrompt : ComponentBase
         @"src\Razor\src\Razor\src\Microsoft.VisualStudio.RazorExtension";
     private const string RazorCodeOwnersPath = "src/Razor/";
     private const string RazorCodeOwnersEntry = "src/Razor/ @dotnet/razor-tooling";
+    private const string RazorArcadePublishFeed = "arcade";
     private const string RazorSdkPackageVersion = "11.0.100-preview.4.26215.114";
+
+    private static readonly string[] RazorArcadePublishDataPackages =
+    [
+        "Microsoft.CodeAnalysis.Razor.Compiler",
+        "Microsoft.Net.Compilers.Razor.Toolset",
+        "Microsoft.VisualStudio.RazorExtension",
+        "RazorDeployment",
+    ];
 
     private static readonly string[] RazorGlobalConfigFileNames =
     [
