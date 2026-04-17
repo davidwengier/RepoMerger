@@ -370,6 +370,12 @@ internal static class PostMergeCleanupRunner
             "Fix RazorEngine strict mock tests",
             "RazorEngine initializes features and phases as part of engine construction, so strict Microsoft.AspNetCore.Razor.Language unit tests should set up Initialize(...) on their test doubles instead of assuming those callbacks never happen.",
             FixRazorEngineInitializeTestMocksAsync),
+        new(
+            "defer-razor-trace-listener-to-roslyn",
+            "Remove Razor's ThrowingTraceListener module initializer so Roslyn's test utilities own trace-listener setup in the merged tree.",
+            "Defer Razor trace listener init to Roslyn",
+            "The merged Roslyn tree already installs a ThrowingTraceListener through Microsoft.CodeAnalysis.Test.Utilities, and keeping Razor's duplicate module initializer deadlocks net472 xUnit discovery before CohostRenameEndpointTest can run. Razor's explicit ThrowingTraceListener.Initialize calls in integration tests still preserve Razor's fail collection where those tests need it.",
+            DeferRazorTraceListenerToRoslynAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2222,6 +2228,40 @@ internal static class PostMergeCleanupRunner
         return summaries.Count == 0
             ? "No RazorEngine strict mock test changes were needed."
             : string.Join(" ", summaries);
+    }
+
+    private static async Task<string> DeferRazorTraceListenerToRoslynAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var traceListenerPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Shared",
+            "Microsoft.AspNetCore.Razor.Test.Common",
+            "ThrowingTraceListener.cs");
+
+        if (!File.Exists(traceListenerPath))
+            return "No Razor trace-listener cleanup changes were needed.";
+
+        var originalContent = await File.ReadAllTextAsync(traceListenerPath).ConfigureAwait(false);
+        var updatedContent = RemoveRazorTraceListenerModuleInitializer(originalContent);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor trace-listener cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(traceListenerPath, updatedContent, templatePath: traceListenerPath).ConfigureAwait(false);
+        return $"Removed Razor's ThrowingTraceListener module initializer in '{Path.GetRelativePath(targetRepoRoot, traceListenerPath)}' so Roslyn owns trace-listener setup during test discovery.";
+    }
+
+    private static string RemoveRazorTraceListenerModuleInitializer(string content)
+    {
+        content = NormalizeLineEndings(content, "\n");
+        content = content.Replace("using System.Runtime.CompilerServices;\n", "", StringComparison.Ordinal);
+        content = content.Replace(
+            "#pragma warning disable CA2255\n    [ModuleInitializer]\n#pragma warning restore CA2255\n    internal static void Initialize()",
+            "    internal static void Initialize()",
+            StringComparison.Ordinal);
+
+        return content;
     }
 
     private static async Task AddRazorDiagnosticErrorCodeHelperAsync(
