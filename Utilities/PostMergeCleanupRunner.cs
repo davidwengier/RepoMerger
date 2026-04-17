@@ -364,6 +364,12 @@ internal static class PostMergeCleanupRunner
             "Fix Razor diagnostic ErrorCode helpers",
             "Standalone Razor tests use a public Microsoft.CodeAnalysis.ErrorCode shim because Roslyn's C# ErrorCode enum is internal, but inside the merged Roslyn tree Roslyn.Test.Utilities.TestHelpers.Diagnostic rejects that shim type, so shared Razor test bases should cast those codes to int before delegating to Roslyn's helper.",
             FixRazorDiagnosticErrorCodeHelperAsync),
+        new(
+            "fix-razor-engine-initialize-test-mocks",
+            "Update strict Razor Language test mocks to expect RazorEngine initialization callbacks.",
+            "Fix RazorEngine strict mock tests",
+            "RazorEngine initializes features and phases as part of engine construction, so strict Microsoft.AspNetCore.Razor.Language unit tests should set up Initialize(...) on their test doubles instead of assuming those callbacks never happen.",
+            FixRazorEngineInitializeTestMocksAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2178,6 +2184,46 @@ internal static class PostMergeCleanupRunner
             : $"Added Razor diagnostic ErrorCode shims in {updatedFiles.Count} file(s): {string.Join(", ", updatedFiles.Select(path => $"'{path}'"))}.";
     }
 
+    private static async Task<string> FixRazorEngineInitializeTestMocksAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var summaries = new List<string>();
+        var languageTestRoot = Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Razor.Language", "test");
+        var helperPath = Path.Combine(languageTestRoot, "RazorEngineMockFactory.cs");
+        var helperRelativePath = Path.GetRelativePath(targetRepoRoot, helperPath);
+        var helperContent = RazorEngineMockFactoryFileContent;
+        var existingHelperContent = File.Exists(helperPath)
+            ? NormalizeLineEndings(await File.ReadAllTextAsync(helperPath).ConfigureAwait(false), "\n")
+            : null;
+        if (!string.Equals(existingHelperContent, helperContent, StringComparison.Ordinal))
+        {
+            var templatePath = Path.Combine(languageTestRoot, "RazorProjectEngineBuilderTest.cs");
+            await WriteTextPreservingUtf8BomAsync(helperPath, helperContent, templatePath: templatePath).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(targetRepoRoot, "add", "--", helperRelativePath).ConfigureAwait(false);
+            summaries.Add($"Added Razor engine test mock helper '{helperRelativePath}'.");
+        }
+
+        foreach (var relativePath in RazorEngineInitializeTestMockFiles)
+        {
+            var path = Path.Combine(languageTestRoot, relativePath);
+            if (!File.Exists(path))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = NormalizeRazorEngineInitializeTestMockContent(relativePath, originalContent);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            summaries.Add($"Normalized RazorEngine strict mocks in '{Path.GetRelativePath(targetRepoRoot, path)}'.");
+        }
+
+        return summaries.Count == 0
+            ? "No RazorEngine strict mock test changes were needed."
+            : string.Join(" ", summaries);
+    }
+
     private static async Task AddRazorDiagnosticErrorCodeHelperAsync(
         string filePath,
         string classDeclaration,
@@ -2243,6 +2289,57 @@ internal static class PostMergeCleanupRunner
         }
 
         return false;
+    }
+
+    private static string NormalizeRazorEngineInitializeTestMockContent(string relativePath, string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var updatedContent = relativePath switch
+        {
+            "RazorProjectEngineBuilderTest.cs" => NormalizeRazorProjectEngineBuilderTestContent(normalizedContent),
+            _ => RazorEngineOrderedFeatureOneOfPattern.Replace(
+                normalizedContent,
+                static match =>
+                {
+                    var indent = match.Groups["indent"].Value;
+                    var name = match.Groups["name"].Value;
+                    var type = match.Groups["type"].Value;
+                    var order = match.Groups["order"].Value;
+                    return $"{indent}var {name} = RazorEngineMockFactory.CreateFeature<{type}>(mock =>\n{indent}    mock.SetupGet(p => p.Order).Returns({order}));";
+                }),
+        };
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private static string NormalizeRazorProjectEngineBuilderTestContent(string content)
+    {
+        var updatedContent = content
+            .Replace(
+                "new Mock<IRazorEngineFeature>(MockBehavior.Strict).Object",
+                "RazorEngineMockFactory.CreateFeature<IRazorEngineFeature>()",
+                StringComparison.Ordinal)
+            .Replace(
+                "new Mock<IRazorProjectEngineFeature>(MockBehavior.Strict).Object",
+                "RazorEngineMockFactory.CreateProjectFeature<IRazorProjectEngineFeature>()",
+                StringComparison.Ordinal)
+            .Replace(
+                "new Mock<IRazorEnginePhase>(MockBehavior.Strict).Object",
+                "RazorEngineMockFactory.CreatePhase<IRazorEnginePhase>()",
+                StringComparison.Ordinal);
+
+        updatedContent = updatedContent.Replace(
+            "\n" + RazorEngineMockFactoryClassBlock + "\n",
+            "\n",
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
+            "\n" + RazorEngineMockFactoryClassBlock,
+            "\n",
+            StringComparison.Ordinal);
+
+        return updatedContent;
     }
 
     private static async Task<bool> SyncImportedRazorSkillAsync(
@@ -6198,6 +6295,10 @@ public class SurveyPrompt : ComponentBase
         @"src\\Razor\\(?:src\\Razor\\)*src\\Microsoft\.VisualStudio\.RazorExtension",
         RegexOptions.CultureInvariant);
 
+    private static readonly Regex RazorEngineOrderedFeatureOneOfPattern = new(
+        @"^(?<indent>\s*)var (?<name>\w+) = new MockRepository\(MockBehavior\.Strict\)\.OneOf<(?<type>[^>]+)>\(p => p\.Order == (?<order>\d+)\);$",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
     private static readonly string[] ImportedRazorSkillNames =
     [
         "run-toolset-tests",
@@ -6216,6 +6317,15 @@ public class SurveyPrompt : ComponentBase
         "Shipping.globalconfig",
         "NonShipping.globalconfig",
         "ApiShim.globalconfig",
+    ];
+
+    private static readonly string[] RazorEngineInitializeTestMockFiles =
+    [
+        "RazorProjectEngineBuilderTest.cs",
+        "DefaultRazorDocumentClassifierPhaseTest.cs",
+        "DefaultRazorDirectiveClassifierPhaseTest.cs",
+        "DefaultRazorOptimizationPhaseTest.cs",
+        "DefaultRazorSyntaxTreePhaseTest.cs",
     ];
 
     private static readonly string RazorUnitTestPropertyGroupBlock = string.Join(
@@ -6335,6 +6445,54 @@ public class SurveyPrompt : ComponentBase
                 "            isSuppressed);",
             ]),
     ];
+
+    private static readonly string RazorEngineMockFactoryClassBlock = string.Join(
+        "\n",
+        [
+            "internal static class RazorEngineMockFactory",
+            "{",
+            "    public static T CreateFeature<T>(System.Action<Mock<T>> configure = null)",
+            "        where T : class, IRazorEngineFeature",
+            "    {",
+            "        var mock = new Mock<T>(MockBehavior.Strict);",
+            "        mock.Setup(feature => feature.Initialize(It.IsAny<RazorEngine>()));",
+            "        configure?.Invoke(mock);",
+            "        return mock.Object;",
+            "    }",
+            "",
+            "    public static T CreateProjectFeature<T>(System.Action<Mock<T>> configure = null)",
+            "        where T : class, IRazorProjectEngineFeature",
+            "    {",
+            "        var mock = new Mock<T>(MockBehavior.Strict);",
+            "        mock.Setup(feature => feature.Initialize(It.IsAny<RazorProjectEngine>()));",
+            "        configure?.Invoke(mock);",
+            "        return mock.Object;",
+            "    }",
+            "",
+            "    public static T CreatePhase<T>(System.Action<Mock<T>> configure = null)",
+            "        where T : class, IRazorEnginePhase",
+            "    {",
+            "        var mock = new Mock<T>(MockBehavior.Strict);",
+            "        mock.Setup(phase => phase.Initialize(It.IsAny<RazorEngine>()));",
+            "        configure?.Invoke(mock);",
+            "        return mock.Object;",
+            "    }",
+            "}",
+        ]);
+
+    private static readonly string RazorEngineMockFactoryFileContent = string.Join(
+        "\n",
+        [
+            "// Licensed to the .NET Foundation under one or more agreements.",
+            "// The .NET Foundation licenses this file to you under the MIT license.",
+            "",
+            "using Moq;",
+            "",
+            "namespace Microsoft.AspNetCore.Razor.Language;",
+            "",
+            RazorEngineMockFactoryClassBlock,
+            "",
+        ]);
 
     private static readonly string RazorGlobalConfigItemGroupBlock = string.Join(
         Environment.NewLine,
