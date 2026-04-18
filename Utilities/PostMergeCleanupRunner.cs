@@ -388,6 +388,12 @@ internal static class PostMergeCleanupRunner
             "Fix DefaultLSPRequestInvokerTest Moq null return",
             "Moq's ReturnsAsync(null) in DefaultLSPRequestInvokerTest does not bind correctly in the merged Roslyn target, so the test should pass an explicit object-typed null to preserve the intended null response behavior and keep the mock setup compiling.",
             FixDefaultLspRequestInvokerTestMoqNullReturnAsync),
+        new(
+            "fix-telemetryreportertests-histogram-ordering",
+            "Sort TestTelemetryReporter.AssertMetrics deterministically before Assert.Collection.",
+            "Fix TelemetryReporterTests histogram ordering",
+            "TelemetryReporter flushes histogram data from ImmutableDictionary-backed state, so the merged Roslyn CI can emit LSP request-duration entries before the shared TimeInQueue histogram. The shared TestTelemetryReporter.AssertMetrics helper should sort metrics deterministically before Assert.Collection so existing telemetry tests can keep their readable ordered assertions without depending on dictionary enumeration order.",
+            FixTelemetryReporterTestsHistogramOrderingAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2594,6 +2600,68 @@ internal static class PostMergeCleanupRunner
             ? "No DefaultLSPRequestInvokerTest Moq null-return cleanup changes were needed."
             : $"Normalized {replacementCount} DefaultLSPRequestInvokerTest Moq null-return setup(s) in {changedFiles.Count} Razor file(s): {string.Join(", ", changedFiles)}.";
     }
+
+    private static async Task<string> FixTelemetryReporterTestsHistogramOrderingAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var testTelemetryReporterPath = Path.Combine(
+            targetRoot,
+            "src",
+            "Razor",
+            "test",
+            "Microsoft.AspNetCore.Razor.Test.Common.Tooling",
+            "Editor_NetFx",
+            "TestTelemetryReporter.cs");
+        if (!File.Exists(testTelemetryReporterPath))
+            return "No TelemetryReporterTests histogram ordering cleanup changes were needed.";
+
+        var originalContent = await File.ReadAllTextAsync(testTelemetryReporterPath).ConfigureAwait(false);
+        var updatedContent = NormalizeTelemetryReporterAssertMetricsOrdering(originalContent);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No TelemetryReporterTests histogram ordering cleanup changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(testTelemetryReporterPath, updatedContent, templatePath: testTelemetryReporterPath).ConfigureAwait(false);
+        return $"Normalized '{Path.GetRelativePath(targetRepoRoot, testTelemetryReporterPath)}' so AssertMetrics applies a deterministic metric order before Assert.Collection.";
+    }
+
+    private static string NormalizeTelemetryReporterAssertMetricsOrdering(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var updatedContent = normalizedContent.Replace(
+            "using System.Collections.Generic;\n",
+            "using System.Collections.Generic;\nusing System.Linq;\n",
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
+            TelemetryReporterAssertMetricsMethod,
+            TelemetryReporterAssertMetricsMethodWithStableOrdering,
+            StringComparison.Ordinal);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private const string TelemetryReporterAssertMetricsMethod =
+        "    public void AssertMetrics(params Action<TelemetryInstrumentEvent>[] elementInspectors)\n" +
+        "    {\n" +
+        "        Assert.Collection(Metrics, elementInspectors);\n" +
+        "    }\n";
+
+    private const string TelemetryReporterAssertMetricsMethodWithStableOrdering =
+        "    public void AssertMetrics(params Action<TelemetryInstrumentEvent>[] elementInspectors)\n" +
+        "    {\n" +
+        "        Assert.Collection(\n" +
+        "            Metrics\n" +
+        "                .OrderBy(static evt => GetInstrumentName(evt), StringComparer.Ordinal)\n" +
+        "                .ThenBy(static evt => evt.Event.Name, StringComparer.Ordinal),\n" +
+        "            elementInspectors);\n" +
+        "    }\n" +
+        "\n" +
+        "    private static string GetInstrumentName(TelemetryInstrumentEvent evt)\n" +
+        "        => evt.Instrument is Microsoft.VisualStudio.Telemetry.Metrics.IHistogram<long> histogram\n" +
+        "            ? histogram.Name\n" +
+        "            : evt.Instrument.GetType().FullName ?? string.Empty;\n";
 
     private static async Task<string> DeferRazorTraceListenerToRoslynAsync(StageContext context)
     {
