@@ -406,6 +406,12 @@ internal static class PostMergeCleanupRunner
             "Fix LanguageConfigurationTest output assets",
             "Roslyn CI runs Razor unit tests from rehydrated output payloads that do not have a repo-root artifacts path. LanguageConfigurationTest should copy language-configuration.json into its output and probe output-local or repo-local copies instead of assuming Environment.CurrentDirectory contains artifacts.",
             FixLanguageConfigurationTestOutputAssetsAsync),
+        new(
+            "fix-cohost-inlinecompletion-snippet-asset",
+            "Ensure Cohost inline-completion tests include and locate TestSnippets.snippet in merged Razor unit-test outputs.",
+            "Fix CohostInlineCompletionEndpointTest snippet asset",
+            "The merged Roslyn unit-test build does not carry the Cohost TestSnippets.snippet payload into CI workitems from the existing None Update item, so the Razor unit-test project should include that file explicitly and the test should probe output-local or repo-local locations.",
+            FixCohostInlineCompletionSnippetAssetAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2832,6 +2838,80 @@ internal static class PostMergeCleanupRunner
             : updatedContent;
     }
 
+    private static async Task<string> FixCohostInlineCompletionSnippetAssetAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var summaries = new List<string>();
+        var cohostInlineCompletionTestPath = GetExistingPath(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "Cohost", "CohostInlineCompletionEndpointTest.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "Cohost", "CohostInlineCompletionEndpointTest.cs"));
+        if (File.Exists(cohostInlineCompletionTestPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(cohostInlineCompletionTestPath).ConfigureAwait(false);
+            var updatedContent = NormalizeCohostInlineCompletionTestSnippetLookup(originalContent);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    cohostInlineCompletionTestPath,
+                    updatedContent,
+                    templatePath: cohostInlineCompletionTestPath).ConfigureAwait(false);
+                summaries.Add($"Normalized output-aware snippet probes in '{Path.GetRelativePath(targetRepoRoot, cohostInlineCompletionTestPath)}'.");
+            }
+        }
+
+        var razorUnitTestProjectPath = GetExistingPath(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests.csproj"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "Microsoft.VisualStudio.LanguageServices.Razor.Test.csproj"));
+        if (File.Exists(razorUnitTestProjectPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(razorUnitTestProjectPath).ConfigureAwait(false);
+            var updatedContent = EnsureCohostSnippetIncludedInOutput(originalContent);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    razorUnitTestProjectPath,
+                    updatedContent,
+                    templatePath: razorUnitTestProjectPath).ConfigureAwait(false);
+                summaries.Add($"Changed the Cohost snippet item to an explicit Include in '{Path.GetRelativePath(targetRepoRoot, razorUnitTestProjectPath)}'.");
+            }
+        }
+
+        return summaries.Count == 0
+            ? "No Cohost inline-completion snippet cleanup changes were needed."
+            : string.Join(" ", summaries);
+    }
+
+    private static string NormalizeCohostInlineCompletionTestSnippetLookup(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var oldMethod = NormalizeLineEndings(CohostGetSnippetsIfAvailableMethod, "\n");
+        var newMethod = NormalizeLineEndings(CohostGetSnippetsIfAvailableMethodWithFallback, "\n");
+        var updatedContent = normalizedContent.Replace(
+            oldMethod,
+            newMethod,
+            StringComparison.Ordinal);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private static string EnsureCohostSnippetIncludedInOutput(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var cohostSnippetUpdateItemGroup = NormalizeLineEndings(CohostSnippetUpdateItemGroup, "\n");
+        var cohostSnippetIncludeItemGroup = NormalizeLineEndings(CohostSnippetIncludeItemGroup, "\n");
+        var updatedContent = normalizedContent.Replace(
+            cohostSnippetUpdateItemGroup,
+            cohostSnippetIncludeItemGroup,
+            StringComparison.Ordinal);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
     private const string MicrobenchmarkSystemCodeDomCopyItem =
         """
             <None Include="$([System.IO.Directory]::GetParent($(BundledRuntimeIdentifierGraphFile)))\System.CodeDom.dll">
@@ -2863,6 +2943,26 @@ internal static class PostMergeCleanupRunner
         """
           <ItemGroup>
             <None Update="Cohost\TestSnippets.snippet">
+              <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            </None>
+          </ItemGroup>
+
+        """;
+
+    private const string CohostSnippetUpdateItemGroup =
+        """
+          <ItemGroup>
+            <None Update="Cohost\TestSnippets.snippet">
+              <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            </None>
+          </ItemGroup>
+
+        """;
+
+    private const string CohostSnippetIncludeItemGroup =
+        """
+          <ItemGroup>
+            <None Include="Cohost\TestSnippets.snippet">
               <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
             </None>
           </ItemGroup>
@@ -2953,6 +3053,106 @@ internal static class PostMergeCleanupRunner
 
                 return null;
             }
+        """;
+
+    private const string CohostGetSnippetsIfAvailableMethod =
+        """
+                public IEnumerable<RoslynSnippets.SnippetInfo> GetSnippetsIfAvailable()
+                {
+                    var snippetsFile = Path.Combine(Directory.GetCurrentDirectory(), "Cohost", "TestSnippets.snippet");
+                    if (!File.Exists(snippetsFile))
+                    {
+                        throw new InvalidOperationException($"Could not find test snippets file at {snippetsFile}");
+                    }
+
+                    var testSnippetsXml = XDocument.Load(snippetsFile);
+                    var snippets = XmlSnippetParser.CodeSnippet.ReadSnippets(testSnippetsXml);
+
+                    return snippets.Select(s => new RoslynSnippets.SnippetInfo(s.Shortcut, s.Title, s.Title, snippetsFile));
+                }
+        """;
+
+    private const string CohostGetSnippetsIfAvailableMethodWithFallback =
+        """
+                public IEnumerable<RoslynSnippets.SnippetInfo> GetSnippetsIfAvailable()
+                {
+                    var snippetsFile = GetTestSnippetsFile();
+                    var testSnippetsXml = XDocument.Load(snippetsFile);
+                    var snippets = XmlSnippetParser.CodeSnippet.ReadSnippets(testSnippetsXml);
+
+                    return snippets.Select(s => new RoslynSnippets.SnippetInfo(s.Shortcut, s.Title, s.Title, snippetsFile));
+                }
+
+                private static string GetTestSnippetsFile()
+                {
+                    var appContextBaseDirectory = AppContext.BaseDirectory;
+                    var currentDirectory = Environment.CurrentDirectory;
+
+                    var snippetsFile = TryFindTestSnippetsFile(appContextBaseDirectory)
+                        ?? (string.Equals(currentDirectory, appContextBaseDirectory, StringComparison.OrdinalIgnoreCase)
+                            ? null
+                            : TryFindTestSnippetsFile(currentDirectory));
+
+                    if (snippetsFile is null)
+                    {
+                        throw new InvalidOperationException($"Could not find test snippets file from '{appContextBaseDirectory}' or '{currentDirectory}'.");
+                    }
+
+                    return snippetsFile;
+                }
+
+                private static string? TryFindTestSnippetsFile(string baseDirectory)
+                {
+                    if (string.IsNullOrWhiteSpace(baseDirectory) || !Directory.Exists(baseDirectory))
+                    {
+                        return null;
+                    }
+
+                    var outputLocalPath = Path.Combine(baseDirectory, "Cohost", "TestSnippets.snippet");
+                    if (File.Exists(outputLocalPath))
+                    {
+                        return outputLocalPath;
+                    }
+
+                    var repoRoot = SearchUp(baseDirectory, "global.json");
+                    if (repoRoot is not null)
+                    {
+                        var razorRepoRoot = Directory.Exists(Path.Combine(repoRoot, "src", "Razor", "src"))
+                            ? Path.Combine(repoRoot, "src", "Razor")
+                            : repoRoot;
+                        foreach (var candidatePath in new[]
+                        {
+                            Path.Combine(razorRepoRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "Cohost", "TestSnippets.snippet"),
+                            Path.Combine(razorRepoRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "Cohost", "TestSnippets.snippet"),
+                        })
+                        {
+                            if (File.Exists(candidatePath))
+                            {
+                                return candidatePath;
+                            }
+                        }
+                    }
+
+                    foreach (var candidatePath in Directory.EnumerateFiles(baseDirectory, "TestSnippets.snippet", SearchOption.AllDirectories))
+                    {
+                        return candidatePath;
+                    }
+
+                    return null;
+                }
+
+                private static string? SearchUp(string baseDirectory, string fileName)
+                {
+                    for (var current = new DirectoryInfo(baseDirectory); current is not null; current = current.Parent)
+                    {
+                        if (File.Exists(Path.Combine(current.FullName, fileName)))
+                        {
+                            return current.FullName;
+                        }
+                    }
+
+                    return null;
+                }
         """;
 
     private static async Task<string> DeferRazorTraceListenerToRoslynAsync(StageContext context)
