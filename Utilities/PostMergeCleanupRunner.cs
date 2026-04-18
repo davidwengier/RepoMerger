@@ -424,6 +424,12 @@ internal static class PostMergeCleanupRunner
             "Skip English-only Razor tests",
             "The merged Roslyn Spanish leg runs with a non-English culture, so Razor tests that assert raw English compiler diagnostic text or English-only diagnostic arguments should be skipped there until they are rewritten to use localized expectations.",
             SkipEnglishOnlyRazorTestsAsync),
+        new(
+            "preserve-list-copyto-exception-message",
+            "Keep Razor's own destination-too-short check in ListExtensions.CopyTo before the NET8 CollectionExtensions fast path.",
+            "Preserve ListExtensions.CopyTo exception message",
+            "Razor's shared collection helpers use ArgHelper.ThrowIfDestinationTooShort so their ArgumentException text comes from Razor resources across TFMs. The merged NET8 ListExtensions fast path should preserve that behavior instead of delegating the short-destination failure to CollectionExtensions with framework-localized message text.",
+            PreserveListCopyToExceptionMessageAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -3063,6 +3069,45 @@ internal static class PostMergeCleanupRunner
             await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
         }
+    }
+
+    private static async Task<string> PreserveListCopyToExceptionMessageAsync(StageContext context)
+    {
+        var listExtensionsPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Shared",
+            "Microsoft.AspNetCore.Razor.Utilities.Shared",
+            "ListExtensions.cs");
+
+        var (changedFiles, replacementCount) = await ApplyKnownFileTextReplacementsAsync(
+            context.TargetRepoRoot,
+            (
+                listExtensionsPath,
+                [
+                    (
+                        """
+#if NET8_0_OR_GREATER
+        CollectionExtensions.CopyTo(list, destination);
+#else
+        ArgHelper.ThrowIfNull(list);
+        ArgHelper.ThrowIfDestinationTooShort(destination, list.Count);
+
+""",
+                        """
+        ArgHelper.ThrowIfNull(list);
+        ArgHelper.ThrowIfDestinationTooShort(destination, list.Count);
+
+#if NET8_0_OR_GREATER
+        CollectionExtensions.CopyTo(list, destination);
+#else
+""")
+                ]))
+            .ConfigureAwait(false);
+
+        return replacementCount == 0
+            ? "No ListExtensions.CopyTo exception-message fix was needed."
+            : $"Preserved Razor's destination-too-short exception behavior in {string.Join(", ", changedFiles)}.";
     }
 
     private static string EnsureRazorEnglishLocaleConditionAdded(string content)
