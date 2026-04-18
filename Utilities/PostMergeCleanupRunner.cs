@@ -3992,10 +3992,30 @@ internal static class PostMergeCleanupRunner
         if (!File.Exists(directoryBuildTargetsPath))
             return "No Razor root Directory.Build.targets file was found for shipping symbols cleanup.";
 
-        var targetBlock = string.Join(
+        var oldTargetBlock = string.Join(
             Environment.NewLine,
             [
                 "  <Target Name=\"MoveRazorShippingSymbolsPackageToNonShipping\" AfterTargets=\"Pack\" Condition=\"'$(IsPackable)' == 'true' and '$(PackageOutputPath)' != '' and $([System.String]::Copy('$(PackageOutputPath)').Contains('\\Shipping\\'))\">",
+                "    <ItemGroup>",
+                "      <_RazorShippingSymbolsPackage Include=\"$(PackageOutputPath)$(PackageId).$(PackageVersion).symbols.nupkg\"",
+                "                                   Condition=\"Exists('$(PackageOutputPath)$(PackageId).$(PackageVersion).symbols.nupkg')\" />",
+                "      <_MovedRazorShippingSymbolsPackage Include=\"@(_RazorShippingSymbolsPackage)\">",
+                "        <TargetPath>$(ArtifactsNonShippingPackagesDir)%(_RazorShippingSymbolsPackage.Filename)%(_RazorShippingSymbolsPackage.Extension)</TargetPath>",
+                "      </_MovedRazorShippingSymbolsPackage>",
+                "    </ItemGroup>",
+                "    <Delete Files=\"@(_MovedRazorShippingSymbolsPackage->'%(TargetPath)')\" Condition=\"'@(_MovedRazorShippingSymbolsPackage)' != ''\" />",
+                "    <Move SourceFiles=\"@(_RazorShippingSymbolsPackage)\"",
+                "          DestinationFiles=\"@(_MovedRazorShippingSymbolsPackage->'%(TargetPath)')\"",
+                "          Condition=\"'@(_RazorShippingSymbolsPackage)' != ''\">",
+                "      <Output TaskParameter=\"DestinationFiles\" ItemName=\"_FilesWritten\" />",
+                "    </Move>",
+                "  </Target>",
+            ]) + Environment.NewLine;
+
+        var targetBlock = string.Join(
+            Environment.NewLine,
+            [
+                "  <Target Name=\"MoveRazorShippingSymbolsPackageToNonShipping\" AfterTargets=\"Pack\" Condition=\"'$(IsPackable)' == 'true' and '$(PackageOutputPath)' != '' and ($([System.String]::Copy('$(PackageOutputPath)').Contains('\\Shipping\\')) or $([System.String]::Copy('$(PackageOutputPath)').Contains('/Shipping/')))\">",
                 "    <ItemGroup>",
                 "      <_RazorShippingSymbolsPackage Include=\"$(PackageOutputPath)$(PackageId).$(PackageVersion).symbols.nupkg\"",
                 "                                   Condition=\"Exists('$(PackageOutputPath)$(PackageId).$(PackageVersion).symbols.nupkg')\" />",
@@ -4021,19 +4041,44 @@ internal static class PostMergeCleanupRunner
             ]);
 
         var originalContent = await File.ReadAllTextAsync(directoryBuildTargetsPath).ConfigureAwait(false);
-        if (originalContent.Contains("MoveRazorShippingSymbolsPackageToNonShipping", StringComparison.Ordinal))
+        var normalizedContent = NormalizeLineEndings(originalContent, "\n");
+        var normalizedOldTargetBlock = NormalizeLineEndings(oldTargetBlock, "\n");
+        var normalizedTargetBlock = NormalizeLineEndings(targetBlock, "\n");
+        var normalizedAnchor = NormalizeLineEndings(anchor, "\n");
+
+        if (normalizedContent.Contains(normalizedTargetBlock, StringComparison.Ordinal))
             return "No Razor shipping symbols package move was needed.";
 
-        var updatedContent = originalContent.Replace(
-            anchor,
-            anchor + Environment.NewLine + Environment.NewLine + targetBlock.TrimEnd('\r', '\n'),
-            StringComparison.Ordinal);
+        string updatedContent;
+        string summary;
 
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No Razor shipping symbols package move was needed.";
+        if (normalizedContent.Contains("MoveRazorShippingSymbolsPackageToNonShipping", StringComparison.Ordinal))
+        {
+            updatedContent = normalizedContent.Replace(
+                normalizedOldTargetBlock,
+                normalizedTargetBlock,
+                StringComparison.Ordinal);
+
+            if (string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal))
+                throw new InvalidOperationException($"Expected to update the existing Razor shipping symbols target in '{directoryBuildTargetsPath}', but its contents were not recognized.");
+
+            summary = $"Updated the shipping symbols package move target in '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}' to match both Windows and Unix Shipping package paths.";
+        }
+        else
+        {
+            updatedContent = normalizedContent.Replace(
+                normalizedAnchor,
+                normalizedAnchor + "\n\n" + normalizedTargetBlock.TrimEnd('\n'),
+                StringComparison.Ordinal);
+
+            if (string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal))
+                return "No Razor shipping symbols package move was needed.";
+
+            summary = $"Added a shipping symbols package move target to '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}'.";
+        }
 
         await WriteTextPreservingUtf8BomAsync(directoryBuildTargetsPath, updatedContent, templatePath: directoryBuildTargetsPath).ConfigureAwait(false);
-        return $"Added a shipping symbols package move target to '{Path.GetRelativePath(targetRepoRoot, directoryBuildTargetsPath)}'.";
+        return summary;
     }
 
     private static async Task<string> RestoreRazorVersionPropsAsync(StageContext context)
