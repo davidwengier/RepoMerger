@@ -394,6 +394,12 @@ internal static class PostMergeCleanupRunner
             "Fix TelemetryReporterTests histogram ordering",
             "TelemetryReporter flushes histogram data from ImmutableDictionary-backed state, so the merged Roslyn CI can emit LSP request-duration entries before the shared TimeInQueue histogram. The shared TestTelemetryReporter.AssertMetrics helper should sort metrics deterministically before Assert.Collection so existing telemetry tests can keep their readable ordered assertions without depending on dictionary enumeration order.",
             FixTelemetryReporterTestsHistogramOrderingAsync),
+        new(
+            "remove-razor-duplicate-build-artifacts",
+            "Remove Razor-local output copies that duplicate Roslyn's xUnit settings and System.CodeDom artifacts.",
+            "Remove duplicate Razor build artifacts",
+            "Roslyn already copies eng\\config\\xunit.runner.json for test projects and supplies System.CodeDom through the SDK/package graph, so merged Razor projects should drop their own xunit.runner.json output items and the microbenchmark generator's manual System.CodeDom.dll copy to avoid BuildBoss multiple-write failures.",
+            RemoveRazorDuplicateBuildArtifactsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2662,6 +2668,85 @@ internal static class PostMergeCleanupRunner
         "        => evt.Instrument is Microsoft.VisualStudio.Telemetry.Metrics.IHistogram<long> histogram\n" +
         "            ? histogram.Name\n" +
         "            : evt.Instrument.GetType().FullName ?? string.Empty;\n";
+
+    private static async Task<string> RemoveRazorDuplicateBuildArtifactsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+        var xunitProjectCount = 0;
+        var removedSystemCodeDomCopy = false;
+
+        foreach (var projectPath in await GetTrackedProjectPathsAsync(targetRepoRoot, targetRoot).ConfigureAwait(false))
+        {
+            var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+            var updatedContent = RemoveProjectLocalXunitRunnerJsonItem(originalContent);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
+            xunitProjectCount++;
+        }
+
+        var microbenchmarkGeneratorProjectPath = Path.Combine(
+            targetRoot,
+            "src",
+            "Compiler",
+            "perf",
+            "Microsoft.AspNetCore.Razor.Microbenchmarks.Generator",
+            "Microsoft.AspNetCore.Razor.Microbenchmarks.Generator.csproj");
+        if (File.Exists(microbenchmarkGeneratorProjectPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(microbenchmarkGeneratorProjectPath).ConfigureAwait(false);
+            var updatedContent = RemoveMicrobenchmarkSystemCodeDomCopyItem(originalContent);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(microbenchmarkGeneratorProjectPath, updatedContent, templatePath: microbenchmarkGeneratorProjectPath).ConfigureAwait(false);
+                changedFiles.Add(Path.GetRelativePath(targetRepoRoot, microbenchmarkGeneratorProjectPath));
+                removedSystemCodeDomCopy = true;
+            }
+        }
+
+        return changedFiles.Count == 0
+            ? "No duplicate Razor build artifact cleanup changes were needed."
+            : $"Removed duplicate Razor build-artifact copies in {changedFiles.Count} project file(s): removed project-local xunit.runner.json output items from {xunitProjectCount} Razor project(s){(removedSystemCodeDomCopy ? " and removed the microbenchmark System.CodeDom.dll output copy" : string.Empty)}: {string.Join(", ", changedFiles)}.";
+    }
+
+    private static string RemoveProjectLocalXunitRunnerJsonItem(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var updatedContent = RazorProjectLocalXunitRunnerItemGroupPattern.Replace(normalizedContent, string.Empty);
+        updatedContent = RazorProjectLocalXunitRunnerItemPattern.Replace(updatedContent, string.Empty);
+        updatedContent = EmptyXmlItemGroupPattern.Replace(updatedContent, string.Empty);
+        updatedContent = Regex.Replace(updatedContent, @"\n{3,}", "\n\n", RegexOptions.CultureInvariant);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private static string RemoveMicrobenchmarkSystemCodeDomCopyItem(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var systemCodeDomCopyItem = NormalizeLineEndings(MicrobenchmarkSystemCodeDomCopyItem, "\n");
+        var updatedContent = normalizedContent.Replace(
+            systemCodeDomCopyItem,
+            string.Empty,
+            StringComparison.Ordinal);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private const string MicrobenchmarkSystemCodeDomCopyItem =
+        """
+            <None Include="$([System.IO.Directory]::GetParent($(BundledRuntimeIdentifierGraphFile)))\System.CodeDom.dll">
+              <Link>System.CodeDom.dll</Link>
+              <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            </None>
+        """;
 
     private static async Task<string> DeferRazorTraceListenerToRoslynAsync(StageContext context)
     {
@@ -6767,6 +6852,18 @@ public class SurveyPrompt : ComponentBase
     private static readonly Regex RazorLanguageConfigurationTestPathPattern = new(
         @"src\\Razor\\(?:src\\Razor\\)*src\\Microsoft\.VisualStudio\.RazorExtension",
         RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorProjectLocalXunitRunnerItemGroupPattern = new(
+        "^[ \\t]*<ItemGroup>\\n[ \\t]*<None (?:Include|Update)=\"xunit\\.runner\\.json\" CopyToOutputDirectory=\"PreserveNewest\" />\\n[ \\t]*</ItemGroup>\\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorProjectLocalXunitRunnerItemPattern = new(
+        "^[ \\t]*<None (?:Include|Update)=\"xunit\\.runner\\.json\" CopyToOutputDirectory=\"PreserveNewest\" />\\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex EmptyXmlItemGroupPattern = new(
+        "^[ \\t]*<ItemGroup>\\n(?:[ \\t]*\\n)*[ \\t]*</ItemGroup>\\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex RazorEngineOrderedFeatureOneOfPattern = new(
         @"^(?<indent>\s*)var (?<name>\w+) = new MockRepository\(MockBehavior\.Strict\)\.OneOf<(?<type>[^>]+)>\(p => p\.Order == (?<order>\d+)\);$",
