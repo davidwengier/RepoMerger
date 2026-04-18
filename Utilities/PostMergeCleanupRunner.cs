@@ -430,6 +430,12 @@ internal static class PostMergeCleanupRunner
             "Preserve ListExtensions.CopyTo exception message",
             "Razor's shared collection helpers use ArgHelper.ThrowIfDestinationTooShort so their ArgumentException text comes from Razor resources across TFMs. The merged NET8 ListExtensions fast path should preserve that behavior instead of delegating the short-destination failure to CollectionExtensions with framework-localized message text.",
             PreserveListCopyToExceptionMessageAsync),
+        new(
+            "fix-cohost-locale-sensitive-ui-tests",
+            "Use Razor resources for project-availability tooltip text and skip Roslyn-owned hover/inlay text assertions on non-English locales.",
+            "Fix Cohost locale-sensitive UI tests",
+            "The merged Roslyn Spanish leg localizes UI text coming from both Razor and Roslyn. Razor-owned strings like project-availability warnings should be asserted via Razor resources, while Roslyn-owned hover and inlay tooltip text should stay English-only until the tests are rewritten to compare localized Roslyn output.",
+            FixCohostLocaleSensitiveUiTestsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -3110,6 +3116,97 @@ internal static class PostMergeCleanupRunner
             : $"Preserved Razor's destination-too-short exception behavior in {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> FixCohostLocaleSensitiveUiTestsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "ProjectAvailabilityTests.cs"),
+            content =>
+            {
+                var updatedContent = EnsureUsingDirective(
+                    content,
+                    "using SR = Microsoft.CodeAnalysis.Razor.Workspaces.Resources.SR;",
+                    "using Xunit.Abstractions;");
+
+                updatedContent = ReplaceRequiredText(
+                    updatedContent,
+                    "        AssertEx.EqualOrDiff(\"\"\"\n" +
+                    "\n" +
+                    "            ⚠️ Not available in:\n" +
+                    "                SomeProject\n" +
+                    "            \"\"\", availability);\n",
+                    "        AssertEx.EqualOrDiff($\"\"\"\n" +
+                    "\n" +
+                    "            ⚠️ {SR.Not_Available_In}:\n" +
+                    "                SomeProject\n" +
+                    "            \"\"\", availability);\n",
+                    "the Razor project-availability assertion for SomeProject");
+
+                updatedContent = ReplaceRequiredText(
+                    updatedContent,
+                    "        AssertEx.EqualOrDiff(\"\"\"\n" +
+                    "\n" +
+                    "            ⚠️ Not available in:\n" +
+                    "                AnotherProject\n" +
+                    "                SomeProject\n" +
+                    "            \"\"\", availability);\n",
+                    "        AssertEx.EqualOrDiff($\"\"\"\n" +
+                    "\n" +
+                    "            ⚠️ {SR.Not_Available_In}:\n" +
+                    "                AnotherProject\n" +
+                    "                SomeProject\n" +
+                    "            \"\"\", availability);\n",
+                    "the Razor project-availability assertion for multiple projects");
+
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Endpoints", "CohostHoverEndpointTest.cs"),
+            content =>
+            {
+                var updatedContent = EnsureUsingDirective(content, "using Roslyn.Test.Utilities;", "using Microsoft.CodeAnalysis.Text;");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "CSharp", "ConditionalFact(typeof(IsEnglishLocal))");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Endpoints", "CohostInlayHintEndpointTest.cs"),
+            content =>
+            {
+                var updatedContent = EnsureUsingDirective(
+                    content,
+                    "using RoslynConditionalFact = Roslyn.Test.Utilities.ConditionalFactAttribute;",
+                    "using Xunit.Abstractions;");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "InlayHints", "RoslynConditionalFact(typeof(IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "InlayHints_DisplayAllOverride", "RoslynConditionalFact(typeof(IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "PageDirective", "RoslynConditionalFact(typeof(IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "AttributeDirective", "RoslynConditionalFact(typeof(IsEnglishLocal))");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        return changedFiles.Count == 0
+            ? "No Cohost locale-sensitive UI test fixes were needed."
+            : $"Updated {changedFiles.Count} Cohost locale-sensitive UI test file(s): {string.Join(", ", changedFiles)}.";
+
+        async Task RewriteFileAsync(string path, Func<string, string> rewrite)
+        {
+            if (!File.Exists(path))
+                return;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = rewrite(originalContent);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                return;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+    }
+
     private static string EnsureRazorEnglishLocaleConditionAdded(string content)
     {
         var normalizedContent = NormalizeLineEndings(content, "\n");
@@ -3216,6 +3313,21 @@ internal static class PostMergeCleanupRunner
         var normalizedContent = NormalizeLineEndings(content, "\n");
         var updatedContent = normalizedContent.Replace(usingDirective + "\n", string.Empty, StringComparison.Ordinal);
 
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private static string ReplaceRequiredText(string content, string oldText, string newText, string description)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        if (normalizedContent.Contains(newText, StringComparison.Ordinal))
+            return content;
+
+        if (!normalizedContent.Contains(oldText, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Could not find {description} while applying the locale-sensitive Cohost test cleanup.");
+
+        var updatedContent = normalizedContent.Replace(oldText, newText, StringComparison.Ordinal);
         return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
             ? content
             : updatedContent;
