@@ -436,6 +436,12 @@ internal static class PostMergeCleanupRunner
             "Fix Cohost locale-sensitive UI tests",
             "The merged Roslyn Spanish leg localizes UI text coming from both Razor and Roslyn. Razor-owned strings like project-availability warnings should be asserted via Razor resources, while Roslyn-owned hover and inlay tooltip text should stay English-only until the tests are rewritten to compare localized Roslyn output.",
             FixCohostLocaleSensitiveUiTestsAsync),
+        new(
+            "fix-workspaces-locale-sensitive-completion-tests",
+            "Use Razor Workspaces resources for localized directive-completion and CSharp Razor keyword expectations.",
+            "Fix Workspaces locale-sensitive completion tests",
+            "The merged Roslyn Spanish leg localizes Razor Workspaces completion labels and descriptions through Microsoft.CodeAnalysis.Razor.Workspaces resources. The corresponding Workspace tests should assert those resource-backed values instead of hardcoded English strings.",
+            FixWorkspacesLocaleSensitiveCompletionTestsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -3191,6 +3197,85 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Cohost locale-sensitive UI test fixes were needed."
             : $"Updated {changedFiles.Count} Cohost locale-sensitive UI test file(s): {string.Join(", ", changedFiles)}.";
+
+        async Task RewriteFileAsync(string path, Func<string, string> rewrite)
+        {
+            if (!File.Exists(path))
+                return;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = rewrite(originalContent);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                return;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+    }
+
+    private static async Task<string> FixWorkspacesLocaleSensitiveCompletionTestsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.Workspaces.UnitTests", "Completion", "DirectiveCompletionItemProviderTest.cs"),
+            content =>
+            {
+                var updatedContent = EnsureUsingDirective(
+                    content,
+                    "using SR = Microsoft.CodeAnalysis.Razor.Workspaces.Resources.SR;",
+                    "using Xunit.Abstractions;");
+
+                updatedContent = ReplaceRequiredText(
+                    updatedContent,
+                    """item => AssertRazorCompletionItem(knownDirective + " directive ...", customDirective, item, commitCharacters: DirectiveCompletionItemProvider.BlockDirectiveCommitCharacters, isSnippet: true),""",
+                    """item => AssertRazorCompletionItem($"{knownDirective} {SR.Directive} ...", customDirective, item, commitCharacters: DirectiveCompletionItemProvider.BlockDirectiveCommitCharacters, isSnippet: true),""",
+                    "the localized component directive snippet assertion");
+
+                updatedContent = ReplaceRequiredText(
+                    updatedContent,
+                    """item => AssertRazorCompletionItem(usingDirective.Directive + " directive ...", usingDirective, item, commitCharacters: DirectiveCompletionItemProvider.SingleLineDirectiveCommitCharacters, isSnippet: true));""",
+                    """item => AssertRazorCompletionItem($"{usingDirective.Directive} {SR.Directive} ...", usingDirective, item, commitCharacters: DirectiveCompletionItemProvider.SingleLineDirectiveCommitCharacters, isSnippet: true));""",
+                    "the localized using directive snippet assertion");
+
+                updatedContent = ReplaceRequiredText(
+                    updatedContent,
+                    """item => AssertRazorCompletionItem("model directive ...", customDirective, item, commitCharacters: DirectiveCompletionItemProvider.BlockDirectiveCommitCharacters, isSnippet: true), ..""",
+                    """item => AssertRazorCompletionItem($"model {SR.Directive} ...", customDirective, item, commitCharacters: DirectiveCompletionItemProvider.BlockDirectiveCommitCharacters, isSnippet: true), ..""",
+                    "the localized legacy model directive snippet assertion");
+
+                updatedContent = ReplaceRequiredText(
+                    updatedContent,
+                    """        AssertRazorCompletionItem(directive.Directive + (isSnippet ? " directive ..." : string.Empty), directive, item, isSnippet: isSnippet);""",
+                    """        AssertRazorCompletionItem(isSnippet ? $"{directive.Directive} {SR.Directive} ..." : directive.Directive, directive, item, isSnippet: isSnippet);""",
+                    "the localized default directive snippet assertion");
+
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.Workspaces.UnitTests", "Completion", "CSharpRazorKeywordCompletionItemProviderTests.cs"),
+            content =>
+            {
+                var updatedContent = EnsureUsingDirective(
+                    content,
+                    "using SR = Microsoft.CodeAnalysis.Razor.Workspaces.Resources.SR;",
+                    "using Xunit.Abstractions;");
+
+                updatedContent = ReplaceRequiredText(
+                    updatedContent,
+                    """        Assert.Equal(keyword + " Keyword", completionDescription.Description);""",
+                    """        Assert.Equal(string.Format(SR.KeywordDescription, keyword), completionDescription.Description);""",
+                    "the localized C# Razor keyword description assertion");
+
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        return changedFiles.Count == 0
+            ? "No Workspaces locale-sensitive completion test fixes were needed."
+            : $"Updated {changedFiles.Count} Workspaces locale-sensitive completion test file(s): {string.Join(", ", changedFiles)}.";
 
         async Task RewriteFileAsync(string path, Func<string, string> rewrite)
         {
