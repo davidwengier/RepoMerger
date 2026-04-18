@@ -366,9 +366,9 @@ internal static class PostMergeCleanupRunner
             FixRazorDiagnosticErrorCodeHelperAsync),
         new(
             "fix-razor-engine-initialize-test-mocks",
-            "Update strict Razor Language test mocks to expect RazorEngine initialization callbacks.",
+            "Update Razor Language test mocks and helper signatures for RazorEngine initialization and nullable-safe optional callbacks.",
             "Fix RazorEngine strict mock tests",
-            "RazorEngine initializes features and phases as part of engine construction, so strict Microsoft.AspNetCore.Razor.Language unit tests should set up Initialize(...) on their test doubles instead of assuming those callbacks never happen.",
+            "RazorEngine initializes features and phases as part of engine construction, so strict Microsoft.AspNetCore.Razor.Language unit tests should set up Initialize(...) on their test doubles instead of assuming those callbacks never happen. The shared RazorEngineMockFactory helper should also mark its optional configure callbacks nullable so the merged Roslyn build does not report CS8625 warnings on its null default arguments.",
             FixRazorEngineInitializeTestMocksAsync),
         new(
             "defer-razor-trace-listener-to-roslyn",
@@ -6933,7 +6933,7 @@ public class SurveyPrompt : ComponentBase
         [
             "internal static class RazorEngineMockFactory",
             "{",
-            "    public static T CreateFeature<T>(System.Action<Mock<T>> configure = null)",
+            "    public static T CreateFeature<T>(System.Action<Mock<T>>? configure = null)",
             "        where T : class, IRazorEngineFeature",
             "    {",
             "        var mock = new Mock<T>(MockBehavior.Strict);",
@@ -6942,7 +6942,7 @@ public class SurveyPrompt : ComponentBase
             "        return mock.Object;",
             "    }",
             "",
-            "    public static T CreateProjectFeature<T>(System.Action<Mock<T>> configure = null)",
+            "    public static T CreateProjectFeature<T>(System.Action<Mock<T>>? configure = null)",
             "        where T : class, IRazorProjectEngineFeature",
             "    {",
             "        var mock = new Mock<T>(MockBehavior.Strict);",
@@ -6951,7 +6951,7 @@ public class SurveyPrompt : ComponentBase
             "        return mock.Object;",
             "    }",
             "",
-            "    public static T CreatePhase<T>(System.Action<Mock<T>> configure = null)",
+            "    public static T CreatePhase<T>(System.Action<Mock<T>>? configure = null)",
             "        where T : class, IRazorEnginePhase",
             "    {",
             "        var mock = new Mock<T>(MockBehavior.Strict);",
