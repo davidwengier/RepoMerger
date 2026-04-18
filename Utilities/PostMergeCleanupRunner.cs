@@ -2977,9 +2977,11 @@ internal static class PostMergeCleanupRunner
             Path.Combine(targetRoot, "src", "Compiler", "test", "Microsoft.NET.Sdk.Razor.SourceGenerators.UnitTests", "ComponentParameterNullableWarningSuppressorTests.cs"),
             content =>
             {
-                var updatedContent = ReplaceAllFactAttributes(
-                    content,
-                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))",
+                var updatedContent = RemoveUsingDirective(content, "using Microsoft.AspNetCore.Razor;");
+                updatedContent = EnsureUsingDirective(updatedContent, "using Roslyn.Test.Utilities;", "using Microsoft.CodeAnalysis.Testing;");
+                updatedContent = ReplaceAllFactAttributes(
+                    updatedContent,
+                    "ConditionalFact(typeof(IsEnglishLocal))",
                     "ComponentParameterNullableWarningSuppressorTests");
                 return updatedContent;
             }).ConfigureAwait(false);
@@ -2988,18 +2990,19 @@ internal static class PostMergeCleanupRunner
             Path.Combine(targetRoot, "src", "Compiler", "test", "Microsoft.NET.Sdk.Razor.SourceGenerators.UnitTests", "RazorSourceGeneratorTests.cs"),
             content =>
             {
-                var updatedContent = ReplaceFactAttributeForMethod(
-                    content,
+                var updatedContent = RemoveUsingDirective(content, "using Microsoft.AspNetCore.Razor;");
+                updatedContent = ReplaceFactAttributeForMethod(
+                    updatedContent,
                     "IncrementalCompilation_RazorFiles_WhenNewTypeIsAdded",
-                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                    "ConditionalFact(typeof(IsEnglishLocal))");
                 updatedContent = ReplaceFactAttributeForMethod(
                     updatedContent,
                     "IncrementalCompilation_RazorFiles_WhenCSharpTypeChanges",
-                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                    "ConditionalFact(typeof(IsEnglishLocal))");
                 updatedContent = ReplaceFactAttributeForMethod(
                     updatedContent,
                     "SourceGenerator_CshtmlFiles_CSharpTypeChanges",
-                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                    "ConditionalFact(typeof(IsEnglishLocal))");
                 return updatedContent;
             }).ConfigureAwait(false);
 
@@ -3007,22 +3010,23 @@ internal static class PostMergeCleanupRunner
             Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Mvc.Razor.Extensions", "test", "IntegrationTests", "CodeGenerationIntegrationTest.cs"),
             content =>
             {
-                var updatedContent = ReplaceFactAttributeForMethod(
-                    content,
+                var updatedContent = RemoveUsingDirective(content, "using Microsoft.AspNetCore.Razor;");
+                updatedContent = ReplaceFactAttributeForMethod(
+                    updatedContent,
                     "UsingDirectives_Runtime",
-                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                    "ConditionalFact(typeof(IsEnglishLocal))");
                 updatedContent = ReplaceFactAttributeForMethod(
                     updatedContent,
                     "AttributeDirectiveWithViewImports_Runtime",
-                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                    "ConditionalFact(typeof(IsEnglishLocal))");
                 updatedContent = ReplaceFactAttributeForMethod(
                     updatedContent,
                     "UsingDirectives_DesignTime",
-                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                    "ConditionalFact(typeof(IsEnglishLocal))");
                 updatedContent = ReplaceFactAttributeForMethod(
                     updatedContent,
                     "AttributeDirectiveWithViewImports_DesignTime",
-                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                    "ConditionalFact(typeof(IsEnglishLocal))");
                 return updatedContent;
             }).ConfigureAwait(false);
 
@@ -3030,14 +3034,15 @@ internal static class PostMergeCleanupRunner
             Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Mvc.Razor.Extensions.Version2_X", "test", "IntegrationTests", "CodeGenerationIntegrationTest.cs"),
             content =>
             {
-                var updatedContent = ReplaceFactAttributeForMethod(
-                    content,
+                var updatedContent = EnsureUsingDirective(content, "using Microsoft.AspNetCore.Razor;", "using System.Linq;");
+                updatedContent = ReplaceFactAttributeForMethod(
+                    updatedContent,
                     "UsingDirectives_Runtime",
-                    "global::Microsoft.AspNetCore.Razor.ConditionalFact(global::Microsoft.AspNetCore.Razor.Is.EnglishLocale)");
+                    "ConditionalFact(Is.EnglishLocale)");
                 updatedContent = ReplaceFactAttributeForMethod(
                     updatedContent,
                     "UsingDirectives_DesignTime",
-                    "global::Microsoft.AspNetCore.Razor.ConditionalFact(global::Microsoft.AspNetCore.Razor.Is.EnglishLocale)");
+                    "ConditionalFact(Is.EnglishLocale)");
                 return updatedContent;
             }).ConfigureAwait(false);
 
@@ -3155,6 +3160,16 @@ internal static class PostMergeCleanupRunner
             usingAnchor,
             usingAnchor + usingDirective + "\n",
             StringComparison.Ordinal);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private static string RemoveUsingDirective(string content, string usingDirective)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var updatedContent = normalizedContent.Replace(usingDirective + "\n", string.Empty, StringComparison.Ordinal);
 
         return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
             ? content
