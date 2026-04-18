@@ -400,6 +400,12 @@ internal static class PostMergeCleanupRunner
             "Remove duplicate Razor build artifacts",
             "Roslyn already copies eng\\config\\xunit.runner.json for test projects and supplies System.CodeDom through the SDK/package graph, so merged Razor projects should drop their own xunit.runner.json output items and the microbenchmark generator's manual System.CodeDom.dll copy to avoid BuildBoss multiple-write failures.",
             RemoveRazorDuplicateBuildArtifactsAsync),
+        new(
+            "fix-languageconfigurationtest-output-assets",
+            "Copy language-configuration.json into Razor VS unit-test outputs and make LanguageConfigurationTest probe output-local or repo-local copies.",
+            "Fix LanguageConfigurationTest output assets",
+            "Roslyn CI runs Razor unit tests from rehydrated output payloads that do not have a repo-root artifacts path. LanguageConfigurationTest should copy language-configuration.json into its output and probe output-local or repo-local copies instead of assuming Environment.CurrentDirectory contains artifacts.",
+            FixLanguageConfigurationTestOutputAssetsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2740,12 +2746,213 @@ internal static class PostMergeCleanupRunner
             : updatedContent;
     }
 
+    private static async Task<string> FixLanguageConfigurationTestOutputAssetsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var summaries = new List<string>();
+        var languageConfigurationTestPath = GetExistingPath(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "LanguageConfigurationTest.cs"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "LanguageConfigurationTest.cs"));
+        if (File.Exists(languageConfigurationTestPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(languageConfigurationTestPath).ConfigureAwait(false);
+            var updatedContent = NormalizeLanguageConfigurationTestOutputAssetContent(originalContent);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    languageConfigurationTestPath,
+                    updatedContent,
+                    templatePath: languageConfigurationTestPath).ConfigureAwait(false);
+                summaries.Add($"Normalized output-aware language-configuration probes in '{Path.GetRelativePath(targetRepoRoot, languageConfigurationTestPath)}'.");
+            }
+        }
+
+        var razorUnitTestProjectPath = GetExistingPath(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests", "Microsoft.VisualStudio.LanguageServices.Razor.UnitTests.csproj"),
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudio.LanguageServices.Razor.Test", "Microsoft.VisualStudio.LanguageServices.Razor.Test.csproj"));
+        if (File.Exists(razorUnitTestProjectPath))
+        {
+            var originalContent = await File.ReadAllTextAsync(razorUnitTestProjectPath).ConfigureAwait(false);
+            var updatedContent = EnsureLanguageConfigurationJsonCopiedToOutput(originalContent);
+            if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    razorUnitTestProjectPath,
+                    updatedContent,
+                    templatePath: razorUnitTestProjectPath).ConfigureAwait(false);
+                summaries.Add($"Copied language-configuration.json into '{Path.GetRelativePath(targetRepoRoot, razorUnitTestProjectPath)}' outputs.");
+            }
+        }
+
+        return summaries.Count == 0
+            ? "No LanguageConfigurationTest output-asset cleanup changes were needed."
+            : string.Join(" ", summaries);
+    }
+
+    private static string NormalizeLanguageConfigurationTestOutputAssetContent(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var oldMethod = NormalizeLineEndings(LanguageConfigurationGetJsonMethod, "\n");
+        var newMethod = NormalizeLineEndings(LanguageConfigurationGetJsonMethodWithOutputFallback, "\n");
+        var updatedContent = normalizedContent.Replace(
+            oldMethod,
+            newMethod,
+            StringComparison.Ordinal);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private static string EnsureLanguageConfigurationJsonCopiedToOutput(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var languageConfigurationOutputItemGroup = NormalizeLineEndings(LanguageConfigurationOutputItemGroup, "\n");
+        var languageConfigurationOutputInsertionAnchor = NormalizeLineEndings(LanguageConfigurationOutputInsertionAnchorItemGroup, "\n");
+        var languageConfigurationTestCompileItemGroup = NormalizeLineEndings(LanguageConfigurationTestCompileItemGroup, "\n");
+        if (normalizedContent.Contains(@"..\..\src\Microsoft.VisualStudio.RazorExtension\language-configuration.json", StringComparison.Ordinal))
+            return content;
+
+        var updatedContent = normalizedContent.Replace(
+            languageConfigurationOutputInsertionAnchor,
+            languageConfigurationOutputItemGroup + languageConfigurationOutputInsertionAnchor,
+            StringComparison.Ordinal);
+
+        if (string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal))
+        {
+            updatedContent = normalizedContent.Replace(
+                languageConfigurationTestCompileItemGroup,
+                languageConfigurationTestCompileItemGroup + languageConfigurationOutputItemGroup,
+                StringComparison.Ordinal);
+        }
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
     private const string MicrobenchmarkSystemCodeDomCopyItem =
         """
             <None Include="$([System.IO.Directory]::GetParent($(BundledRuntimeIdentifierGraphFile)))\System.CodeDom.dll">
               <Link>System.CodeDom.dll</Link>
               <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
             </None>
+        """;
+
+    private const string LanguageConfigurationTestCompileItemGroup =
+        """
+          <ItemGroup>
+            <Compile Include="..\..\src\Microsoft.CodeAnalysis.Razor.Workspaces\GlobalUsings.cs" Link="GlobalUsings.cs" />
+          </ItemGroup>
+
+        """;
+
+    private const string LanguageConfigurationOutputItemGroup =
+        """
+          <ItemGroup>
+            <None Include="..\..\src\Microsoft.VisualStudio.RazorExtension\language-configuration.json">
+              <Link>language-configuration.json</Link>
+              <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            </None>
+          </ItemGroup>
+
+        """;
+
+    private const string LanguageConfigurationOutputInsertionAnchorItemGroup =
+        """
+          <ItemGroup>
+            <None Update="Cohost\TestSnippets.snippet">
+              <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            </None>
+          </ItemGroup>
+
+        """;
+
+    private const string LanguageConfigurationGetJsonMethod =
+        """
+            private static JObject GetLanguageConfigurationJson()
+            {
+                var dir = Environment.CurrentDirectory;
+                dir = dir.Substring(0, dir.IndexOf("artifacts"));
+                var langConfigFile = Path.Combine(dir, @"src\Razor\src\Razor\src\Microsoft.VisualStudio.RazorExtension", "language-configuration.json");
+                var langConfig = JObject.Parse(File.ReadAllText(langConfigFile));
+                return langConfig;
+            }
+        """;
+
+    private const string LanguageConfigurationGetJsonMethodWithOutputFallback =
+        """
+            private static JObject GetLanguageConfigurationJson()
+            {
+                var langConfigFile = GetLanguageConfigurationJsonPath();
+                return JObject.Parse(File.ReadAllText(langConfigFile));
+            }
+
+            private static string GetLanguageConfigurationJsonPath()
+            {
+                var appContextBaseDirectory = AppContext.BaseDirectory;
+                var currentDirectory = Environment.CurrentDirectory;
+
+                var langConfigFile = TryFindLanguageConfigurationFile(appContextBaseDirectory)
+                    ?? (string.Equals(currentDirectory, appContextBaseDirectory, StringComparison.OrdinalIgnoreCase)
+                        ? null
+                        : TryFindLanguageConfigurationFile(currentDirectory));
+
+                if (langConfigFile is null)
+                {
+                    throw new InvalidOperationException($"Could not locate language-configuration.json from '{appContextBaseDirectory}' or '{currentDirectory}'.");
+                }
+
+                return langConfigFile;
+            }
+
+            private static string? TryFindLanguageConfigurationFile(string baseDirectory)
+            {
+                if (string.IsNullOrWhiteSpace(baseDirectory) || !Directory.Exists(baseDirectory))
+                {
+                    return null;
+                }
+
+                var outputLocalPath = Path.Combine(baseDirectory, "language-configuration.json");
+                if (File.Exists(outputLocalPath))
+                {
+                    return outputLocalPath;
+                }
+
+                var repoRoot = SearchUp(baseDirectory, "global.json");
+                if (repoRoot is not null)
+                {
+                    var razorRepoRoot = Directory.Exists(Path.Combine(repoRoot, "src", "Razor", "src"))
+                        ? Path.Combine(repoRoot, "src", "Razor")
+                        : repoRoot;
+                    var repoPath = Path.Combine(razorRepoRoot, "src", "Microsoft.VisualStudio.RazorExtension", "language-configuration.json");
+                    if (File.Exists(repoPath))
+                    {
+                        return repoPath;
+                    }
+                }
+
+                foreach (var candidatePath in Directory.EnumerateFiles(baseDirectory, "language-configuration.json", SearchOption.AllDirectories))
+                {
+                    return candidatePath;
+                }
+
+                return null;
+            }
+
+            private static string? SearchUp(string baseDirectory, string fileName)
+            {
+                for (var current = new DirectoryInfo(baseDirectory); current is not null; current = current.Parent)
+                {
+                    if (File.Exists(Path.Combine(current.FullName, fileName)))
+                    {
+                        return current.FullName;
+                    }
+                }
+
+                return null;
+            }
         """;
 
     private static async Task<string> DeferRazorTraceListenerToRoslynAsync(StageContext context)
