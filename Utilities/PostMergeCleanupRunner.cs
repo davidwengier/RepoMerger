@@ -418,6 +418,12 @@ internal static class PostMergeCleanupRunner
             "Skip RazorExtension determinism key",
             "Roslyn already skips Roslyn.VisualStudio.DiagnosticsWindow.dll.key for a known XLF determinism issue. The merged Razor tree should do the same for Microsoft.VisualStudio.RazorExtension.dll.key instead of failing the determinism leg on a known non-deterministic debug-determinism sidecar.",
             SkipRazorExtensionDeterminismKeyAsync),
+        new(
+            "skip-english-only-razor-tests",
+            "Mark known Razor tests that assert English compiler diagnostics to run only on English locales.",
+            "Skip English-only Razor tests",
+            "The merged Roslyn Spanish leg runs with a non-English culture, so Razor tests that assert raw English compiler diagnostic text or English-only diagnostic arguments should be skipped there until they are rewritten to use localized expectations.",
+            SkipEnglishOnlyRazorTestsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2957,6 +2963,236 @@ internal static class PostMergeCleanupRunner
             : updatedContent;
     }
 
+    private static async Task<string> SkipEnglishOnlyRazorTestsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Shared", "Microsoft.AspNetCore.Razor.Test.Common", "ConditionalFactAttribute.cs"),
+            EnsureRazorEnglishLocaleConditionAdded).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Compiler", "test", "Microsoft.NET.Sdk.Razor.SourceGenerators.UnitTests", "ComponentParameterNullableWarningSuppressorTests.cs"),
+            content =>
+            {
+                var updatedContent = ReplaceAllFactAttributes(
+                    content,
+                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))",
+                    "ComponentParameterNullableWarningSuppressorTests");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Compiler", "test", "Microsoft.NET.Sdk.Razor.SourceGenerators.UnitTests", "RazorSourceGeneratorTests.cs"),
+            content =>
+            {
+                var updatedContent = ReplaceFactAttributeForMethod(
+                    content,
+                    "IncrementalCompilation_RazorFiles_WhenNewTypeIsAdded",
+                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(
+                    updatedContent,
+                    "IncrementalCompilation_RazorFiles_WhenCSharpTypeChanges",
+                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(
+                    updatedContent,
+                    "SourceGenerator_CshtmlFiles_CSharpTypeChanges",
+                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Mvc.Razor.Extensions", "test", "IntegrationTests", "CodeGenerationIntegrationTest.cs"),
+            content =>
+            {
+                var updatedContent = ReplaceFactAttributeForMethod(
+                    content,
+                    "UsingDirectives_Runtime",
+                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(
+                    updatedContent,
+                    "AttributeDirectiveWithViewImports_Runtime",
+                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(
+                    updatedContent,
+                    "UsingDirectives_DesignTime",
+                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(
+                    updatedContent,
+                    "AttributeDirectiveWithViewImports_DesignTime",
+                    "global::Roslyn.Test.Utilities.ConditionalFact(typeof(global::Roslyn.Test.Utilities.IsEnglishLocal))");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Compiler", "Microsoft.AspNetCore.Mvc.Razor.Extensions.Version2_X", "test", "IntegrationTests", "CodeGenerationIntegrationTest.cs"),
+            content =>
+            {
+                var updatedContent = ReplaceFactAttributeForMethod(
+                    content,
+                    "UsingDirectives_Runtime",
+                    "global::Microsoft.AspNetCore.Razor.ConditionalFact(global::Microsoft.AspNetCore.Razor.Is.EnglishLocale)");
+                updatedContent = ReplaceFactAttributeForMethod(
+                    updatedContent,
+                    "UsingDirectives_DesignTime",
+                    "global::Microsoft.AspNetCore.Razor.ConditionalFact(global::Microsoft.AspNetCore.Razor.Is.EnglishLocale)");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        return changedFiles.Count == 0
+            ? "No English-only Razor test skips were needed."
+            : $"Added English-locale guards for known English-only Razor tests in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+
+        async Task RewriteFileAsync(string path, Func<string, string> rewrite)
+        {
+            if (!File.Exists(path))
+                return;
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = rewrite(originalContent);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                return;
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+    }
+
+    private static string EnsureRazorEnglishLocaleConditionAdded(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var updatedContent = normalizedContent;
+
+        if (!updatedContent.Contains("using System.Globalization;", StringComparison.Ordinal))
+        {
+            const string usingAnchor = "using System.Collections.Generic;\n";
+            if (!updatedContent.Contains(usingAnchor, StringComparison.Ordinal))
+                throw new InvalidOperationException("Could not find the Razor ConditionalFact using block while adding the EnglishLocale condition.");
+
+            updatedContent = updatedContent.Replace(
+                usingAnchor,
+                "using System.Collections.Generic;\nusing System.Globalization;\n",
+                StringComparison.Ordinal);
+        }
+
+        if (!updatedContent.Contains("public const string EnglishLocale = nameof(EnglishLocale);", StringComparison.Ordinal))
+        {
+            const string anyUnixAnchor = "    public const string AnyUnix = nameof(AnyUnix);\n";
+            if (!updatedContent.Contains(anyUnixAnchor, StringComparison.Ordinal))
+                throw new InvalidOperationException("Could not find Is.AnyUnix while adding the EnglishLocale condition.");
+
+            updatedContent = updatedContent.Replace(
+                anyUnixAnchor,
+                anyUnixAnchor +
+                "\n" +
+                "    /// <summary>\n" +
+                "    ///  Only execute if the current culture and UI culture are English-based.\n" +
+                "    /// </summary>\n" +
+                "    public const string EnglishLocale = nameof(EnglishLocale);\n",
+                StringComparison.Ordinal);
+        }
+
+        if (!updatedContent.Contains("public const string EnglishLocale = $\"!{nameof(EnglishLocale)}\";", StringComparison.Ordinal))
+        {
+            const string notAnyUnixAnchor = "        public const string AnyUnix = $\"!{nameof(AnyUnix)}\";\n";
+            if (!updatedContent.Contains(notAnyUnixAnchor, StringComparison.Ordinal))
+                throw new InvalidOperationException("Could not find Is.Not.AnyUnix while adding the negated EnglishLocale condition.");
+
+            updatedContent = updatedContent.Replace(
+                notAnyUnixAnchor,
+                notAnyUnixAnchor +
+                "\n" +
+                "        /// <summary>\n" +
+                "        ///  Only execute if the current culture and UI culture are not English-based.\n" +
+                "        /// </summary>\n" +
+                "        public const string EnglishLocale = $\"!{nameof(EnglishLocale)}\";\n",
+                StringComparison.Ordinal);
+        }
+
+        if (!updatedContent.Contains("Add(Is.EnglishLocale", StringComparison.Ordinal))
+        {
+            const string anyUnixCondition =
+                "        Add(Is.AnyUnix, static () => PlatformInformation.IsLinux ||\n" +
+                "                                     PlatformInformation.IsMacOS ||\n" +
+                "                                     PlatformInformation.IsFreeBSD);\n";
+            if (!updatedContent.Contains(anyUnixCondition, StringComparison.Ordinal))
+                throw new InvalidOperationException("Could not find the Razor ConditionalFact condition map while adding the EnglishLocale predicate.");
+
+            updatedContent = updatedContent.Replace(
+                anyUnixCondition,
+                anyUnixCondition +
+                "        Add(Is.EnglishLocale, static () =>\n" +
+                "        {\n" +
+                "            if (string.IsNullOrEmpty(CultureInfo.CurrentCulture.Name))\n" +
+                "            {\n" +
+                "                return true;\n" +
+                "            }\n" +
+                "\n" +
+                "            return CultureInfo.CurrentUICulture.Name.StartsWith(\"en\", StringComparison.OrdinalIgnoreCase)\n" +
+                "                && CultureInfo.CurrentCulture.Name.StartsWith(\"en\", StringComparison.OrdinalIgnoreCase);\n" +
+                "        });\n",
+                StringComparison.Ordinal);
+        }
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private static string EnsureUsingDirective(string content, string usingDirective, string anchorUsingDirective)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        if (normalizedContent.Contains(usingDirective, StringComparison.Ordinal))
+            return content;
+
+        var usingAnchor = anchorUsingDirective + "\n";
+        if (!normalizedContent.Contains(usingAnchor, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Could not find using directive '{anchorUsingDirective}' while inserting '{usingDirective}'.");
+
+        var updatedContent = normalizedContent.Replace(
+            usingAnchor,
+            usingAnchor + usingDirective + "\n",
+            StringComparison.Ordinal);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private static string ReplaceAllFactAttributes(string content, string replacementAttribute, string fileDescription)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var pattern = new Regex(@"^(?<indent>[ \t]*)\[Fact\]$", RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        var replacement = $"${{indent}}[{replacementAttribute}]";
+        if (pattern.IsMatch(normalizedContent))
+            return pattern.Replace(normalizedContent, replacement);
+
+        if (normalizedContent.Contains($"[{replacementAttribute}]", StringComparison.Ordinal))
+            return content;
+
+        throw new InvalidOperationException($"Could not find any [Fact] attributes in {fileDescription} while adding English-locale guards.");
+    }
+
+    private static string ReplaceFactAttributeForMethod(string content, string methodName, string replacementAttribute)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var existingPattern = new Regex(
+            $@"^(?<indent>[ \t]*)\[{Regex.Escape(replacementAttribute)}\]$(?=\n\k<indent>public(?:\s+async)?\s+(?:Task|void)\s+{Regex.Escape(methodName)}\()",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        if (existingPattern.IsMatch(normalizedContent))
+            return content;
+
+        var factPattern = new Regex(
+            $@"^(?<indent>[ \t]*)\[Fact\]$(?=\n\k<indent>public(?:\s+async)?\s+(?:Task|void)\s+{Regex.Escape(methodName)}\()",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        if (!factPattern.IsMatch(normalizedContent))
+            throw new InvalidOperationException($"Could not find [Fact] for method '{methodName}' while adding the English-locale guard.");
+
+        return factPattern.Replace(normalizedContent, $"${{indent}}[{replacementAttribute}]", 1);
+    }
+
     private const string MicrobenchmarkSystemCodeDomCopyItem =
         """
             <None Include="$([System.IO.Directory]::GetParent($(BundledRuntimeIdentifierGraphFile)))\System.CodeDom.dll">
@@ -3027,6 +3263,101 @@ internal static class PostMergeCleanupRunner
 
           # Work around the same XLF ResXFileRef determinism issue in Razor's VSIX package resources.
           "Microsoft.VisualStudio.RazorExtension.dll.key",
+        """;
+
+    private const string RazorConditionalFactUsings =
+        """
+        using System;
+        using System.Collections.Frozen;
+        using System.Collections.Generic;
+        """;
+
+    private const string RazorConditionalFactUsingsWithCulture =
+        """
+        using System;
+        using System.Collections.Frozen;
+        using System.Collections.Generic;
+        using System.Globalization;
+        """;
+
+    private const string RazorAnyUnixCondition =
+        """
+            /// <summary>
+            ///  Only execute if the current operating system platform is Unix-based.
+            /// </summary>
+            public const string AnyUnix = nameof(AnyUnix);
+        
+            public static class Not
+        """;
+
+    private const string RazorAnyUnixAndEnglishLocaleCondition =
+        """
+            /// <summary>
+            ///  Only execute if the current operating system platform is Unix-based.
+            /// </summary>
+            public const string AnyUnix = nameof(AnyUnix);
+        
+            /// <summary>
+            ///  Only execute if the current culture and UI culture are English-based.
+            /// </summary>
+            public const string EnglishLocale = nameof(EnglishLocale);
+        
+            public static class Not
+        """;
+
+    private const string RazorNotAnyUnixCondition =
+        """
+                /// <summary>
+                ///  Only execute if the current operating system platform is not Unix-based.
+                /// </summary>
+                public const string AnyUnix = $"!{nameof(AnyUnix)}";
+        
+            }
+        }
+        """;
+
+    private const string RazorNotAnyUnixAndEnglishLocaleCondition =
+        """
+                /// <summary>
+                ///  Only execute if the current operating system platform is not Unix-based.
+                /// </summary>
+                public const string AnyUnix = $"!{nameof(AnyUnix)}";
+        
+                /// <summary>
+                ///  Only execute if the current culture and UI culture are not English-based.
+                /// </summary>
+                public const string EnglishLocale = $"!{nameof(EnglishLocale)}";
+        
+            }
+        }
+        """;
+
+    private const string RazorConditionMapAnyUnix =
+        """
+                Add(Is.AnyUnix, static () => PlatformInformation.IsLinux ||
+                                             PlatformInformation.IsMacOS ||
+                                             PlatformInformation.IsFreeBSD);
+        
+                return map.ToFrozenDictionary();
+        """;
+
+    private const string RazorConditionMapAnyUnixAndEnglishLocale =
+        """
+                Add(Is.AnyUnix, static () => PlatformInformation.IsLinux ||
+                                             PlatformInformation.IsMacOS ||
+                                             PlatformInformation.IsFreeBSD);
+                Add(Is.EnglishLocale, static () =>
+                {
+                    if (string.IsNullOrEmpty(CultureInfo.CurrentCulture.Name))
+                    {
+                        return true;
+                    }
+        
+                    return CultureInfo.CurrentUICulture.Name.StartsWith("en", StringComparison.OrdinalIgnoreCase)
+                        && CultureInfo.CurrentCulture.Name.StartsWith("en", StringComparison.OrdinalIgnoreCase);
+                });
+        
+                return map.ToFrozenDictionary();
         """;
 
     private const string LanguageConfigurationGetJsonMethod =
