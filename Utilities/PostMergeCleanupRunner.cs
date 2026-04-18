@@ -413,11 +413,11 @@ internal static class PostMergeCleanupRunner
             "The merged Roslyn unit-test build does not carry the Cohost TestSnippets.snippet payload into CI workitems from the existing None Update item, so the Razor unit-test project should include that file explicitly and the test should probe output-local or repo-local locations.",
             FixCohostInlineCompletionSnippetAssetAsync),
         new(
-            "fix-razorextension-determinism-xlf-file-refs",
-            "Normalize generated localized VSPackage resx file refs in Microsoft.VisualStudio.RazorExtension when DebugDeterminism is enabled.",
-            "Fix RazorExtension determinism XLF file refs",
-            "Roslyn's determinism leg compares compiler debug-determinism .key files across different source roots. RazorExtension's generated localized VSPackage.*.resx files expand ResXFileRef assets to absolute project paths, so the merged Razor build should rewrite those generated file refs to stable relative paths before compilation when DebugDeterminism is enabled.",
-            FixRazorExtensionDeterminismXlfFileRefsAsync),
+            "skip-razorextension-determinism-key",
+            "Skip Microsoft.VisualStudio.RazorExtension.dll.key in Roslyn's determinism harness as a known XLF-related non-deterministic sidecar.",
+            "Skip RazorExtension determinism key",
+            "Roslyn already skips Roslyn.VisualStudio.DiagnosticsWindow.dll.key for a known XLF determinism issue. The merged Razor tree should do the same for Microsoft.VisualStudio.RazorExtension.dll.key instead of failing the determinism leg on a known non-deterministic debug-determinism sidecar.",
+            SkipRazorExtensionDeterminismKeyAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -2918,46 +2918,38 @@ internal static class PostMergeCleanupRunner
             : updatedContent;
     }
 
-    private static async Task<string> FixRazorExtensionDeterminismXlfFileRefsAsync(StageContext context)
+    private static async Task<string> SkipRazorExtensionDeterminismKeyAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
-        var targetRoot = context.TargetRoot;
-        var razorExtensionDirectoryBuildTargetsPath = Path.Combine(
-            targetRoot,
-            "src",
-            "Razor",
-            "src",
-            "Microsoft.VisualStudio.RazorExtension",
-            "Directory.Build.targets");
-        if (!File.Exists(razorExtensionDirectoryBuildTargetsPath))
-            return "No RazorExtension Directory.Build.targets file was found for determinism XLF file-ref cleanup.";
+        var determinismScriptPath = Path.Combine(targetRepoRoot, "eng", "test-determinism.ps1");
+        if (!File.Exists(determinismScriptPath))
+            return "No eng\\test-determinism.ps1 file was found for RazorExtension determinism skip cleanup.";
 
-        var originalContent = await File.ReadAllTextAsync(razorExtensionDirectoryBuildTargetsPath).ConfigureAwait(false);
-        var updatedContent = EnsureRazorExtensionDeterministicLocalizedResxFileRefs(originalContent);
+        var originalContent = await File.ReadAllTextAsync(determinismScriptPath).ConfigureAwait(false);
+        var updatedContent = EnsureRazorExtensionDeterminismKeySkipped(originalContent);
         if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            return "No RazorExtension determinism XLF file-ref cleanup changes were needed.";
+            return "No RazorExtension determinism skip-list changes were needed.";
 
         await WriteTextPreservingUtf8BomAsync(
-            razorExtensionDirectoryBuildTargetsPath,
+            determinismScriptPath,
             updatedContent,
-            templatePath: razorExtensionDirectoryBuildTargetsPath).ConfigureAwait(false);
-        return $"Added deterministic localized VSPackage file-ref normalization to '{Path.GetRelativePath(targetRepoRoot, razorExtensionDirectoryBuildTargetsPath)}'.";
+            templatePath: determinismScriptPath).ConfigureAwait(false);
+        return $"Added Microsoft.VisualStudio.RazorExtension.dll.key to the determinism skip list in '{Path.GetRelativePath(targetRepoRoot, determinismScriptPath)}'.";
     }
 
-    private static string EnsureRazorExtensionDeterministicLocalizedResxFileRefs(string content)
+    private static string EnsureRazorExtensionDeterminismKeySkipped(string content)
     {
         var normalizedContent = NormalizeLineEndings(content, "\n");
-        var targetBlock = NormalizeLineEndings(RazorExtensionDeterministicLocalizedResxTarget, "\n");
-        if (normalizedContent.Contains("NormalizeGeneratedLocalizedVSPackageResxFileRefs", StringComparison.Ordinal))
+        if (normalizedContent.Contains("\"Microsoft.VisualStudio.RazorExtension.dll.key\"", StringComparison.Ordinal))
             return content;
 
-        var insertionAnchor = NormalizeLineEndings(RazorExtensionDeterministicLocalizedResxInsertionAnchor, "\n");
+        var insertionAnchor = NormalizeLineEndings(RoslynDiagnosticsWindowDeterminismSkipBlock, "\n");
         if (!normalizedContent.Contains(insertionAnchor, StringComparison.Ordinal))
-            throw new InvalidOperationException("Could not find the IncludeMissingRazorServiceHubPayload target while adding RazorExtension determinism XLF file-ref normalization.");
+            throw new InvalidOperationException("Could not find Roslyn's XLF determinism skip-list entry while adding the RazorExtension determinism skip.");
 
         var updatedContent = normalizedContent.Replace(
             insertionAnchor,
-            targetBlock + insertionAnchor,
+            NormalizeLineEndings(RoslynAndRazorExtensionDeterminismSkipBlock, "\n"),
             StringComparison.Ordinal);
 
         return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
@@ -3022,38 +3014,19 @@ internal static class PostMergeCleanupRunner
 
         """;
 
-    private const string RazorExtensionDeterministicLocalizedResxInsertionAnchor =
+    private const string RoslynDiagnosticsWindowDeterminismSkipBlock =
         """
-          <Target Name="IncludeMissingRazorServiceHubPayload">
+          # Work around XLF issues https://github.com/dotnet/roslyn/issues/58840
+          "Roslyn.VisualStudio.DiagnosticsWindow.dll.key",
         """;
 
-    private const string RazorExtensionDeterministicLocalizedResxTarget =
+    private const string RoslynAndRazorExtensionDeterminismSkipBlock =
         """
-          <Target Name="NormalizeGeneratedLocalizedVSPackageResxFileRefs"
-                  BeforeTargets="GenerateResource;CoreCompile"
-                  Condition="'$(DebugDeterminism)' != ''">
-            <PropertyGroup>
-              <_RazorLocalizedVSPackageResxDirectory>$([MSBuild]::EnsureTrailingSlash('$(IntermediateOutputPath)$(TargetName).xlf'))</_RazorLocalizedVSPackageResxDirectory>
-              <_RazorLocalizedVSPackageIconPath>$([MSBuild]::MakeRelative('$(_RazorLocalizedVSPackageResxDirectory)', '$(MSBuildProjectDirectory)\Resources\RazorPackage.ico'))</_RazorLocalizedVSPackageIconPath>
-              <_RazorLocalizedVSSyntaxTreePath>$([MSBuild]::MakeRelative('$(_RazorLocalizedVSPackageResxDirectory)', '$(MSBuildProjectDirectory)\SyntaxTree.bmp'))</_RazorLocalizedVSSyntaxTreePath>
-              <_RazorLocalizedVSPackageIconValue>$(_RazorLocalizedVSPackageIconPath);System.Drawing.Icon, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</_RazorLocalizedVSPackageIconValue>
-              <_RazorLocalizedVSSyntaxTreeValue>$(_RazorLocalizedVSSyntaxTreePath);System.Drawing.Bitmap, System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a</_RazorLocalizedVSSyntaxTreeValue>
-            </PropertyGroup>
+          # Work around XLF issues https://github.com/dotnet/roslyn/issues/58840
+          "Roslyn.VisualStudio.DiagnosticsWindow.dll.key",
 
-            <ItemGroup>
-              <_RazorLocalizedVSPackageResx Include="$(_RazorLocalizedVSPackageResxDirectory)VSPackage.*.resx" />
-            </ItemGroup>
-
-            <XmlPoke XmlInputPath="%(_RazorLocalizedVSPackageResx.Identity)"
-                     Query="/root/data[@name='400']/value"
-                     Value="$([MSBuild]::Escape('$(_RazorLocalizedVSPackageIconValue)'))"
-                     Condition="'@(_RazorLocalizedVSPackageResx)' != ''" />
-            <XmlPoke XmlInputPath="%(_RazorLocalizedVSPackageResx.Identity)"
-                     Query="/root/data[@name='500']/value"
-                     Value="$([MSBuild]::Escape('$(_RazorLocalizedVSSyntaxTreeValue)'))"
-                     Condition="'@(_RazorLocalizedVSPackageResx)' != ''" />
-          </Target>
-
+          # Work around the same XLF ResXFileRef determinism issue in Razor's VSIX package resources.
+          "Microsoft.VisualStudio.RazorExtension.dll.key",
         """;
 
     private const string LanguageConfigurationGetJsonMethod =
