@@ -454,6 +454,12 @@ internal static class PostMergeCleanupRunner
             "Exclude Razor rebuild output differences",
             "Roslyn's rebuild harness already maintains a skip list for assemblies whose rebuilt outputs are not yet stable enough for BuildValidator. The merged Razor subtree currently contributes its own set of rebuild-diff outliers, so the target repo should extend that list instead of failing Correctness_Rebuild on known Razor-owned outputs.",
             ExcludeRazorRebuildOutputDiffsAsync),
+        new(
+            "fix-msbuildtasktests-dataflow-binding-redirect",
+            "Add a project-local app.config to MSBuildTaskTests and explicitly include it so net472 desktop test runs redirect System.Threading.Tasks.Dataflow correctly.",
+            "Fix MSBuildTaskTests Dataflow binding redirect",
+            "Roslyn's XUnit.targets only injects the repo-default desktop app.config when a test project has no app.config. The merged Razor desktop test payload causes Microsoft.Build.Tasks.CodeAnalysis.UnitTests to share a VSTest host with newer System.Threading.Tasks.Dataflow bits, so MSBuildTaskTests needs its own tracked app.config and explicit None include to add the binding redirect Microsoft.Build expects.",
+            FixMSBuildTaskTestsDataflowBindingRedirectAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -3041,6 +3047,136 @@ internal static class PostMergeCleanupRunner
             ? content
             : updatedContent;
     }
+
+    private static async Task<string> FixMSBuildTaskTestsDataflowBindingRedirectAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var projectDirectory = Path.Combine(
+            targetRepoRoot,
+            "src",
+            "Compilers",
+            "Core",
+            "MSBuildTaskTests");
+        var projectPath = Path.Combine(
+            projectDirectory,
+            "Microsoft.Build.Tasks.CodeAnalysis.UnitTests.csproj");
+        if (!File.Exists(projectPath))
+            return "No MSBuildTaskTests project file was found for System.Threading.Tasks.Dataflow binding-redirect cleanup.";
+
+        var appConfigPath = Path.Combine(projectDirectory, "app.config");
+        var appConfigRelativePath = Path.GetRelativePath(targetRepoRoot, appConfigPath);
+        var defaultDesktopAppConfigPath = Path.Combine(targetRepoRoot, "eng", "config", "test", "Desktop", "app.config");
+        var summaries = new List<string>();
+
+        var originalProjectContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+        var updatedProjectContent = EnsureMSBuildTaskTestsDataflowAppConfigIncluded(originalProjectContent);
+        if (!string.Equals(originalProjectContent, updatedProjectContent, StringComparison.Ordinal))
+        {
+            await WriteTextPreservingUtf8BomAsync(projectPath, updatedProjectContent, templatePath: projectPath).ConfigureAwait(false);
+            summaries.Add($"Updated '{Path.GetRelativePath(targetRepoRoot, projectPath)}' to explicitly include a project-local app.config for net472 desktop test runs.");
+        }
+
+        var desiredAppConfigContent = BuildMSBuildTaskTestsDataflowAppConfigContent();
+        var existingAppConfigContent = File.Exists(appConfigPath)
+            ? NormalizeLineEndings(await File.ReadAllTextAsync(appConfigPath).ConfigureAwait(false), "\n")
+            : null;
+        var normalizedDesiredAppConfigContent = NormalizeLineEndings(desiredAppConfigContent, "\n");
+
+        if (!string.Equals(existingAppConfigContent, normalizedDesiredAppConfigContent, StringComparison.Ordinal))
+        {
+            await WriteTextPreservingUtf8BomAsync(
+                appConfigPath,
+                desiredAppConfigContent,
+                templatePath: File.Exists(defaultDesktopAppConfigPath) ? defaultDesktopAppConfigPath : projectPath).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(targetRepoRoot, "add", "--", appConfigRelativePath).ConfigureAwait(false);
+            summaries.Add($"Added '{appConfigRelativePath}' with a System.Threading.Tasks.Dataflow binding redirect for Microsoft.Build's net472 test host.");
+        }
+
+        if (summaries.Count == 0)
+            return "No MSBuildTaskTests System.Threading.Tasks.Dataflow binding-redirect cleanup was needed.";
+
+        return string.Join(" ", summaries);
+    }
+
+    private static string EnsureMSBuildTaskTestsDataflowAppConfigIncluded(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var updatedContent = Regex.Replace(
+            normalizedContent,
+            @"^[ \t]*<!-- Add an explicit Dataflow reference so the generated net472 test app\.config\n[ \t]*redirects Microsoft\.Build to Roslyn's shared version\. -->\n",
+            string.Empty,
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        updatedContent = RemovePackageReferenceEntries(updatedContent, "System.Threading.Tasks.Dataflow");
+
+        if (!updatedContent.Contains(@"<None Include=""app.config"" />", StringComparison.Ordinal))
+        {
+            var insertionAnchor = string.Join(
+                "\n",
+                [
+                    @"  <ItemGroup>",
+                    @"    <Content Include=""TestResources\**\*.*"" />",
+                    @"    <EmbeddedResource Include=""TestResources\**\*.*"" />",
+                    @"  </ItemGroup>",
+                    string.Empty,
+                ]);
+            if (!updatedContent.Contains(insertionAnchor, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Could not find the TestResources item group while adding the MSBuildTaskTests System.Threading.Tasks.Dataflow binding-redirect fix.");
+            }
+
+            var replacement = string.Join(
+                "\n",
+                [
+                    @"  <ItemGroup>",
+                    @"    <Content Include=""TestResources\**\*.*"" />",
+                    @"    <EmbeddedResource Include=""TestResources\**\*.*"" />",
+                    @"  </ItemGroup>",
+                    @"  <ItemGroup>",
+                    @"    <None Include=""app.config"" />",
+                    @"  </ItemGroup>",
+                    string.Empty,
+                ]);
+
+            updatedContent = updatedContent.Replace(
+                insertionAnchor,
+                replacement,
+                StringComparison.Ordinal);
+        }
+
+        updatedContent = Regex.Replace(updatedContent, @"\n{3,}", "\n\n", RegexOptions.CultureInvariant);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
+    private static string BuildMSBuildTaskTestsDataflowAppConfigContent()
+        => string.Join(
+            Environment.NewLine,
+            [
+                @"<?xml version=""1.0"" encoding=""utf-8""?>",
+                string.Empty,
+                @"<!-- The default app.config for test projects that need a custom binding redirect -->",
+                @"<configuration>",
+                @"  <system.diagnostics>",
+                @"    <trace>",
+                @"      <listeners>",
+                @"        <remove name=""Default"" />",
+                @"        <add name=""ThrowingTraceListener"" type=""Microsoft.CodeAnalysis.ThrowingTraceListener, Microsoft.CodeAnalysis.Test.Utilities"" />",
+                @"      </listeners>",
+                @"    </trace>",
+                @"  </system.diagnostics>",
+                @"  <runtime>",
+                @"    <assemblyBinding xmlns=""urn:schemas-microsoft-com:asm.v1"">",
+                @"      <dependentAssembly>",
+                @"        <assemblyIdentity name=""System.Threading.Tasks.Dataflow"" publicKeyToken=""b03f5f7f11d50a3a"" culture=""neutral"" />",
+                @"        <bindingRedirect oldVersion=""0.0.0.0-10.0.0.1"" newVersion=""10.0.0.1"" />",
+                @"      </dependentAssembly>",
+                @"    </assemblyBinding>",
+                @"  </runtime>",
+                @"</configuration>",
+            ]) + Environment.NewLine;
 
     private static async Task<string> SkipEnglishOnlyRazorTestsAsync(StageContext context)
     {
