@@ -442,6 +442,12 @@ internal static class PostMergeCleanupRunner
             "Fix Workspaces locale-sensitive completion tests",
             "The merged Roslyn Spanish leg localizes Razor Workspaces completion labels and descriptions through Microsoft.CodeAnalysis.Razor.Workspaces resources. The corresponding Workspace tests should assert those resource-backed values instead of hardcoded English strings.",
             FixWorkspacesLocaleSensitiveCompletionTestsAsync),
+        new(
+            "fix-sourcegenerator-aspnet-runtime-references",
+            "Compile Razor SourceGenerators unit tests against Microsoft.AspNetCore.App reference assemblies while still copying runtime ASP.NET Core DLLs into the test output.",
+            "Fix SourceGenerators ASP.NET runtime references",
+            "Roslyn's BuildValidator resolves compile-time metadata references by MVID and skips ReadyToRun binaries. The merged Razor SourceGenerators unit-test project should compile against Microsoft.AspNetCore.App reference assemblies, while still copying the ASP.NET Core runtime pack into its output for the test harness that builds metadata references from DependencyContext and app-local DLLs.",
+            FixSourceGeneratorAspNetRuntimeReferencesAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -3334,6 +3340,199 @@ internal static class PostMergeCleanupRunner
 
             await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+    }
+
+    private static async Task<string> FixSourceGeneratorAspNetRuntimeReferencesAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var changedFiles = new List<string>();
+        var directoryPackagesPath = Path.Combine(context.TargetRoot, "Directory.Packages.props");
+        var projectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Compiler",
+            "test",
+            "Microsoft.NET.Sdk.Razor.SourceGenerators.UnitTests",
+            "Microsoft.NET.Sdk.Razor.SourceGenerators.UnitTests.csproj");
+        await RewriteFileAsync(
+            directoryPackagesPath,
+            content =>
+            {
+                var updatedContent = NormalizeLineEndings(content, "\n");
+                updatedContent = ReplaceRequiredSnippet(
+                    updatedContent,
+                    """    <PackageVersion Include="Microsoft.AspNetCore.App.Runtime.$(NetCoreSDKRuntimeIdentifier)" Version="10.0.1" />""",
+                    """
+                        <PackageVersion Include="Microsoft.AspNetCore.App.Ref" Version="10.0.1" />
+                        <PackageVersion Include="Microsoft.AspNetCore.App.Runtime.$(NetCoreSDKRuntimeIdentifier)" Version="10.0.1" />
+                    """,
+                    "the Razor ASP.NET Core runtime package version");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            projectPath,
+            content =>
+            {
+                var updatedContent = NormalizeLineEndings(content, "\n");
+
+                updatedContent = ReplaceRequiredAspNetReferenceItemGroups(updatedContent);
+                updatedContent = ReplaceRequiredSnippet(
+                    updatedContent,
+                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_win-x64)\runtimes\win-x64\lib\net10.0\*.dll" />""",
+                    """
+                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_win-x64)\runtimes\win-x64\lib\net10.0\*.dll"
+                                  CopyToOutputDirectory="PreserveNewest"
+                                  TargetPath="%(Filename)%(Extension)"
+                                  Visible="false" />
+                    """,
+                    "the win-x64 ASP.NET Core runtime wildcard reference");
+                updatedContent = ReplaceRequiredSnippet(
+                    updatedContent,
+                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_win-arm64)\runtimes\win-arm64\lib\net10.0\*.dll" />""",
+                    """
+                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_win-arm64)\runtimes\win-arm64\lib\net10.0\*.dll"
+                                  CopyToOutputDirectory="PreserveNewest"
+                                  TargetPath="%(Filename)%(Extension)"
+                                  Visible="false" />
+                    """,
+                    "the win-arm64 ASP.NET Core runtime wildcard reference");
+                updatedContent = ReplaceRequiredSnippet(
+                    updatedContent,
+                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_linux-x64)\runtimes\linux-x64\lib\net10.0\*.dll" />""",
+                    """
+                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_linux-x64)\runtimes\linux-x64\lib\net10.0\*.dll"
+                                  CopyToOutputDirectory="PreserveNewest"
+                                  TargetPath="%(Filename)%(Extension)"
+                                  Visible="false" />
+                    """,
+                    "the linux-x64 ASP.NET Core runtime wildcard reference");
+                updatedContent = ReplaceRequiredSnippet(
+                    updatedContent,
+                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_osx-x64)\runtimes\osx-x64\lib\net10.0\*.dll" />""",
+                    """
+                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_osx-x64)\runtimes\osx-x64\lib\net10.0\*.dll"
+                                  CopyToOutputDirectory="PreserveNewest"
+                                  TargetPath="%(Filename)%(Extension)"
+                                  Visible="false" />
+                    """,
+                    "the osx-x64 ASP.NET Core runtime wildcard reference");
+                updatedContent = ReplaceRequiredSnippet(
+                    updatedContent,
+                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_osx-arm64)\runtimes\osx-arm64\lib\net10.0\*.dll" />""",
+                    """
+                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_osx-arm64)\runtimes\osx-arm64\lib\net10.0\*.dll"
+                                  CopyToOutputDirectory="PreserveNewest"
+                                  TargetPath="%(Filename)%(Extension)"
+                                  Visible="false" />
+                    """,
+                    "the osx-arm64 ASP.NET Core runtime wildcard reference");
+
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        return changedFiles.Count == 0
+            ? "No SourceGenerators ASP.NET runtime reference cleanup was needed."
+            : $"Updated {changedFiles.Count} SourceGenerators ASP.NET reference file(s): {string.Join(", ", changedFiles)}.";
+
+        async Task RewriteFileAsync(string path, Func<string, string> rewrite)
+        {
+            if (!File.Exists(path))
+            {
+                return;
+            }
+
+            var originalContent = await File.ReadAllTextAsync(path).ConfigureAwait(false);
+            var updatedContent = rewrite(originalContent);
+            if (string.Equals(NormalizeLineEndings(originalContent, "\n"), updatedContent, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
+        }
+
+        static string ReplaceRequiredAspNetReferenceItemGroups(string content)
+        {
+            var normalizedNewText = NormalizeLineEndings(
+                """
+                  <ItemGroup>
+                    <PackageReference Include="Microsoft.AspNetCore.App.Ref" GeneratePathProperty="true" ExcludeAssets="all" />
+                    <PackageReference Include="Microsoft.AspNetCore.App.Runtime.$(NetCoreSDKRuntimeIdentifier)" ExcludeAssets="all" GeneratePathProperty="true" />
+                  </ItemGroup>
+
+                  <ItemGroup>
+                    <Reference Include="$(PkgMicrosoft_AspNetCore_App_Ref)\ref\net10.0\*.dll" Private="false" />
+                  </ItemGroup>
+                """,
+                "\n");
+            if (content.Contains(normalizedNewText, StringComparison.Ordinal))
+            {
+                return content;
+            }
+
+            var frameworkReferenceText = NormalizeLineEndings(
+                """
+                  <ItemGroup>
+                    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+                    <PackageReference Include="Microsoft.AspNetCore.App.Runtime.$(NetCoreSDKRuntimeIdentifier)" ExcludeAssets="all" GeneratePathProperty="true" />
+                  </ItemGroup>
+                """,
+                "\n");
+            if (content.Contains(frameworkReferenceText, StringComparison.Ordinal))
+            {
+                return content.Replace(frameworkReferenceText, normalizedNewText, StringComparison.Ordinal);
+            }
+
+            var versionOverrideText = NormalizeLineEndings(
+                """
+                  <ItemGroup>
+                    <PackageReference Include="Microsoft.AspNetCore.App.Ref" VersionOverride="10.0.1" GeneratePathProperty="true" ExcludeAssets="all" />
+                    <PackageReference Include="Microsoft.AspNetCore.App.Runtime.$(NetCoreSDKRuntimeIdentifier)" ExcludeAssets="all" GeneratePathProperty="true" />
+                  </ItemGroup>
+
+                  <ItemGroup>
+                    <Reference Include="$(PkgMicrosoft_AspNetCore_App_Ref)\ref\net10.0\*.dll" Private="false" />
+                  </ItemGroup>
+                """,
+                "\n");
+            if (content.Contains(versionOverrideText, StringComparison.Ordinal))
+            {
+                return content.Replace(versionOverrideText, normalizedNewText, StringComparison.Ordinal);
+            }
+
+            var runtimePackageText = NormalizeLineEndings(
+                """
+                  <ItemGroup>
+                    <PackageReference Include="Microsoft.AspNetCore.App.Runtime.$(NetCoreSDKRuntimeIdentifier)" ExcludeAssets="all" GeneratePathProperty="true" />
+                  </ItemGroup>
+                """,
+                "\n");
+            if (content.Contains(runtimePackageText, StringComparison.Ordinal))
+            {
+                return content.Replace(runtimePackageText, normalizedNewText, StringComparison.Ordinal);
+            }
+
+            throw new InvalidOperationException("Could not find the ASP.NET Core package reference item group while fixing Razor SourceGenerators ASP.NET runtime references.");
+        }
+
+        static string ReplaceRequiredSnippet(string content, string oldText, string newText, string description)
+        {
+            var normalizedOldText = NormalizeLineEndings(oldText, "\n");
+            var normalizedNewText = NormalizeLineEndings(newText, "\n");
+            if (content.Contains(normalizedNewText, StringComparison.Ordinal))
+            {
+                return content;
+            }
+
+            if (!content.Contains(normalizedOldText, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Could not find {description} while fixing Razor SourceGenerators ASP.NET runtime references.");
+            }
+
+            return content.Replace(normalizedOldText, normalizedNewText, StringComparison.Ordinal);
         }
     }
 
