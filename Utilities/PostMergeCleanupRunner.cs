@@ -3378,56 +3378,11 @@ internal static class PostMergeCleanupRunner
                 var updatedContent = NormalizeLineEndings(content, "\n");
 
                 updatedContent = ReplaceRequiredAspNetReferenceItemGroups(updatedContent);
-                updatedContent = ReplaceRequiredSnippet(
-                    updatedContent,
-                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_win-x64)\runtimes\win-x64\lib\net10.0\*.dll" />""",
-                    """
-                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_win-x64)\runtimes\win-x64\lib\net10.0\*.dll"
-                                  CopyToOutputDirectory="PreserveNewest"
-                                  TargetPath="%(Filename)%(Extension)"
-                                  Visible="false" />
-                    """,
-                    "the win-x64 ASP.NET Core runtime wildcard reference");
-                updatedContent = ReplaceRequiredSnippet(
-                    updatedContent,
-                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_win-arm64)\runtimes\win-arm64\lib\net10.0\*.dll" />""",
-                    """
-                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_win-arm64)\runtimes\win-arm64\lib\net10.0\*.dll"
-                                  CopyToOutputDirectory="PreserveNewest"
-                                  TargetPath="%(Filename)%(Extension)"
-                                  Visible="false" />
-                    """,
-                    "the win-arm64 ASP.NET Core runtime wildcard reference");
-                updatedContent = ReplaceRequiredSnippet(
-                    updatedContent,
-                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_linux-x64)\runtimes\linux-x64\lib\net10.0\*.dll" />""",
-                    """
-                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_linux-x64)\runtimes\linux-x64\lib\net10.0\*.dll"
-                                  CopyToOutputDirectory="PreserveNewest"
-                                  TargetPath="%(Filename)%(Extension)"
-                                  Visible="false" />
-                    """,
-                    "the linux-x64 ASP.NET Core runtime wildcard reference");
-                updatedContent = ReplaceRequiredSnippet(
-                    updatedContent,
-                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_osx-x64)\runtimes\osx-x64\lib\net10.0\*.dll" />""",
-                    """
-                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_osx-x64)\runtimes\osx-x64\lib\net10.0\*.dll"
-                                  CopyToOutputDirectory="PreserveNewest"
-                                  TargetPath="%(Filename)%(Extension)"
-                                  Visible="false" />
-                    """,
-                    "the osx-x64 ASP.NET Core runtime wildcard reference");
-                updatedContent = ReplaceRequiredSnippet(
-                    updatedContent,
-                    """        <Reference Include="$(PkgMicrosoft_AspNetCore_App_Runtime_osx-arm64)\runtimes\osx-arm64\lib\net10.0\*.dll" />""",
-                    """
-                            <None Include="$(PkgMicrosoft_AspNetCore_App_Runtime_osx-arm64)\runtimes\osx-arm64\lib\net10.0\*.dll"
-                                  CopyToOutputDirectory="PreserveNewest"
-                                  TargetPath="%(Filename)%(Extension)"
-                                  Visible="false" />
-                    """,
-                    "the osx-arm64 ASP.NET Core runtime wildcard reference");
+                updatedContent = ReplaceRequiredRuntimeCopyItem(updatedContent, "Microsoft_AspNetCore_App_Runtime_win-x64", "win-x64");
+                updatedContent = ReplaceRequiredRuntimeCopyItem(updatedContent, "Microsoft_AspNetCore_App_Runtime_win-arm64", "win-arm64");
+                updatedContent = ReplaceRequiredRuntimeCopyItem(updatedContent, "Microsoft_AspNetCore_App_Runtime_linux-x64", "linux-x64");
+                updatedContent = ReplaceRequiredRuntimeCopyItem(updatedContent, "Microsoft_AspNetCore_App_Runtime_osx-x64", "osx-x64");
+                updatedContent = ReplaceRequiredRuntimeCopyItem(updatedContent, "Microsoft_AspNetCore_App_Runtime_osx-arm64", "osx-arm64");
 
                 return updatedContent;
             }).ConfigureAwait(false);
@@ -3516,6 +3471,53 @@ internal static class PostMergeCleanupRunner
             }
 
             throw new InvalidOperationException("Could not find the ASP.NET Core package reference item group while fixing Razor SourceGenerators ASP.NET runtime references.");
+        }
+
+        static string ReplaceRequiredRuntimeCopyItem(string content, string packagePathPropertyName, string runtimeIdentifier)
+        {
+            var runtimeItemSpec = $@"$(Pkg{packagePathPropertyName})\runtimes\{runtimeIdentifier}\lib\net10.0\*.dll";
+            var excludedRuntimeItemSpec = string.Join(
+                ";",
+                $@"$(Pkg{packagePathPropertyName})\runtimes\{runtimeIdentifier}\lib\net10.0\Microsoft.Extensions.ObjectPool.dll",
+                $@"$(Pkg{packagePathPropertyName})\runtimes\{runtimeIdentifier}\lib\net10.0\System.Diagnostics.EventLog.dll",
+                $@"$(Pkg{packagePathPropertyName})\runtimes\{runtimeIdentifier}\lib\net10.0\System.Security.Cryptography.Pkcs.dll");
+
+            var updatedSnippet = NormalizeLineEndings(
+                $"""
+                        <None Include="{runtimeItemSpec}"
+                              Exclude="{excludedRuntimeItemSpec}"
+                              CopyToOutputDirectory="PreserveNewest"
+                              TargetPath="%(Filename)%(Extension)"
+                              Visible="false" />
+                """,
+                "\n");
+            if (content.Contains(updatedSnippet, StringComparison.Ordinal))
+            {
+                return content;
+            }
+
+            var currentSnippet = NormalizeLineEndings(
+                $"""
+                        <None Include="{runtimeItemSpec}"
+                              CopyToOutputDirectory="PreserveNewest"
+                              TargetPath="%(Filename)%(Extension)"
+                              Visible="false" />
+                """,
+                "\n");
+            if (content.Contains(currentSnippet, StringComparison.Ordinal))
+            {
+                return content.Replace(currentSnippet, updatedSnippet, StringComparison.Ordinal);
+            }
+
+            var referenceSnippet = NormalizeLineEndings(
+                $"""        <Reference Include="{runtimeItemSpec}" />""",
+                "\n");
+            if (content.Contains(referenceSnippet, StringComparison.Ordinal))
+            {
+                return content.Replace(referenceSnippet, updatedSnippet, StringComparison.Ordinal);
+            }
+
+            throw new InvalidOperationException($"Could not find the {runtimeIdentifier} ASP.NET Core runtime copy item while fixing Razor SourceGenerators ASP.NET runtime references.");
         }
 
         static string ReplaceRequiredSnippet(string content, string oldText, string newText, string description)
