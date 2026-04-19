@@ -432,9 +432,9 @@ internal static class PostMergeCleanupRunner
             PreserveListCopyToExceptionMessageAsync),
         new(
             "fix-cohost-locale-sensitive-ui-tests",
-            "Use Razor resources for project-availability tooltip text and skip Roslyn-owned hover/inlay text assertions on non-English locales.",
+            "Use Razor resources for Razor-owned completion labels and skip Roslyn-owned Cohost and VSCode UI assertions on non-English locales.",
             "Fix Cohost locale-sensitive UI tests",
-            "The merged Roslyn Spanish leg localizes UI text coming from both Razor and Roslyn. Razor-owned strings like project-availability warnings should be asserted via Razor resources, while Roslyn-owned hover and inlay tooltip text should stay English-only until the tests are rewritten to compare localized Roslyn output.",
+            "The merged Roslyn Spanish leg localizes UI text coming from both Razor and Roslyn. Razor-owned strings like project-availability warnings and directive snippet labels should be asserted via Razor resources, while Roslyn-owned completion descriptions, code-lens titles, and MEF composition errors should stay English-only until the tests are rewritten to compare localized Roslyn output.",
             FixCohostLocaleSensitiveUiTestsAsync),
         new(
             "fix-workspaces-locale-sensitive-completion-tests",
@@ -3001,6 +3001,14 @@ internal static class PostMergeCleanupRunner
                     updatedContent,
                     "ConditionalFact(typeof(IsEnglishLocal))",
                     "ComponentParameterNullableWarningSuppressorTests");
+                updatedContent = ReplaceTheoryAttributeForMethod(
+                    updatedContent,
+                    "IncorrectModifiersStillReport",
+                    "ConditionalTheory(typeof(IsEnglishLocal))");
+                updatedContent = ReplaceTheoryAttributeForMethod(
+                    updatedContent,
+                    "IncorrectSetterStillReport",
+                    "ConditionalTheory(typeof(IsEnglishLocal))");
                 return updatedContent;
             }).ConfigureAwait(false);
 
@@ -3194,9 +3202,46 @@ internal static class PostMergeCleanupRunner
                 return updatedContent;
             }).ConfigureAwait(false);
 
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.CodeAnalysis.Razor.CohostingShared.UnitTests", "Endpoints", "CohostDocumentCompletionEndpointTest.cs"),
+            content =>
+            {
+                var updatedContent = EnsureUsingDirective(
+                    content,
+                    "using RoslynConditionalFact = Roslyn.Test.Utilities.ConditionalFactAttribute;",
+                    "using WorkItemAttribute = Roslyn.Test.Utilities.WorkItemAttribute;");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "CSharpOverrideMethods", "RoslynConditionalFact(typeof(IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "CSharp_AwaitKeyword", "RoslynConditionalFact(typeof(IsEnglishLocal))");
+                updatedContent = ReplaceRequiredText(
+                    updatedContent,
+                    """        var expectedDirectiveSnippetLabels = expectedDirectiveLabels.Select(label => $"{label} directive ...");""",
+                    """        var expectedDirectiveSnippetLabels = expectedDirectiveLabels.Select(label => $"{label} {SR.Directive} ...");""",
+                    "the localized Razor directive completion snippet labels");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudioCode.RazorExtension.UnitTests", "Endpoints", "CohostCodeLensEndpointTest.cs"),
+            content =>
+            {
+                var updatedContent = EnsureUsingDirective(content, "using Roslyn.Test.Utilities;", "using Microsoft.VisualStudio.Razor.LanguageClient.Cohost;");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "OneMethod", "ConditionalFact(typeof(IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "TwoMethods", "ConditionalFact(typeof(IsEnglishLocal))");
+                updatedContent = ReplaceFactAttributeForMethod(updatedContent, "UsageInRazor", "ConditionalFact(typeof(IsEnglishLocal))");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
+        await RewriteFileAsync(
+            Path.Combine(targetRoot, "src", "Razor", "test", "Microsoft.VisualStudioCode.RazorExtension.UnitTests", "MEFCompositionTest.cs"),
+            content =>
+            {
+                var updatedContent = ReplaceFactAttributeForMethod(content, "Composes", "ConditionalFact(typeof(IsEnglishLocal))");
+                return updatedContent;
+            }).ConfigureAwait(false);
+
         return changedFiles.Count == 0
             ? "No Cohost locale-sensitive UI test fixes were needed."
-            : $"Updated {changedFiles.Count} Cohost locale-sensitive UI test file(s): {string.Join(", ", changedFiles)}.";
+            : $"Updated {changedFiles.Count} Cohost and VSCode locale-sensitive UI test file(s): {string.Join(", ", changedFiles)}.";
 
         async Task RewriteFileAsync(string path, Func<string, string> rewrite)
         {
@@ -3448,6 +3493,24 @@ internal static class PostMergeCleanupRunner
             throw new InvalidOperationException($"Could not find [Fact] for method '{methodName}' while adding the English-locale guard.");
 
         return factPattern.Replace(normalizedContent, $"${{indent}}[{replacementAttribute}]", 1);
+    }
+
+    private static string ReplaceTheoryAttributeForMethod(string content, string methodName, string replacementAttribute)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var existingPattern = new Regex(
+            $@"^(?<indent>[ \t]*)\[{Regex.Escape(replacementAttribute)}\]$(?=(?:\n\k<indent>\[[^\n]+\])*\n\k<indent>public(?:\s+async)?\s+(?:Task|void)\s+{Regex.Escape(methodName)}\()",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        if (existingPattern.IsMatch(normalizedContent))
+            return content;
+
+        var theoryPattern = new Regex(
+            $@"^(?<indent>[ \t]*)\[Theory\]$(?=(?:\n\k<indent>\[[^\n]+\])*\n\k<indent>public(?:\s+async)?\s+(?:Task|void)\s+{Regex.Escape(methodName)}\()",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        if (!theoryPattern.IsMatch(normalizedContent))
+            throw new InvalidOperationException($"Could not find [Theory] for method '{methodName}' while adding the English-locale guard.");
+
+        return theoryPattern.Replace(normalizedContent, $"${{indent}}[{replacementAttribute}]", 1);
     }
 
     private const string MicrobenchmarkSystemCodeDomCopyItem =
