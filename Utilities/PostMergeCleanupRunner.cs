@@ -4985,9 +4985,7 @@ internal static class PostMergeCleanupRunner
             if (matchCount == 0)
                 continue;
 
-            var updatedContent = SdkRazorBuildNetstandardPathPattern.Replace(
-                originalContent,
-                match => $"$(PkgMicrosoft_NET_Sdk_Razor){match.Groups["separator"].Value}targets");
+            var updatedContent = RewriteSdkRazorPackagePaths(originalContent);
 
             await WriteTextPreservingUtf8BomAsync(path, updatedContent, templatePath: path).ConfigureAwait(false);
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, path));
@@ -8187,6 +8185,11 @@ public class SurveyPrompt : ComponentBase
             StringComparison.Ordinal);
     }
 
+    private static string RewriteSdkRazorPackagePaths(string content)
+        => SdkRazorBuildNetstandardPathPattern.Replace(
+            content,
+            match => $"$(PkgMicrosoft_NET_Sdk_Razor){match.Groups["separator"].Value}targets");
+
     private static string RemoveProjectReferenceBlock(string content, string includePath)
     {
         var expandedPattern = new Regex(
@@ -8445,7 +8448,9 @@ public class SurveyPrompt : ComponentBase
                 StringComparison.Ordinal);
         }
 
+        updatedContent = RewriteRazorServicesPropsReferenceContent(updatedContent);
         updatedContent = EnsureRazorVisualStudioWorkspaceReferences(updatedContent);
+        updatedContent = RewriteSdkRazorPackagePaths(updatedContent);
         return RemoveEmptyMsBuildItemGroups(updatedContent);
     }
 
