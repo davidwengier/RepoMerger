@@ -8511,6 +8511,7 @@ public class SurveyPrompt : ComponentBase
 
     private static readonly string[] RazorArcadePublishDataPackages =
     [
+        "Microsoft.AspNetCore.Mvc.Razor.Extensions.Tooling.Internal",
         "Microsoft.CodeAnalysis.Razor.Compiler",
         "Microsoft.Net.Compilers.Razor.Toolset",
         "Microsoft.VisualStudio.RazorExtension",
