@@ -466,6 +466,12 @@ internal static class PostMergeCleanupRunner
             "Include Razor core-component VSIX manifests",
             "Roslyn disables default None-item inclusion repo-wide, but Razor's arm64 and x64 Microsoft.CodeAnalysis.Remote.Razor.CoreComponents wrapper projects rely on default SDK None items to pick up source.extension.vsixmanifest. The merged tree should add explicit None includes so official builds can create those VSIX containers without VSSDK1039.",
             IncludeRazorCoreComponentsVsixManifestsAsync),
+        new(
+            "rewrite-razor-vsix-binding-redirects",
+            "Rewrite Razor's VSIX binding redirect generation to use Roslyn's pkgdef inputs.",
+            "Rewrite Razor VSIX binding redirects",
+            "Roslyn's GeneratePkgDef.targets emits VSIX binding redirects from PkgDefBindingRedirect items and PkgDefEntry metadata, not from ProvideBindingRedirection assembly attributes. The merged Razor VSIX project should feed those shared pkgdef inputs directly and drop its dead generated BindingRedirects.cs target so F5 deployment writes the redirects Visual Studio actually consumes.",
+            RewriteRazorVsixBindingRedirectsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -754,6 +760,30 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
         return $"Disabled empty pkgdef generation in '{Path.GetRelativePath(targetRepoRoot, projectPath)}'.";
+    }
+
+    private static async Task<string> RewriteRazorVsixBindingRedirectsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var projectPath = Path.Combine(context.TargetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension", "Microsoft.VisualStudio.RazorExtension.csproj");
+        if (!File.Exists(projectPath))
+            return "No Razor Visual Studio extension project was found for pkgdef binding redirect cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+        var updatedContent = originalContent;
+
+        updatedContent = EnsureRazorVsixPkgDefBindingRedirectItemGroup(updatedContent);
+        foreach (var projectReferencePath in RazorVsixPkgDefBindingRedirectProjectReferences)
+            updatedContent = EnsureProjectReferenceHasMetadataElement(updatedContent, projectReferencePath, "PkgDefEntry", "BindingRedirect");
+
+        updatedContent = RazorVsixGeneratedBindingRedirectPropertyGroupPattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RemoveNamedTarget(updatedContent, "_GenerateVSIXBindingRedirects");
+
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor VSIX binding redirect rewrites were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
+        return $"Rewrote Razor VSIX binding redirect generation in '{Path.GetRelativePath(targetRepoRoot, projectPath)}' to use Roslyn's pkgdef pipeline.";
     }
 
     private static async Task<string> RewriteDirectoryBuildImportsAsync(StageContext context)
@@ -7891,6 +7921,106 @@ public class SurveyPrompt : ComponentBase
         return true;
     }
 
+    private static string EnsureRazorVsixPkgDefBindingRedirectItemGroup(string content)
+    {
+        if (content.Contains(@"<PkgDefBindingRedirect Include=""$(TargetPath)"" />", StringComparison.Ordinal))
+            return content;
+
+        if (content.Contains(RazorVsixPkgDefAnchorComment, StringComparison.Ordinal))
+        {
+            return content.Replace(
+                RazorVsixPkgDefAnchorComment,
+                RazorVsixPkgDefBindingRedirectItemGroup + Environment.NewLine + Environment.NewLine + RazorVsixPkgDefAnchorComment,
+                StringComparison.Ordinal);
+        }
+
+        var propertyGroupEnd = content.IndexOf("  </PropertyGroup>", StringComparison.Ordinal);
+        if (propertyGroupEnd < 0)
+            return content;
+
+        propertyGroupEnd += "  </PropertyGroup>".Length;
+        return content.Insert(propertyGroupEnd, Environment.NewLine + Environment.NewLine + RazorVsixPkgDefBindingRedirectItemGroup);
+    }
+
+    private static string EnsureProjectReferenceHasMetadataElement(string content, string includePath, string elementName, string elementValue)
+    {
+        var expectedElement = $"<{elementName}>{elementValue}</{elementName}>";
+        var expandedPattern = new Regex(
+            $@"(?<indent>^[ \t]*)<ProjectReference Include=""{Regex.Escape(includePath)}"">(?<body>.*?)(?<close>^[ \t]*</ProjectReference>)",
+            RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        var expandedMatch = expandedPattern.Match(content);
+        if (expandedMatch.Success)
+        {
+            var body = expandedMatch.Groups["body"].Value;
+            if (body.Contains(expectedElement, StringComparison.Ordinal))
+                return content;
+
+            var indent = expandedMatch.Groups["indent"].Value;
+            var childIndent = indent + "  ";
+            var metadataPattern = new Regex(
+                $@"^[ \t]*<{Regex.Escape(elementName)}>\s*.*?\s*</{Regex.Escape(elementName)}>\r?\n?",
+                RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+            if (metadataPattern.IsMatch(body))
+            {
+                body = metadataPattern.Replace(
+                    body,
+                    $"{childIndent}{expectedElement}{Environment.NewLine}",
+                    1);
+            }
+            else
+            {
+                if (!body.EndsWith("\n", StringComparison.Ordinal))
+                    body += Environment.NewLine;
+
+                body += $"{childIndent}{expectedElement}{Environment.NewLine}";
+            }
+
+            var replacement = $"{indent}<ProjectReference Include=\"{includePath}\">{body}{indent}</ProjectReference>";
+            return content.Remove(expandedMatch.Index, expandedMatch.Length).Insert(expandedMatch.Index, replacement);
+        }
+
+        var selfClosingPattern = new Regex(
+            $@"(?<indent>^[ \t]*)<ProjectReference Include=""{Regex.Escape(includePath)}""\s*/>",
+            RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        var selfClosingMatch = selfClosingPattern.Match(content);
+        if (!selfClosingMatch.Success)
+            return content;
+
+        var selfClosingIndent = selfClosingMatch.Groups["indent"].Value;
+        var selfClosingChildIndent = selfClosingIndent + "  ";
+        var selfClosingReplacement = string.Join(
+            Environment.NewLine,
+            [
+                $"{selfClosingIndent}<ProjectReference Include=\"{includePath}\">",
+                $"{selfClosingChildIndent}{expectedElement}",
+                $"{selfClosingIndent}</ProjectReference>",
+            ]);
+
+        return content.Remove(selfClosingMatch.Index, selfClosingMatch.Length).Insert(selfClosingMatch.Index, selfClosingReplacement);
+    }
+
+    private static string RemoveNamedTarget(string content, string targetName)
+    {
+        var targetToken = $"<Target Name=\"{targetName}\"";
+        var targetStart = content.IndexOf(targetToken, StringComparison.Ordinal);
+        if (targetStart < 0)
+            return content;
+
+        var removalStart = content.LastIndexOf('\n', Math.Max(0, targetStart - 1));
+        removalStart = removalStart >= 0 ? removalStart + 1 : targetStart;
+
+        var targetEnd = content.IndexOf("</Target>", targetStart, StringComparison.Ordinal);
+        if (targetEnd < 0)
+            return content;
+
+        targetEnd += "</Target>".Length;
+        while (targetEnd < content.Length && (content[targetEnd] is '\r' or '\n'))
+            targetEnd++;
+
+        return content.Remove(removalStart, targetEnd - removalStart);
+    }
+
     private static async Task<HashSet<string>> CollectPackageVersionIdsAsync(string projectFilePath)
     {
         var collectedPackageIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -8344,6 +8474,10 @@ public class SurveyPrompt : ComponentBase
         @"<GeneratePkgDefFile>\s*true\s*</GeneratePkgDefFile>",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
+    private static readonly Regex RazorVsixGeneratedBindingRedirectPropertyGroupPattern = new(
+        @"^[ \t]*<PropertyGroup>\r?\n[ \t]*<_GeneratedVSIXBindingRedirectFile>.*?</_GeneratedVSIXBindingRedirectFile>\r?\n[ \t]*</PropertyGroup>\r?\n(?:\r?\n)?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
     private static readonly Regex PackageProjectUrlElementPattern = new(
         @"^(?<indent>[ \t]*)<PackageProjectUrl>\s*[^<]+\s*</PackageProjectUrl>\s*$",
         RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
@@ -8517,6 +8651,24 @@ public class SurveyPrompt : ComponentBase
         "Microsoft.VisualStudio.RazorExtension",
         "RazorDeployment",
     ];
+
+    private static readonly string[] RazorVsixPkgDefBindingRedirectProjectReferences =
+    [
+        @"$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj",
+        @"..\Microsoft.CodeAnalysis.Razor.Workspaces\Microsoft.CodeAnalysis.Razor.Workspaces.csproj",
+        @"..\Microsoft.VisualStudio.LanguageServer.ContainedLanguage\Microsoft.VisualStudio.LanguageServer.ContainedLanguage.csproj",
+        @"..\Microsoft.VisualStudio.LanguageServices.Razor\Microsoft.VisualStudio.LanguageServices.Razor.csproj",
+        @"..\..\..\Compiler\Microsoft.CodeAnalysis.Razor.Compiler\src\Microsoft.CodeAnalysis.Razor.Compiler.csproj",
+    ];
+
+    private const string RazorVsixPkgDefAnchorComment =
+        "  <!-- Import the list of service hub services we proffer, to generate various files to include in the VSIX -->";
+
+    private const string RazorVsixPkgDefBindingRedirectItemGroup = """
+  <ItemGroup Label="PkgDef">
+    <PkgDefBindingRedirect Include="$(TargetPath)" />
+  </ItemGroup>
+""";
 
     private const string RazorCoreComponentsVsixManifestItemGroup = """
   <ItemGroup>
