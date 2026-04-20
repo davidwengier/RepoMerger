@@ -478,6 +478,12 @@ internal static class PostMergeCleanupRunner
             "Rewrite Razor VSIX package registration",
             "Roslyn's VSIX build only registers packages, UI contexts, and autoloads that arrive through explicit PkgDefPackageRegistration items and merged pkgdef content. The merged Razor VSIX should describe RazorPackage activation through those inputs so F5 deployment registers the package in RoslynDev instead of relying on dead registration attributes.",
             RewriteRazorVsixPackageRegistrationAsync),
+        new(
+            "use-windowsdesktop-sdk-for-razor-vsix",
+            "Use Roslyn's WindowsDesktop SDK pattern for the Razor VSIX project so WPF markup compilation still runs after the merge.",
+            "Use WindowsDesktop SDK for Razor VSIX",
+            "Roslyn's WPF/XAML projects build as Microsoft.NET.Sdk.WindowsDesktop projects while still using the repo's normal compiler path. The merged RazorExtension project stays on Microsoft.NET.Sdk, and under Roslyn that configuration skips WPF markup compilation and fails on SyntaxVisualizer's InitializeComponent and treeView members. The merged Razor VSIX should follow Roslyn's WindowsDesktop SDK pattern instead of carrying a private compiler-toolset pin.",
+            UseWindowsDesktopSdkForRazorVsixAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -854,6 +860,24 @@ internal static class PostMergeCleanupRunner
         return summaries.Count == 0
             ? "No Razor VSIX package-registration rewrites were needed."
             : string.Join(" ", summaries);
+    }
+
+    private static async Task<string> UseWindowsDesktopSdkForRazorVsixAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var projectPath = Path.Combine(context.TargetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension", "Microsoft.VisualStudio.RazorExtension.csproj");
+        if (!File.Exists(projectPath))
+            return "No Razor Visual Studio extension project was found for WindowsDesktop SDK cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+        var updatedContent = EnsureRazorVsixUsesWindowsDesktopSdk(originalContent);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor VSIX WindowsDesktop SDK rewrites were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
+        return
+            $"Updated '{Path.GetRelativePath(targetRepoRoot, projectPath)}' to use Microsoft.NET.Sdk.WindowsDesktop " +
+            "so Roslyn's normal WPF markup-compilation flow runs for the merged VSIX project.";
     }
 
     private static async Task<string> RewriteDirectoryBuildImportsAsync(StageContext context)
@@ -8021,6 +8045,17 @@ public class SurveyPrompt : ComponentBase
         return updatedContent;
     }
 
+    private static string EnsureRazorVsixUsesWindowsDesktopSdk(string content)
+    {
+        var updatedContent = content.Replace(
+            RazorVsixSdkLine,
+            RazorVsixWindowsDesktopSdkLine,
+            StringComparison.Ordinal);
+
+        updatedContent = RazorVsixCompilerToolsetPackageReferencePattern.Replace(updatedContent, string.Empty, 1);
+        return updatedContent;
+    }
+
     private static string EnsureProjectReferenceHasMetadataElement(string content, string includePath, string elementName, string elementValue)
     {
         var expectedElement = $"<{elementName}>{elementValue}</{elementName}>";
@@ -8583,6 +8618,10 @@ public class SurveyPrompt : ComponentBase
         @"<GeneratePkgDefFile>\s*true\s*</GeneratePkgDefFile>",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
+    private static readonly Regex RazorVsixCompilerToolsetPackageReferencePattern = new(
+        @"^[ \t]*<PackageReference Include=""Microsoft\.Net\.Compilers\.Toolset""(?:[\s\S]*?^[ \t]*</PackageReference>|[^>]*/>)\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
     private static readonly Regex RazorVsixGeneratedBindingRedirectPropertyGroupPattern = new(
         @"^[ \t]*<PropertyGroup>\r?\n[ \t]*<_GeneratedVSIXBindingRedirectFile>.*?</_GeneratedVSIXBindingRedirectFile>\r?\n[ \t]*</PropertyGroup>\r?\n(?:\r?\n)?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
@@ -8837,6 +8876,10 @@ public class SurveyPrompt : ComponentBase
     <PkgDefBindingRedirect Include="$(TargetPath)" />
   </ItemGroup>
 """;
+
+    private const string RazorVsixSdkLine = "<Project Sdk=\"Microsoft.NET.Sdk\">";
+
+    private const string RazorVsixWindowsDesktopSdkLine = "<Project Sdk=\"Microsoft.NET.Sdk.WindowsDesktop\">";
 
     private const string RazorVsixPackageRegistrationPkgDefContent = """
 // [ProvideAutoLoad(GuidRazorFileContextString, PackageAutoLoadFlags.BackgroundLoad)]
