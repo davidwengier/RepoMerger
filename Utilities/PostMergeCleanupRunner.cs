@@ -460,6 +460,12 @@ internal static class PostMergeCleanupRunner
             "Fix MSBuildTaskTests Dataflow binding redirect",
             "Roslyn's XUnit.targets only injects the repo-default desktop app.config when a test project has no app.config. The merged Razor desktop test payload causes Microsoft.Build.Tasks.CodeAnalysis.UnitTests to share a VSTest host with newer System.Threading.Tasks.Dataflow bits, so MSBuildTaskTests needs its own tracked app.config and explicit None include to add the binding redirect Microsoft.Build expects.",
             FixMSBuildTaskTestsDataflowBindingRedirectAsync),
+        new(
+            "include-razor-corecomponents-vsix-manifests",
+            "Explicitly include source.extension.vsixmanifest in Razor core-component VSIX wrapper projects.",
+            "Include Razor core-component VSIX manifests",
+            "Roslyn disables default None-item inclusion repo-wide, but Razor's arm64 and x64 Microsoft.CodeAnalysis.Remote.Razor.CoreComponents wrapper projects rely on default SDK None items to pick up source.extension.vsixmanifest. The merged tree should add explicit None includes so official builds can create those VSIX containers without VSSDK1039.",
+            IncludeRazorCoreComponentsVsixManifestsAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -5388,6 +5394,50 @@ internal static class PostMergeCleanupRunner
             : $"Restored Razor VSIX developer-build packaging behavior in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> IncludeRazorCoreComponentsVsixManifestsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetRoot = context.TargetRoot;
+        var changedFiles = new List<string>();
+        var projectPaths = new[]
+        {
+            Path.Combine(
+                targetRoot,
+                "src",
+                "Razor",
+                "src",
+                "Microsoft.CodeAnalysis.Remote.Razor.CoreComponents",
+                "arm64",
+                "Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.arm64.csproj"),
+            Path.Combine(
+                targetRoot,
+                "src",
+                "Razor",
+                "src",
+                "Microsoft.CodeAnalysis.Remote.Razor.CoreComponents",
+                "x64",
+                "Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj"),
+        };
+
+        foreach (var projectPath in projectPaths)
+        {
+            if (!File.Exists(projectPath))
+                continue;
+
+            var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+            var updatedContent = EnsureSourceExtensionVsixManifestIncluded(originalContent);
+            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+                continue;
+
+            await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
+            changedFiles.Add(Path.GetRelativePath(targetRepoRoot, projectPath));
+        }
+
+        return changedFiles.Count == 0
+            ? "No Razor core-component VSIX manifest includes were needed."
+            : $"Explicitly included source.extension.vsixmanifest in {changedFiles.Count} Razor core-component wrapper project(s): {string.Join(", ", changedFiles)}.";
+    }
+
     private static async Task<string> RemoveRoslynDiagnosticsAnalyzersAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -8134,6 +8184,23 @@ public class SurveyPrompt : ComponentBase
             .Replace("\r", "\n", StringComparison.Ordinal)
             .Replace("\n", lineEnding, StringComparison.Ordinal);
 
+    private static string EnsureSourceExtensionVsixManifestIncluded(string content)
+    {
+        var normalizedContent = NormalizeLineEndings(content, "\n");
+        var manifestInclude = NormalizeLineEndings(RazorCoreComponentsVsixManifestItemGroup, "\n");
+        if (normalizedContent.Contains(manifestInclude, StringComparison.Ordinal))
+            return content;
+
+        var updatedContent = normalizedContent.Replace(
+            "</Project>",
+            manifestInclude + "\n</Project>",
+            StringComparison.Ordinal);
+
+        return string.Equals(normalizedContent, updatedContent, StringComparison.Ordinal)
+            ? content
+            : updatedContent;
+    }
+
     private static string EnsureRazorCodeOwnersEntry(string content)
     {
         var lines = NormalizeLineEndings(content, "\n").Split('\n').ToList();
@@ -8449,6 +8516,14 @@ public class SurveyPrompt : ComponentBase
         "Microsoft.VisualStudio.RazorExtension",
         "RazorDeployment",
     ];
+
+    private const string RazorCoreComponentsVsixManifestItemGroup = """
+  <ItemGroup>
+    <None Include="source.extension.vsixmanifest">
+      <SubType>Designer</SubType>
+    </None>
+  </ItemGroup>
+""";
 
     private static readonly string[] RazorGlobalConfigFileNames =
     [
