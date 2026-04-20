@@ -472,6 +472,12 @@ internal static class PostMergeCleanupRunner
             "Rewrite Razor VSIX binding redirects",
             "Roslyn's GeneratePkgDef.targets emits VSIX binding redirects from PkgDefBindingRedirect items and PkgDefEntry metadata, not from ProvideBindingRedirection assembly attributes. The merged Razor VSIX project should feed those shared pkgdef inputs directly and drop its dead generated BindingRedirects.cs target so F5 deployment writes the redirects Visual Studio actually consumes.",
             RewriteRazorVsixBindingRedirectsAsync),
+        new(
+            "rewrite-razor-vsix-package-registration",
+            "Rewrite Razor's package activation registration to use Roslyn's pkgdef inputs.",
+            "Rewrite Razor VSIX package registration",
+            "Roslyn's VSIX build only registers packages, UI contexts, and autoloads that arrive through explicit PkgDefPackageRegistration items and merged pkgdef content. The merged Razor VSIX should describe RazorPackage activation through those inputs so F5 deployment registers the package in RoslynDev instead of relying on dead registration attributes.",
+            RewriteRazorVsixPackageRegistrationAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -784,6 +790,70 @@ internal static class PostMergeCleanupRunner
 
         await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
         return $"Rewrote Razor VSIX binding redirect generation in '{Path.GetRelativePath(targetRepoRoot, projectPath)}' to use Roslyn's pkgdef pipeline.";
+    }
+
+    private static async Task<string> RewriteRazorVsixPackageRegistrationAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var projectDirectory = Path.Combine(context.TargetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension");
+        var projectPath = Path.Combine(projectDirectory, "Microsoft.VisualStudio.RazorExtension.csproj");
+        var customPkgDefPath = Path.Combine(projectDirectory, "Microsoft.VisualStudio.RazorExtension.Custom.pkgdef");
+        var packageRegistrationPkgDefPath = Path.Combine(projectDirectory, "PackageRegistration.pkgdef");
+        var razorPackagePath = Path.Combine(projectDirectory, "RazorPackage.cs");
+        if (!File.Exists(projectPath) || !File.Exists(razorPackagePath))
+            return "No Razor Visual Studio extension project was found for package-registration cleanup.";
+
+        var summaries = new List<string>();
+        var pathsToStage = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var originalProjectContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+        var updatedProjectContent = EnsureRazorVsixPackageRegistrationItems(originalProjectContent);
+        if (!string.Equals(originalProjectContent, updatedProjectContent, StringComparison.Ordinal))
+        {
+            await WriteTextPreservingUtf8BomAsync(projectPath, updatedProjectContent, templatePath: projectPath).ConfigureAwait(false);
+            summaries.Add($"Updated '{Path.GetRelativePath(targetRepoRoot, projectPath)}' to feed package registration through Roslyn's PkgDefPackageRegistration and static pkgdef inputs.");
+        }
+
+        var desiredPackageRegistrationPkgDefContent = RazorVsixPackageRegistrationPkgDefContent;
+        var existingPackageRegistrationPkgDefContent = File.Exists(packageRegistrationPkgDefPath)
+            ? NormalizeLineEndings(await File.ReadAllTextAsync(packageRegistrationPkgDefPath).ConfigureAwait(false), "\n")
+            : null;
+        var normalizedDesiredPackageRegistrationPkgDefContent = NormalizeLineEndings(desiredPackageRegistrationPkgDefContent, "\n");
+        if (!string.Equals(existingPackageRegistrationPkgDefContent, normalizedDesiredPackageRegistrationPkgDefContent, StringComparison.Ordinal))
+        {
+            var templatePath = File.Exists(packageRegistrationPkgDefPath)
+                ? packageRegistrationPkgDefPath
+                : customPkgDefPath;
+            await WriteTextPreservingUtf8BomAsync(
+                packageRegistrationPkgDefPath,
+                desiredPackageRegistrationPkgDefContent,
+                templatePath: templatePath).ConfigureAwait(false);
+            summaries.Add($"Added static package-registration pkgdef content at '{Path.GetRelativePath(targetRepoRoot, packageRegistrationPkgDefPath)}'.");
+            pathsToStage.Add(Path.GetRelativePath(targetRepoRoot, packageRegistrationPkgDefPath));
+        }
+
+        var originalRazorPackageContent = await File.ReadAllTextAsync(razorPackagePath).ConfigureAwait(false);
+        var updatedRazorPackageContent = RemoveRazorPackageRegistrationAttributes(originalRazorPackageContent);
+        if (!string.Equals(originalRazorPackageContent, updatedRazorPackageContent, StringComparison.Ordinal))
+        {
+            await WriteTextPreservingUtf8BomAsync(razorPackagePath, updatedRazorPackageContent, templatePath: razorPackagePath).ConfigureAwait(false);
+            summaries.Add($"Removed duplicate package-registration attributes from '{Path.GetRelativePath(targetRepoRoot, razorPackagePath)}' so pkgdef inputs stay authoritative.");
+        }
+
+        if (pathsToStage.Count > 0)
+        {
+            var stageablePaths = await GetStageableRelativePathsAsync(targetRepoRoot, pathsToStage).ConfigureAwait(false);
+            if (stageablePaths.Count > 0)
+            {
+                await GitRunner.RunGitAsync(
+                    targetRepoRoot,
+                    ["add", "--all", "--", .. stageablePaths]).ConfigureAwait(false);
+            }
+        }
+
+        return summaries.Count == 0
+            ? "No Razor VSIX package-registration rewrites were needed."
+            : string.Join(" ", summaries);
     }
 
     private static async Task<string> RewriteDirectoryBuildImportsAsync(StageContext context)
@@ -7942,6 +8012,15 @@ public class SurveyPrompt : ComponentBase
         return content.Insert(propertyGroupEnd, Environment.NewLine + Environment.NewLine + RazorVsixPkgDefBindingRedirectItemGroup);
     }
 
+    private static string EnsureRazorVsixPackageRegistrationItems(string content)
+    {
+        var updatedContent = content;
+        updatedContent = EnsureLineAfter(updatedContent, RazorVsixPkgDefItemGroupStart, RazorVsixPkgDefInstalledProductLine);
+        updatedContent = EnsureLineAfter(updatedContent, RazorVsixPkgDefInstalledProductLine, RazorVsixPkgDefPackageRegistrationLine);
+        updatedContent = EnsureLineAfter(updatedContent, RazorVsixPkgDefBindingRedirectLine, RazorVsixPkgDefPackageRegistrationFileLine);
+        return updatedContent;
+    }
+
     private static string EnsureProjectReferenceHasMetadataElement(string content, string includePath, string elementName, string elementValue)
     {
         var expectedElement = $"<{elementName}>{elementValue}</{elementName}>";
@@ -7998,6 +8077,36 @@ public class SurveyPrompt : ComponentBase
             ]);
 
         return content.Remove(selfClosingMatch.Index, selfClosingMatch.Length).Insert(selfClosingMatch.Index, selfClosingReplacement);
+    }
+
+    private static string RemoveRazorPackageRegistrationAttributes(string content)
+    {
+        var updatedContent = content;
+        updatedContent = RazorPackagePackageRegistrationAttributePattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RazorPackageAboutDialogInfoAttributePattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RazorPackageProvideServiceAttributePattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RazorPackageProvideLanguageServiceAttributePattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RazorPackageProvideMenuResourceAttributePattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RazorPackageProvideToolWindowBlockPattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RazorPackageProvideSettingsManifestAttributePattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RazorPackageCohostingCommentPattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RazorPackageProvideUiContextRulePattern.Replace(updatedContent, string.Empty);
+        updatedContent = RazorPackageRazorFileSelectedCommentPattern.Replace(updatedContent, string.Empty, 1);
+        updatedContent = RazorPackageProvideAutoLoadAttributePattern.Replace(updatedContent, string.Empty, 1);
+        return updatedContent;
+    }
+
+    private static string EnsureLineAfter(string content, string anchor, string line)
+    {
+        if (content.Contains(line, StringComparison.Ordinal))
+            return content;
+
+        var anchorIndex = content.IndexOf(anchor, StringComparison.Ordinal);
+        if (anchorIndex < 0)
+            return content;
+
+        anchorIndex += anchor.Length;
+        return content.Insert(anchorIndex, Environment.NewLine + line);
     }
 
     private static string RemoveNamedTarget(string content, string targetName)
@@ -8478,6 +8587,50 @@ public class SurveyPrompt : ComponentBase
         @"^[ \t]*<PropertyGroup>\r?\n[ \t]*<_GeneratedVSIXBindingRedirectFile>.*?</_GeneratedVSIXBindingRedirectFile>\r?\n[ \t]*</PropertyGroup>\r?\n(?:\r?\n)?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
+    private static readonly Regex RazorPackagePackageRegistrationAttributePattern = new(
+        @"^[ \t]*\[PackageRegistration\(UseManagedResourcesOnly\s*=\s*true,\s*AllowsBackgroundLoading\s*=\s*true\)\]\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageAboutDialogInfoAttributePattern = new(
+        @"^[ \t]*\[AboutDialogInfo\(PackageGuidString,\s*""Razor \(ASP\.NET Core\)"",\s*""#110"",\s*""#112"",\s*IconResourceID\s*=\s*""#400""\)\]\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageProvideServiceAttributePattern = new(
+        @"^[ \t]*\[ProvideService\(typeof\(RazorLanguageService\)\)\]\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageProvideLanguageServiceAttributePattern = new(
+        @"^[ \t]*\[ProvideLanguageService\(typeof\(RazorLanguageService\),\s*RazorConstants\.RazorLSPContentTypeName,\s*110\)\]\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageProvideMenuResourceAttributePattern = new(
+        @"^[ \t]*\[ProvideMenuResource\(""Menus\.ctmenu"",\s*1\)\]\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageProvideToolWindowBlockPattern = new(
+        @"^[ \t]*#pragma warning disable VSSDK003.*\r?\n^[ \t]*\[ProvideToolWindow\(typeof\(SyntaxVisualizerToolWindow\)\)\]\r?\n^[ \t]*#pragma warning restore VSSDK003.*\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageProvideSettingsManifestAttributePattern = new(
+        @"^[ \t]*\[ProvideSettingsManifest\(PackageRelativeManifestFile = @""UnifiedSettings\\razor\.registration\.json""\)\]\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageCohostingCommentPattern = new(
+        @"^[ \t]*// We activate cohosting when the first Razor file is opened\. This matches the previous behavior where the\r?\n^[ \t]*// LSP client MEF export had the Razor content type metadata\.\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageProvideUiContextRulePattern = new(
+        @"^[ \t]*\[ProvideUIContextRule\([\s\S]*?\)\]\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageProvideAutoLoadAttributePattern = new(
+        @"^[ \t]*\[ProvideAutoLoad\(GuidRazorFileContextString,\s*PackageAutoLoadFlags\.BackgroundLoad\)\]\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex RazorPackageRazorFileSelectedCommentPattern = new(
+        @"^[ \t]*// Activate context menu commands when a \.razor or \.cshtml file \(or their nested files\) is selected or opened\r?\n",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
     private static readonly Regex PackageProjectUrlElementPattern = new(
         @"^(?<indent>[ \t]*)<PackageProjectUrl>\s*[^<]+\s*</PackageProjectUrl>\s*$",
         RegexOptions.Multiline | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
@@ -8664,10 +8817,71 @@ public class SurveyPrompt : ComponentBase
     private const string RazorVsixPkgDefAnchorComment =
         "  <!-- Import the list of service hub services we proffer, to generate various files to include in the VSIX -->";
 
+    private const string RazorVsixPkgDefItemGroupStart =
+        "  <ItemGroup Label=\"PkgDef\">";
+
+    private const string RazorVsixPkgDefInstalledProductLine =
+        "    <PkgDefInstalledProduct Include=\"{13b72f58-279e-49e0-a56d-296be02f0805}\" Name=\"Razor (ASP.NET Core)\" DisplayName=\"#110\" ProductDetails=\"#112\" />";
+
+    private const string RazorVsixPkgDefPackageRegistrationLine =
+        "    <PkgDefPackageRegistration Include=\"{13b72f58-279e-49e0-a56d-296be02f0805}\" Name=\"RazorPackage\" Class=\"Microsoft.VisualStudio.RazorExtension.RazorPackage\" AllowsBackgroundLoad=\"true\" />";
+
+    private const string RazorVsixPkgDefBindingRedirectLine =
+        "    <PkgDefBindingRedirect Include=\"$(TargetPath)\" />";
+
+    private const string RazorVsixPkgDefPackageRegistrationFileLine =
+        "    <None Include=\"PackageRegistration.pkgdef\" PkgDefEntry=\"FileContent\" />";
+
     private const string RazorVsixPkgDefBindingRedirectItemGroup = """
   <ItemGroup Label="PkgDef">
     <PkgDefBindingRedirect Include="$(TargetPath)" />
   </ItemGroup>
+""";
+
+    private const string RazorVsixPackageRegistrationPkgDefContent = """
+// [ProvideAutoLoad(GuidRazorFileContextString, PackageAutoLoadFlags.BackgroundLoad)]
+[$RootKey$\AutoLoadPackages\{7C3F2F9E-8D4A-4B6C-9E1F-5A8D7C6B3E2D}]
+"{13b72f58-279e-49e0-a56d-296be02f0805}"=dword:00000002
+
+[$RootKey$\Menus]
+"{13b72f58-279e-49e0-a56d-296be02f0805}"=", Menus.ctmenu, 1"
+
+// [ProvideUIContextRule(
+//      contextGuid: RazorConstants.RazorCohostingUIContext,
+//      name: "Razor Cohosting Activation",
+//      expression: "RazorContentType",
+//      termNames: ["RazorContentType"],
+//      termValues: [$"ActiveEditorContentType:{RazorConstants.RazorLSPContentTypeName}"])]
+[$RootKey$\UIContextRules\{6d5b86dc-6b8a-483b-ae30-098a3c7d6774}]
+@="Razor Cohosting Activation"
+"Expression"="RazorContentType"
+"RazorContentType"="ActiveEditorContentType:Razor"
+
+// [ProvideUIContextRule(
+//      contextGuid: GuidRazorFileContextString,
+//      name: "Razor File Selected",
+//      expression: "DotNetCoreRazorProject & (RazorFile | CshtmlFile | RazorNestedFile | CshtmlNestedFile)",
+//      termNames: ["DotNetCoreRazorProject", "RazorFile", "CshtmlFile", "RazorNestedFile", "CshtmlNestedFile"],
+//      termValues: ["ActiveProjectCapability:DotNetCoreRazor", @"HierSingleSelectionName:\.razor$", @"HierSingleSelectionName:\.cshtml$", @"HierSingleSelectionName:\.razor\.", @"HierSingleSelectionName:\.cshtml\."])]
+[$RootKey$\UIContextRules\{7C3F2F9E-8D4A-4B6C-9E1F-5A8D7C6B3E2D}]
+@="Razor File Selected"
+"Expression"="DotNetCoreRazorProject & (RazorFile | CshtmlFile | RazorNestedFile | CshtmlNestedFile)"
+"DotNetCoreRazorProject"="ActiveProjectCapability:DotNetCoreRazor"
+"RazorFile"="HierSingleSelectionName:\.razor$"
+"CshtmlFile"="HierSingleSelectionName:\.cshtml$"
+"RazorNestedFile"="HierSingleSelectionName:\.razor\."
+"CshtmlNestedFile"="HierSingleSelectionName:\.cshtml\."
+
+// The language-service registration is duplicated in Microsoft.VisualStudio.RazorExtension.Custom.pkgdef.
+[$RootKey$\Services\{4513FA64-5B72-4B58-9D4C-1D3C81996C2C}]
+@="{13b72f58-279e-49e0-a56d-296be02f0805}"
+"Name"="Razor Language Service"
+"IsAsyncQueryable"=dword:00000001
+
+// [ProvideToolWindow(typeof(SyntaxVisualizerToolWindow))]
+[$RootKey$\ToolWindows\{28080d9c-0842-4155-9e7d-3b9e6d64bb29}]
+"Name"="Microsoft.VisualStudio.RazorExtension.SyntaxVisualizer.SyntaxVisualizerToolWindow"
+@="{13b72f58-279e-49e0-a56d-296be02f0805}"
 """;
 
     private const string RazorCoreComponentsVsixManifestItemGroup = """
