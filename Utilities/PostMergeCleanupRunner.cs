@@ -284,7 +284,7 @@ internal static class PostMergeCleanupRunner
             "restore-razor-vsix-dev-assets",
             "Restore Razor's local VSIX packaging targets and strip Roslyn-only VSIX content so developer builds match standalone Razor.",
             "Restore Razor VSIX dev assets",
-            @"Standalone Razor uses its own VSIX packaging targets to keep ServiceHub assets under ServiceHubCore, generate the brokered-services pkgdef/clientenabledpkg artifacts, and avoid Roslyn-only VSIX content, so the merged Razor subtree should restore those local targets instead of inheriting Roslyn's generic VSIX layout.",
+            @"Standalone Razor uses its own VSIX packaging targets to keep ServiceHub assets under ServiceHubCore and avoid Roslyn-only VSIX content, but the merged tree should still use Roslyn's shared GeneratePkgDef support for brokered-service registrations instead of carrying a forked brokered-services target.",
             RestoreRazorVsixDevAssetsAsync),
         new(
             "ensure-origin-remote",
@@ -5464,9 +5464,15 @@ internal static class PostMergeCleanupRunner
             await RecordChangedFileAsync(targetPath).ConfigureAwait(false);
         }
 
-        var legacyBrokeredServicesTargetPath = Path.Combine(targetRoot, "eng", "targets", "GenerateBrokeredServicesPkgDef.targets");
-        if (File.Exists(legacyBrokeredServicesTargetPath))
+        foreach (var legacyBrokeredServicesTargetPath in new[]
+                 {
+                     Path.Combine(targetRoot, "eng", "targets", "GenerateBrokeredServicesPkgDef.targets"),
+                     Path.Combine(targetRoot, "eng", "targets", "GenerateRazorBrokeredServicesPkgDef.targets"),
+                 })
         {
+            if (!File.Exists(legacyBrokeredServicesTargetPath))
+                continue;
+
             File.Delete(legacyBrokeredServicesTargetPath);
             await GitRunner.RunGitAsync(
                 targetRepoRoot,
@@ -5477,26 +5483,40 @@ internal static class PostMergeCleanupRunner
             changedFiles.Add(Path.GetRelativePath(targetRepoRoot, legacyBrokeredServicesTargetPath));
         }
 
-        var sourceBrokeredServicesTargetPath = Path.Combine(sourceEngTargetsRoot, "GenerateBrokeredServicesPkgDef.targets");
-        var targetBrokeredServicesTargetPath = Path.Combine(targetRoot, "eng", "targets", "GenerateRazorBrokeredServicesPkgDef.targets");
-        if (File.Exists(sourceBrokeredServicesTargetPath))
+        var sourceVsixProjectRoot = Path.Combine(sourceRazorRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension");
+        var targetVsixProjectRoot = Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension");
+        var sourceVsixProjectPath = Path.Combine(sourceVsixProjectRoot, "Microsoft.VisualStudio.RazorExtension.csproj");
+        var targetVsixProjectPath = Path.Combine(targetVsixProjectRoot, "Microsoft.VisualStudio.RazorExtension.csproj");
+        if (File.Exists(sourceVsixProjectPath) && File.Exists(targetVsixProjectPath))
         {
-            var desiredContent = await BuildRazorBrokeredServicesPkgDefTargetsContentAsync(sourceBrokeredServicesTargetPath).ConfigureAwait(false);
-            var existingContent = File.Exists(targetBrokeredServicesTargetPath)
-                ? await File.ReadAllTextAsync(targetBrokeredServicesTargetPath).ConfigureAwait(false)
-                : null;
-            if (!string.Equals(existingContent, desiredContent, StringComparison.Ordinal))
+            var desiredContent = await BuildRazorVsixProjectContentAsync(sourceVsixProjectPath).ConfigureAwait(false);
+            var originalContent = await File.ReadAllTextAsync(targetVsixProjectPath).ConfigureAwait(false);
+            if (!string.Equals(originalContent, desiredContent, StringComparison.Ordinal))
             {
                 await WriteTextPreservingUtf8BomAsync(
-                    targetBrokeredServicesTargetPath,
+                    targetVsixProjectPath,
                     desiredContent,
-                    templatePath: sourceBrokeredServicesTargetPath).ConfigureAwait(false);
-                await RecordChangedFileAsync(targetBrokeredServicesTargetPath).ConfigureAwait(false);
+                    templatePath: sourceVsixProjectPath).ConfigureAwait(false);
+                await RecordChangedFileAsync(targetVsixProjectPath).ConfigureAwait(false);
             }
         }
 
-        var sourceVsixProjectRoot = Path.Combine(sourceRazorRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension");
-        var targetVsixProjectRoot = Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.VisualStudio.RazorExtension");
+        var sourceVsixManifestPath = Path.Combine(sourceVsixProjectRoot, "source.extension.vsixmanifest");
+        var targetVsixManifestPath = Path.Combine(targetVsixProjectRoot, "source.extension.vsixmanifest");
+        if (File.Exists(sourceVsixManifestPath) && File.Exists(targetVsixManifestPath))
+        {
+            var desiredContent = await BuildRazorVsixManifestContentAsync(sourceVsixManifestPath).ConfigureAwait(false);
+            var originalContent = await File.ReadAllTextAsync(targetVsixManifestPath).ConfigureAwait(false);
+            if (!string.Equals(originalContent, desiredContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    targetVsixManifestPath,
+                    desiredContent,
+                    templatePath: sourceVsixManifestPath).ConfigureAwait(false);
+                await RecordChangedFileAsync(targetVsixManifestPath).ConfigureAwait(false);
+            }
+        }
+
         var sourceDirectoryBuildTargetsPath = Path.Combine(sourceVsixProjectRoot, "Directory.Build.targets");
         var targetDirectoryBuildTargetsPath = Path.Combine(targetVsixProjectRoot, "Directory.Build.targets");
         if (File.Exists(sourceDirectoryBuildTargetsPath) && File.Exists(targetDirectoryBuildTargetsPath))
@@ -5510,6 +5530,56 @@ internal static class PostMergeCleanupRunner
                     desiredContent,
                     templatePath: sourceDirectoryBuildTargetsPath).ConfigureAwait(false);
                 await RecordChangedFileAsync(targetDirectoryBuildTargetsPath).ConfigureAwait(false);
+            }
+        }
+
+        var sourceCoreComponentsRoot = Path.Combine(sourceRazorRoot, "src", "Razor", "src", "Microsoft.CodeAnalysis.Remote.Razor.CoreComponents");
+        var targetCoreComponentsRoot = Path.Combine(targetRoot, "src", "Razor", "src", "Microsoft.CodeAnalysis.Remote.Razor.CoreComponents");
+        var sourceCoreComponentsPropsPath = Path.Combine(sourceCoreComponentsRoot, "CoreComponents.props");
+        var targetCoreComponentsPropsPath = Path.Combine(targetCoreComponentsRoot, "CoreComponents.props");
+        if (File.Exists(sourceCoreComponentsPropsPath) && File.Exists(targetCoreComponentsPropsPath))
+        {
+            var desiredContent = await BuildRazorCoreComponentsPropsContentAsync(sourceCoreComponentsPropsPath).ConfigureAwait(false);
+            var originalContent = await File.ReadAllTextAsync(targetCoreComponentsPropsPath).ConfigureAwait(false);
+            if (!string.Equals(originalContent, desiredContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    targetCoreComponentsPropsPath,
+                    desiredContent,
+                    templatePath: sourceCoreComponentsPropsPath).ConfigureAwait(false);
+                await RecordChangedFileAsync(targetCoreComponentsPropsPath).ConfigureAwait(false);
+            }
+        }
+
+        var sourceCoreComponentsX64ProjectPath = Path.Combine(sourceCoreComponentsRoot, "x64", "Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj");
+        var targetCoreComponentsX64ProjectPath = Path.Combine(targetCoreComponentsRoot, "x64", "Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj");
+        if (File.Exists(sourceCoreComponentsX64ProjectPath) && File.Exists(targetCoreComponentsX64ProjectPath))
+        {
+            var desiredContent = await BuildRazorCoreComponentsX64ProjectContentAsync(sourceCoreComponentsX64ProjectPath).ConfigureAwait(false);
+            var originalContent = await File.ReadAllTextAsync(targetCoreComponentsX64ProjectPath).ConfigureAwait(false);
+            if (!string.Equals(originalContent, desiredContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    targetCoreComponentsX64ProjectPath,
+                    desiredContent,
+                    templatePath: sourceCoreComponentsX64ProjectPath).ConfigureAwait(false);
+                await RecordChangedFileAsync(targetCoreComponentsX64ProjectPath).ConfigureAwait(false);
+            }
+        }
+
+        var sourceRazorDeploymentProjectPath = Path.Combine(sourceRazorRoot, "src", "Razor", "src", "RazorDeployment", "RazorDeployment.csproj");
+        var targetRazorDeploymentProjectPath = Path.Combine(targetRoot, "src", "Razor", "src", "RazorDeployment", "RazorDeployment.csproj");
+        if (File.Exists(sourceRazorDeploymentProjectPath) && File.Exists(targetRazorDeploymentProjectPath))
+        {
+            var desiredContent = await BuildRazorDeploymentProjectContentAsync(sourceRazorDeploymentProjectPath).ConfigureAwait(false);
+            var originalContent = await File.ReadAllTextAsync(targetRazorDeploymentProjectPath).ConfigureAwait(false);
+            if (!string.Equals(originalContent, desiredContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    targetRazorDeploymentProjectPath,
+                    desiredContent,
+                    templatePath: sourceRazorDeploymentProjectPath).ConfigureAwait(false);
+                await RecordChangedFileAsync(targetRazorDeploymentProjectPath).ConfigureAwait(false);
             }
         }
 
@@ -8114,6 +8184,30 @@ public class SurveyPrompt : ComponentBase
         return content.Remove(selfClosingMatch.Index, selfClosingMatch.Length).Insert(selfClosingMatch.Index, selfClosingReplacement);
     }
 
+    private static string RemoveProjectReferenceBlock(string content, string includePath)
+    {
+        var expandedPattern = new Regex(
+            $@"^(?<indent>[ \t]*)<ProjectReference Include=""{Regex.Escape(includePath)}""(?:\s+[^>]*)?>.*?^\k<indent></ProjectReference>\r?\n?",
+            RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        var updatedContent = expandedPattern.Replace(content, string.Empty, 1);
+        if (string.Equals(updatedContent, content, StringComparison.Ordinal))
+        {
+            var selfClosingPattern = new Regex(
+                $@"^[ \t]*<ProjectReference Include=""{Regex.Escape(includePath)}""(?:\s+[^>]*)?/>\r?\n?",
+                RegexOptions.Multiline | RegexOptions.CultureInvariant);
+            updatedContent = selfClosingPattern.Replace(content, string.Empty, 1);
+        }
+
+        return RemoveEmptyMsBuildItemGroups(updatedContent);
+    }
+
+    private static string RemoveEmptyMsBuildItemGroups(string content)
+    {
+        var updatedContent = EmptyMsBuildItemGroupPattern.Replace(content, string.Empty);
+        updatedContent = Regex.Replace(updatedContent, @"(\r?\n){3,}", Environment.NewLine + Environment.NewLine, RegexOptions.CultureInvariant);
+        return NormalizeAdjacentMsBuildItemFormatting(updatedContent);
+    }
+
     private static string RemoveRazorPackageRegistrationAttributes(string content)
     {
         var updatedContent = content;
@@ -8254,19 +8348,14 @@ public class SurveyPrompt : ComponentBase
     private static async Task<string> BuildRazorVsixDirectoryBuildTargetsContentAsync(string sourcePath)
     {
         var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
-        var updatedContent = sourceContent
-            .Replace(
-                "BeforeTargets=\"GenerateBrokeredServicesPkgDef\"",
-                "BeforeTargets=\"GeneratePkgDef;GenerateRazorBrokeredServicesPkgDef\"",
-                StringComparison.Ordinal)
-            .Replace(
-                @"$(RepositoryEngineeringDir)targets\ReplaceServiceHubAssetsInVsixManifest.targets",
-                @"$(RepositoryRoot)eng\targets\ReplaceServiceHubAssetsInVsixManifest.targets",
-                StringComparison.Ordinal)
-            .Replace(
-                @"$(RepositoryEngineeringDir)targets\GenerateBrokeredServicesPkgDef.targets",
-                @"$(RepositoryRoot)eng\targets\GenerateRazorBrokeredServicesPkgDef.targets",
-                StringComparison.Ordinal);
+        var updatedContent = BrokeredServicesBeforeTargetsPattern.Replace(
+            sourceContent,
+            @"BeforeTargets=""GeneratePkgDef""");
+        updatedContent = updatedContent.Replace(
+            @"$(RepositoryEngineeringDir)targets\ReplaceServiceHubAssetsInVsixManifest.targets",
+            @"$(RepositoryRoot)eng\targets\ReplaceServiceHubAssetsInVsixManifest.targets",
+            StringComparison.Ordinal);
+        updatedContent = BrokeredServicesImportPattern.Replace(updatedContent, string.Empty, 1);
 
         var mergedRoslynCleanupBlock = string.Join(
             Environment.NewLine,
@@ -8277,7 +8366,7 @@ public class SurveyPrompt : ComponentBase
                 "  </ItemGroup>",
                 string.Empty,
                 "  <PropertyGroup>",
-                "    <GetVsixSourceItemsDependsOn>$(GetVsixSourceItemsDependsOn);GenerateRazorBrokeredServicesPkgDef;GenerateRazorClientEnabledPkg;IncludeMissingRazorServiceHubPayload</GetVsixSourceItemsDependsOn>",
+                "    <GetVsixSourceItemsDependsOn>$(GetVsixSourceItemsDependsOn);GenerateRazorClientEnabledPkg</GetVsixSourceItemsDependsOn>",
                 "    <IncludeVSIXItemsDependsOn>$(IncludeVSIXItemsDependsOn);RemoveMergedRoslynVsixSourceItems</IncludeVSIXItemsDependsOn>",
                 "  </PropertyGroup>",
                 string.Empty,
@@ -8285,7 +8374,6 @@ public class SurveyPrompt : ComponentBase
                 "    <ItemGroup>",
                 "      <_RazorClientEnabledPkgLine Include=\"$(TargetName).pkgdef\" />",
                 "      <_RazorClientEnabledPkgLine Include=\"$(TargetName).Custom.pkgdef\" />",
-                "      <_RazorClientEnabledPkgLine Include=\"$(TargetName).BrokeredServices.pkgdef\" />",
                 "    </ItemGroup>",
                 "    <PropertyGroup>",
                 "      <_RazorClientEnabledPkgPath>$(IntermediateOutputPath)$(TargetName).clientenabledpkg</_RazorClientEnabledPkgPath>",
@@ -8298,20 +8386,6 @@ public class SurveyPrompt : ComponentBase
                 "    <ItemGroup>",
                 "      <FileWrites Include=\"$(_RazorClientEnabledPkgPath)\" />",
                 "      <VSIXSourceItem Include=\"$(_RazorClientEnabledPkgPath)\" />",
-                "    </ItemGroup>",
-                "  </Target>",
-                string.Empty,
-                "  <Target Name=\"IncludeMissingRazorServiceHubPayload\">",
-                "    <ItemGroup>",
-                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll\" Condition=\"Exists('$(TargetDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll')\" />",
-                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)Microsoft.CodeAnalysis.Razor.Compiler.dll\" Condition=\"Exists('$(TargetDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')\" />",
-                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll\" Condition=\"Exists('$(TargetDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll')\" />",
-                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)*\\Microsoft.AspNetCore.Razor.Utilities.Shared.resources.dll\" />",
-                "      <_MissingRazorServiceHubPayload Include=\"$(TargetDir)*\\Microsoft.CodeAnalysis.Razor.Workspaces.resources.dll\" />",
-                "      <VSIXSourceItem Include=\"@(_MissingRazorServiceHubPayload)\">",
-                "        <VSIXSubPath Condition=\"'%(_MissingRazorServiceHubPayload.RecursiveDir)' == ''\">$(ServiceHubCoreSubPath)</VSIXSubPath>",
-                "        <VSIXSubPath Condition=\"'%(_MissingRazorServiceHubPayload.RecursiveDir)' != ''\">$(ServiceHubCoreSubPath)\\%(_MissingRazorServiceHubPayload.RecursiveDir)</VSIXSubPath>",
-                "      </VSIXSourceItem>",
                 "    </ItemGroup>",
                 "  </Target>",
                 string.Empty,
@@ -8344,34 +8418,71 @@ public class SurveyPrompt : ComponentBase
             StringComparison.Ordinal);
     }
 
-    private static async Task<string> BuildRazorBrokeredServicesPkgDefTargetsContentAsync(string sourcePath)
+    private static async Task<string> BuildRazorVsixManifestContentAsync(string sourcePath)
+    {
+        var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
+        return RazorVsixBrokeredServicesAssetPattern.Replace(sourceContent, string.Empty, 1);
+    }
+
+    private static async Task<string> BuildRazorVsixProjectContentAsync(string sourcePath)
+    {
+        var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
+        var updatedContent = sourceContent.Replace(
+            RazorVsixDevCoreComponentsComment,
+            RazorVsixWrapperCoreComponentsComment,
+            StringComparison.Ordinal);
+        updatedContent = RemoveProjectReferenceBlock(
+            updatedContent,
+            @"..\Microsoft.CodeAnalysis.Remote.Razor\Microsoft.CodeAnalysis.Remote.Razor.csproj");
+        if (!updatedContent.Contains(RazorVsixWrapperCoreComponentsProjectReferencePath, StringComparison.Ordinal))
+        {
+            updatedContent = updatedContent.Replace(
+                RazorVsixWrapperCoreComponentsComment,
+                RazorVsixWrapperCoreComponentsComment + Environment.NewLine + Environment.NewLine + RazorVsixWrapperCoreComponentsItemGroup,
+                StringComparison.Ordinal);
+        }
+
+        return RemoveEmptyMsBuildItemGroups(updatedContent);
+    }
+
+    private static async Task<string> BuildRazorCoreComponentsPropsContentAsync(string sourcePath)
     {
         var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
         return sourceContent
             .Replace(
-                "Name=\"_InitializeBrokeredServiceEntries\"",
-                "Name=\"_InitializeRazorBrokeredServiceEntries\"",
+                RazorCoreComponentsCreateVsixComment,
+                RazorCoreComponentsLocalDeployComment,
                 StringComparison.Ordinal)
             .Replace(
-                "BeforeTargets=\"GenerateBrokeredServicesPkgDef\"",
-                "BeforeTargets=\"GenerateRazorBrokeredServicesPkgDef\"",
-                StringComparison.Ordinal)
-            .Replace(
-                "Name=\"GenerateBrokeredServicesPkgDef\"",
-                "Name=\"GenerateRazorBrokeredServicesPkgDef\"",
-                StringComparison.Ordinal)
-            .Replace(
-                "DependsOnTargets=\"$(GeneratePkgDefDependsOn)\"",
-                string.Empty,
-                StringComparison.Ordinal)
-            .Replace(
-                "BeforeTargets=\"GeneratePkgDef\"",
-                "BeforeTargets=\"CreateVsixContainer\"",
-                StringComparison.Ordinal)
-            .Replace(
-                "_GeneratePkgDefOutputFile",
-                "_RazorBrokeredServicesPkgDefOutputFile",
+                @"<CreateVsixContainer Condition=""'$(OfficialBuildId)' != ''"">true</CreateVsixContainer>",
+                @"<CreateVsixContainer Condition=""'$(DeployExtension)' == 'true' Or '$(OfficialBuildId)' != ''"">true</CreateVsixContainer>",
                 StringComparison.Ordinal);
+    }
+
+    private static async Task<string> BuildRazorCoreComponentsX64ProjectContentAsync(string sourcePath)
+    {
+        var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
+        return EnsureBooleanPropertyValue(sourceContent, "DeployExtension", true);
+    }
+
+    private static async Task<string> BuildRazorDeploymentProjectContentAsync(string sourcePath)
+    {
+        var sourceContent = await File.ReadAllTextAsync(sourcePath).ConfigureAwait(false);
+        var updatedContent = EnsureProjectReferenceAfterProjectReference(
+            sourceContent,
+            @"..\Microsoft.VisualStudio.RazorExtension\Microsoft.VisualStudio.RazorExtension.csproj",
+            @"..\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents\x64\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj");
+        updatedContent = EnsureProjectReferenceHasMetadataElement(
+            updatedContent,
+            @"..\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents\x64\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj",
+            "ReferenceOutputAssembly",
+            "false");
+        updatedContent = EnsureProjectReferenceHasMetadataElement(
+            updatedContent,
+            @"..\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents\x64\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj",
+            "SkipGetTargetFrameworkProperties",
+            "true");
+        return updatedContent;
     }
 
     private static async Task SaveXmlAsync(XDocument document, string path)
@@ -8594,6 +8705,10 @@ public class SurveyPrompt : ComponentBase
         @"^[ \t]*<Import\s+Project=""\$\(RepositoryEngineeringDir\)targets(?:\\|/)GenerateBrokeredServicesPkgDef\.targets""\s*/>\r?\n?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
+    private static readonly Regex RazorVsixBrokeredServicesAssetPattern = new(
+        @"^[ \t]*<Asset Type=""Microsoft\.VisualStudio\.VsPackage"" d:Source=""Project"" d:ProjectName=""Microsoft\.VisualStudio\.RazorExtension\.BrokeredServices"" Path=""Microsoft\.VisualStudio\.RazorExtension\.BrokeredServices\.pkgdef"" />\r?\n?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
     private static readonly Regex GlobalAnalyzerConfigItemGroupPattern = new(
         @"(^[ \t]*<!-- Global Analyzer Config -->\r?\n)[ \t]*<ItemGroup>\r?\n.*?^[ \t]*</ItemGroup>\r?\n",
         RegexOptions.Multiline | RegexOptions.Singleline | RegexOptions.CultureInvariant);
@@ -8624,6 +8739,10 @@ public class SurveyPrompt : ComponentBase
 
     private static readonly Regex RazorVsixGeneratedBindingRedirectPropertyGroupPattern = new(
         @"^[ \t]*<PropertyGroup>\r?\n[ \t]*<_GeneratedVSIXBindingRedirectFile>.*?</_GeneratedVSIXBindingRedirectFile>\r?\n[ \t]*</PropertyGroup>\r?\n(?:\r?\n)?",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    private static readonly Regex EmptyMsBuildItemGroupPattern = new(
+        @"^[ \t]*<ItemGroup>\r?\n[ \t]*</ItemGroup>\r?\n?",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     private static readonly Regex RazorPackagePackageRegistrationAttributePattern = new(
@@ -8880,6 +8999,33 @@ public class SurveyPrompt : ComponentBase
     private const string RazorVsixSdkLine = "<Project Sdk=\"Microsoft.NET.Sdk\">";
 
     private const string RazorVsixWindowsDesktopSdkLine = "<Project Sdk=\"Microsoft.NET.Sdk.WindowsDesktop\">";
+
+    private const string RazorVsixDevCoreComponentsComment =
+        "  <!-- We reference the core components only for developer builds. In the official build they are inserted via the corecomponents VSIX alongside this VSIX -->";
+
+    private const string RazorVsixWrapperCoreComponentsComment =
+        "  <!-- Core components deploy through the dedicated Razor ServiceHub wrapper VSIX in the merged Roslyn repo. -->";
+
+    private const string RazorVsixWrapperCoreComponentsProjectReferencePath =
+        @"..\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents\x64\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj";
+
+    private const string RazorVsixWrapperCoreComponentsItemGroup = """
+  <ItemGroup>
+    <ProjectReference Include="..\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents\x64\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <IncludeOutputGroupsInVSIX></IncludeOutputGroupsInVSIX>
+      <IncludeOutputGroupsInVSIXLocalOnly></IncludeOutputGroupsInVSIXLocalOnly>
+      <Private>false</Private>
+      <SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
+    </ProjectReference>
+  </ItemGroup>
+""";
+
+    private const string RazorCoreComponentsCreateVsixComment =
+        "    <!-- Only create the VSIX for official builds. In dev builds we reference the bits directly in the razor extension -->";
+
+    private const string RazorCoreComponentsLocalDeployComment =
+        "    <!-- Create the VSIX for official builds and local x64 deployment so ServiceHub payload stays in the wrapper project. -->";
 
     private const string RazorVsixPackageRegistrationPkgDefContent = """
 // [ProvideAutoLoad(GuidRazorFileContextString, PackageAutoLoadFlags.BackgroundLoad)]
