@@ -6220,28 +6220,7 @@ public class SurveyPrompt : ComponentBase
             return "No Razor Visual Studio extension project was found for workspace reference cleanup.";
 
         var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
-        var updatedContent = originalContent;
-        var anchorBlock =
-            "    <ProjectReference Include=\"..\\Microsoft.VisualStudio.LanguageServices.Razor\\Microsoft.VisualStudio.LanguageServices.Razor.csproj\">" + Environment.NewLine +
-            "      <NgenPriority>2</NgenPriority>" + Environment.NewLine +
-            "    </ProjectReference>" + Environment.NewLine;
-        var workspaceReferenceBlock =
-            "    <ProjectReference Include=\"..\\..\\..\\..\\..\\VisualStudio\\Core\\Def\\Microsoft.VisualStudio.LanguageServices.csproj\" />" + Environment.NewLine +
-            "    <ProjectReference Include=\"..\\..\\..\\..\\..\\Workspaces\\Core\\Portable\\Microsoft.CodeAnalysis.Workspaces.csproj\" />" + Environment.NewLine;
-
-        if (!updatedContent.Contains("..\\..\\..\\..\\..\\VisualStudio\\Core\\Def\\Microsoft.VisualStudio.LanguageServices.csproj", StringComparison.Ordinal))
-        {
-            updatedContent = updatedContent.Replace(anchorBlock, anchorBlock + workspaceReferenceBlock, StringComparison.Ordinal);
-
-            if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-            {
-                var compilerReferenceAnchor = "    <ProjectReference Include=\"..\\..\\..\\Compiler\\Microsoft.CodeAnalysis.Razor.Compiler\\src\\Microsoft.CodeAnalysis.Razor.Compiler.csproj\">";
-                updatedContent = updatedContent.Replace(
-                    compilerReferenceAnchor,
-                    workspaceReferenceBlock + compilerReferenceAnchor,
-                    StringComparison.Ordinal);
-            }
-        }
+        var updatedContent = EnsureRazorVisualStudioWorkspaceReferences(originalContent);
 
         if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
             return "No Razor Visual Studio workspace reference rewrites were needed.";
@@ -8184,6 +8163,30 @@ public class SurveyPrompt : ComponentBase
         return content.Remove(selfClosingMatch.Index, selfClosingMatch.Length).Insert(selfClosingMatch.Index, selfClosingReplacement);
     }
 
+    private static string EnsureRazorVisualStudioWorkspaceReferences(string content)
+    {
+        const string workspaceReferencePath = @"..\..\..\..\..\VisualStudio\Core\Def\Microsoft.VisualStudio.LanguageServices.csproj";
+        if (content.Contains(workspaceReferencePath, StringComparison.Ordinal))
+            return content;
+
+        var anchorBlock =
+            "    <ProjectReference Include=\"..\\Microsoft.VisualStudio.LanguageServices.Razor\\Microsoft.VisualStudio.LanguageServices.Razor.csproj\">" + Environment.NewLine +
+            "      <NgenPriority>2</NgenPriority>" + Environment.NewLine +
+            "    </ProjectReference>" + Environment.NewLine;
+        var workspaceReferenceBlock =
+            "    <ProjectReference Include=\"..\\..\\..\\..\\..\\VisualStudio\\Core\\Def\\Microsoft.VisualStudio.LanguageServices.csproj\" />" + Environment.NewLine +
+            "    <ProjectReference Include=\"..\\..\\..\\..\\..\\Workspaces\\Core\\Portable\\Microsoft.CodeAnalysis.Workspaces.csproj\" />" + Environment.NewLine;
+        var updatedContent = content.Replace(anchorBlock, anchorBlock + workspaceReferenceBlock, StringComparison.Ordinal);
+        if (!string.Equals(updatedContent, content, StringComparison.Ordinal))
+            return updatedContent;
+
+        var compilerReferenceAnchor = "    <ProjectReference Include=\"..\\..\\..\\Compiler\\Microsoft.CodeAnalysis.Razor.Compiler\\src\\Microsoft.CodeAnalysis.Razor.Compiler.csproj\">";
+        return content.Replace(
+            compilerReferenceAnchor,
+            workspaceReferenceBlock + compilerReferenceAnchor,
+            StringComparison.Ordinal);
+    }
+
     private static string RemoveProjectReferenceBlock(string content, string includePath)
     {
         var expandedPattern = new Regex(
@@ -8442,6 +8445,7 @@ public class SurveyPrompt : ComponentBase
                 StringComparison.Ordinal);
         }
 
+        updatedContent = EnsureRazorVisualStudioWorkspaceReferences(updatedContent);
         return RemoveEmptyMsBuildItemGroups(updatedContent);
     }
 
