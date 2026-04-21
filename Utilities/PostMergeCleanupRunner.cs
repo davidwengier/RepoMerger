@@ -496,6 +496,12 @@ internal static class PostMergeCleanupRunner
             "Restore Razor VS IdeTestFramework wiring",
             "Upstream Razor consumes Microsoft.VisualStudio.Extensibility.Testing.Xunit as a package, which imports Microsoft.VisualStudio.Extensibility.Testing.Xunit.targets automatically. After the merge, that dependency becomes an in-repo project reference like Roslyn's own New.IntegrationTests project, so Razor must add the same explicit targets import or IdeFact tests run under the default xUnit framework and throw NotSupportedException before the IDE harness can launch Visual Studio.",
             RestoreRazorVisualStudioIdeTestFrameworkAsync),
+        new(
+            "preserve-razor-servicehub-r2r-publish-output",
+            "Keep Razor's artifact-backed ServiceHub dependency includes local-only so official builds preserve the Remote.Razor publish output and its ReadyToRun binaries.",
+            "Preserve Razor ServiceHub R2R publish output",
+            "Standalone Razor official builds package the Remote.Razor publish output, which carries the ReadyToRun ServiceHub binaries. The merged tree adds plain artifact-backed fallback includes with the same target paths for local deployment, so the post-merge cleanup should keep those fallbacks only for non-official builds and let official builds keep the published R2R payload.",
+            PreserveRazorServiceHubReadyToRunPublishOutputAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -5913,6 +5919,62 @@ internal static class PostMergeCleanupRunner
             "--",
             Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)).ConfigureAwait(false);
         return $"Added Razor artifact-backed ServiceHub dependency includes to '{Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)}'.";
+    }
+
+    private static async Task<string> PreserveRazorServiceHubReadyToRunPublishOutputAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var remoteRazorProjectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Remote.Razor",
+            "Microsoft.CodeAnalysis.Remote.Razor.csproj");
+        if (!File.Exists(remoteRazorProjectPath))
+            return "No Remote.Razor project was found for ServiceHub ReadyToRun cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(remoteRazorProjectPath).ConfigureAwait(false);
+        if (originalContent.Contains("""<_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Compiler.dll" Condition="'$(OfficialBuildId)' == ''" />""", StringComparison.Ordinal))
+        {
+            return "No Razor ServiceHub ReadyToRun publish-output cleanup changes were needed.";
+        }
+
+        var artifactIncludeBlock = string.Join(
+            Environment.NewLine,
+            [
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\Microsoft.AspNetCore.Razor.Utilities.Shared.dll" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\**\Microsoft.AspNetCore.Razor.Utilities.Shared.resources.dll" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Compiler.dll" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Workspaces.dll" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\**\Microsoft.CodeAnalysis.Razor.Workspaces.resources.dll" />"""
+            ]);
+        var localOnlyArtifactIncludeBlock = string.Join(
+            Environment.NewLine,
+            [
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\Microsoft.AspNetCore.Razor.Utilities.Shared.dll" Condition="'$(OfficialBuildId)' == ''" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\**\Microsoft.AspNetCore.Razor.Utilities.Shared.resources.dll" Condition="'$(OfficialBuildId)' == ''" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Compiler.dll" Condition="'$(OfficialBuildId)' == ''" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Workspaces.dll" Condition="'$(OfficialBuildId)' == ''" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\**\Microsoft.CodeAnalysis.Razor.Workspaces.resources.dll" Condition="'$(OfficialBuildId)' == ''" />"""
+            ]);
+        var updatedContent = originalContent.Replace(
+            artifactIncludeBlock,
+            localOnlyArtifactIncludeBlock,
+            StringComparison.Ordinal);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Could not find the Razor artifact-backed ServiceHub dependency include block in '{remoteRazorProjectPath}'.");
+        }
+
+        await WriteTextPreservingUtf8BomAsync(remoteRazorProjectPath, updatedContent, templatePath: remoteRazorProjectPath).ConfigureAwait(false);
+        await GitRunner.RunGitAsync(
+            targetRepoRoot,
+            "add",
+            "--",
+            Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)).ConfigureAwait(false);
+        return $"Restricted Razor artifact-backed ServiceHub dependency includes to non-official builds in '{Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)}'.";
     }
 
     private static async Task<string> IncludeRazorCoreComponentsVsixManifestsAsync(StageContext context)
