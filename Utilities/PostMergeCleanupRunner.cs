@@ -496,6 +496,12 @@ internal static class PostMergeCleanupRunner
             "Ensure Razor Utilities.Shared PublishData packages",
             "Official Razor builds publish Microsoft.AspNetCore.Razor.Utilities.Shared and Microsoft.AspNetCore.Razor.Utilities.Shared.Test as nonshipping tooling packages. The merged Roslyn tree should keep those package publish entries so build.cmd -pack/publish doesn't fail once those Razor utilities packages are produced.",
             EnsureRazorUtilitiesSharedPublishDataAsync),
+        new(
+            "restore-razor-local-servicehub-payload",
+            "Restore Razor's local ServiceHub payload packaging so RoslynDev deployment includes Remote.Razor and its Razor dependencies.",
+            "Restore Razor local ServiceHub payload",
+            "Roslyn's build.cmd -deployExtensions flow deploys the merged Microsoft.VisualStudio.RazorExtension VSIX itself and expects PublishedProjectOutputGroup payloads that probe entirely from ServiceHubCore. The merged Razor VSIX should keep Razor's original local-only Microsoft.CodeAnalysis.Remote.Razor project reference, align that project with Roslyn's PublishedProjectOutputGroup and PublishVsixItems convention, and explicitly include Razor.Workspaces, Razor.Compiler, and Utilities.Shared from artifacts\\bin so RoslynDev deployments carry the full ServiceHub payload Visual Studio activates.",
+            RestoreRazorLocalServiceHubPayloadAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -5824,6 +5830,195 @@ internal static class PostMergeCleanupRunner
             : $"Restored Razor VSIX developer-build packaging behavior in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
     }
 
+    private static async Task<string> RestoreRazorLocalServiceHubPayloadAsync(StageContext context)
+    {
+        var summaryParts = new List<string>();
+
+        var projectReferenceSummary = await RestoreRazorLocalServiceHubProjectReferenceAsync(context).ConfigureAwait(false);
+        if (!projectReferenceSummary.StartsWith("No ", StringComparison.Ordinal))
+            summaryParts.Add(projectReferenceSummary);
+
+        var publishTargetsSummary = await UseRoslynVsixPublishTargetsForRemoteRazorAsync(context).ConfigureAwait(false);
+        if (!publishTargetsSummary.StartsWith("No ", StringComparison.Ordinal))
+            summaryParts.Add(publishTargetsSummary);
+
+        var dependencySummary = await IncludeRazorServiceHubDependenciesFromArtifactsAsync(context).ConfigureAwait(false);
+        if (!dependencySummary.StartsWith("No ", StringComparison.Ordinal))
+            summaryParts.Add(dependencySummary);
+
+        return summaryParts.Count == 0
+            ? "No Razor local ServiceHub payload cleanup changes were needed."
+            : string.Join(" ", summaryParts);
+    }
+
+    private static async Task<string> RestoreRazorLocalServiceHubProjectReferenceAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetVsixProjectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.RazorExtension",
+            "Microsoft.VisualStudio.RazorExtension.csproj");
+        if (!File.Exists(targetVsixProjectPath))
+            return "No Razor VSIX project was found for local ServiceHub payload cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(targetVsixProjectPath).ConfigureAwait(false);
+        var updatedContent = originalContent.Replace(
+            RazorVsixWrapperCoreComponentsComment,
+            RazorVsixDevCoreComponentsComment,
+            StringComparison.Ordinal);
+        updatedContent = RemoveProjectReferenceBlock(
+            updatedContent,
+            RazorVsixWrapperCoreComponentsProjectReferencePath);
+
+        if (!updatedContent.Contains(RazorVsixDevCoreComponentsProjectReferencePath, StringComparison.Ordinal))
+        {
+            var insertion = RazorVsixDevCoreComponentsComment + Environment.NewLine + RazorVsixDevCoreComponentsItemGroup;
+            if (!updatedContent.Contains(RazorVsixDevCoreComponentsComment, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Could not find the Razor VSIX local ServiceHub comment anchor in '{targetVsixProjectPath}'.");
+            }
+
+            updatedContent = updatedContent.Replace(
+                RazorVsixDevCoreComponentsComment,
+                insertion,
+                StringComparison.Ordinal);
+        }
+
+        updatedContent = RemoveEmptyMsBuildItemGroups(updatedContent);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor VSIX local ServiceHub payload changes were needed.";
+
+        await WriteTextPreservingUtf8BomAsync(targetVsixProjectPath, updatedContent, templatePath: targetVsixProjectPath).ConfigureAwait(false);
+        await GitRunner.RunGitAsync(
+            targetRepoRoot,
+            "add",
+            "--",
+            Path.GetRelativePath(targetRepoRoot, targetVsixProjectPath)).ConfigureAwait(false);
+        return $"Restored Razor's local ServiceHub payload deployment in '{Path.GetRelativePath(targetRepoRoot, targetVsixProjectPath)}'.";
+    }
+
+    private static async Task<string> UseRoslynVsixPublishTargetsForRemoteRazorAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var targetVsixProjectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.VisualStudio.RazorExtension",
+            "Microsoft.VisualStudio.RazorExtension.csproj");
+        var remoteRazorProjectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Remote.Razor",
+            "Microsoft.CodeAnalysis.Remote.Razor.csproj");
+        var changedFiles = new List<string>();
+
+        if (File.Exists(targetVsixProjectPath))
+        {
+            var originalVsixContent = await File.ReadAllTextAsync(targetVsixProjectPath).ConfigureAwait(false);
+            var updatedVsixContent = originalVsixContent.Replace(
+                "<IncludeOutputGroupsInVSIX>PublishProjectOutputGroup</IncludeOutputGroupsInVSIX>",
+                "<IncludeOutputGroupsInVSIX>PublishedProjectOutputGroup</IncludeOutputGroupsInVSIX>",
+                StringComparison.Ordinal);
+            updatedVsixContent = EnsureProjectReferenceHasMetadataElement(
+                updatedVsixContent,
+                RazorVsixDevCoreComponentsProjectReferencePath,
+                "SetTargetFramework",
+                "TargetFramework=$(NetVS)");
+
+            if (!string.Equals(originalVsixContent, updatedVsixContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    targetVsixProjectPath,
+                    updatedVsixContent,
+                    templatePath: targetVsixProjectPath).ConfigureAwait(false);
+                await GitRunner.RunGitAsync(
+                    targetRepoRoot,
+                    "add",
+                    "--",
+                    Path.GetRelativePath(targetRepoRoot, targetVsixProjectPath)).ConfigureAwait(false);
+                changedFiles.Add(Path.GetRelativePath(targetRepoRoot, targetVsixProjectPath));
+            }
+        }
+
+        if (File.Exists(remoteRazorProjectPath))
+        {
+            var originalRemoteRazorContent = await File.ReadAllTextAsync(remoteRazorProjectPath).ConfigureAwait(false);
+            var updatedRemoteRazorContent = originalRemoteRazorContent;
+
+            if (!updatedRemoteRazorContent.Contains("<Target Name=\"PublishedProjectOutputGroup\"", StringComparison.Ordinal))
+            {
+                updatedRemoteRazorContent = updatedRemoteRazorContent.Replace(
+                    $"{Environment.NewLine}</Project>",
+                    $"{Environment.NewLine}{Environment.NewLine}{RazorRemoteRazorRoslynVsixPublishTargets}{Environment.NewLine}</Project>",
+                    StringComparison.Ordinal);
+            }
+
+            if (!string.Equals(originalRemoteRazorContent, updatedRemoteRazorContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(
+                    remoteRazorProjectPath,
+                    updatedRemoteRazorContent,
+                    templatePath: remoteRazorProjectPath).ConfigureAwait(false);
+                await GitRunner.RunGitAsync(
+                    targetRepoRoot,
+                    "add",
+                    "--",
+                    Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)).ConfigureAwait(false);
+                changedFiles.Add(Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath));
+            }
+        }
+
+        return changedFiles.Count == 0
+            ? "No Roslyn VSIX publish-target alignment was needed for Remote.Razor."
+            : $"Aligned Razor Remote.Razor VSIX publish behavior with Roslyn in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> IncludeRazorServiceHubDependenciesFromArtifactsAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var remoteRazorProjectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Remote.Razor",
+            "Microsoft.CodeAnalysis.Remote.Razor.csproj");
+        if (!File.Exists(remoteRazorProjectPath))
+            return "No Remote.Razor project was found for ServiceHub dependency cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(remoteRazorProjectPath).ConfigureAwait(false);
+        if (originalContent.Contains(@"$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Workspaces.dll", StringComparison.Ordinal))
+            return "No Razor ServiceHub dependency artifact includes were needed.";
+
+        var updatedContent = originalContent.Replace(
+            "      <_PublishedFiles Include=\"$(PublishDir)**\\Microsoft.Extensions.ObjectPool.dll\" />",
+            "      <_PublishedFiles Include=\"$(PublishDir)**\\Microsoft.Extensions.ObjectPool.dll\" />" + Environment.NewLine +
+            "      <_PublishedFiles Include=\"$(ArtifactsDir)bin\\Microsoft.AspNetCore.Razor.Utilities.Shared\\$(Configuration)\\$(TargetFramework)\\Microsoft.AspNetCore.Razor.Utilities.Shared.dll\" />" + Environment.NewLine +
+            "      <_PublishedFiles Include=\"$(ArtifactsDir)bin\\Microsoft.AspNetCore.Razor.Utilities.Shared\\$(Configuration)\\$(TargetFramework)\\**\\Microsoft.AspNetCore.Razor.Utilities.Shared.resources.dll\" />" + Environment.NewLine +
+            "      <_PublishedFiles Include=\"$(ArtifactsDir)bin\\Microsoft.CodeAnalysis.Razor.Compiler\\$(Configuration)\\$(TargetFramework)\\Microsoft.CodeAnalysis.Razor.Compiler.dll\" />" + Environment.NewLine +
+            "      <_PublishedFiles Include=\"$(ArtifactsDir)bin\\Microsoft.CodeAnalysis.Razor.Workspaces\\$(Configuration)\\$(TargetFramework)\\Microsoft.CodeAnalysis.Razor.Workspaces.dll\" />" + Environment.NewLine +
+            "      <_PublishedFiles Include=\"$(ArtifactsDir)bin\\Microsoft.CodeAnalysis.Razor.Workspaces\\$(Configuration)\\$(TargetFramework)\\**\\Microsoft.CodeAnalysis.Razor.Workspaces.resources.dll\" />",
+            StringComparison.Ordinal);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            throw new InvalidOperationException($"Could not find the Remote.Razor publish payload anchor in '{remoteRazorProjectPath}'.");
+
+        await WriteTextPreservingUtf8BomAsync(remoteRazorProjectPath, updatedContent, templatePath: remoteRazorProjectPath).ConfigureAwait(false);
+        await GitRunner.RunGitAsync(
+            targetRepoRoot,
+            "add",
+            "--",
+            Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)).ConfigureAwait(false);
+        return $"Added Razor artifact-backed ServiceHub dependency includes to '{Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)}'.";
+    }
+
     private static async Task<string> IncludeRazorCoreComponentsVsixManifestsAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -9267,8 +9462,30 @@ public class SurveyPrompt : ComponentBase
     private const string RazorVsixDevCoreComponentsComment =
         "  <!-- We reference the core components only for developer builds. In the official build they are inserted via the corecomponents VSIX alongside this VSIX -->";
 
+    private const string RazorVsixDevCoreComponentsProjectReferencePath =
+        @"..\Microsoft.CodeAnalysis.Remote.Razor\Microsoft.CodeAnalysis.Remote.Razor.csproj";
+
+    private const string RazorVsixDevCoreComponentsItemGroup = """
+  <ItemGroup>
+    <ProjectReference Include="..\Microsoft.CodeAnalysis.Remote.Razor\Microsoft.CodeAnalysis.Remote.Razor.csproj" Condition="'$(OfficialBuildId)' == ''">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <IncludeOutputGroupsInVSIX>PublishProjectOutputGroup</IncludeOutputGroupsInVSIX>
+      <IncludeOutputGroupsInVSIXLocalOnly></IncludeOutputGroupsInVSIXLocalOnly>
+      <Private>false</Private>
+      <AdditionalProperties>TargetFramework=$(NetVS)</AdditionalProperties>
+      <VSIXSubPath>ServiceHubCore</VSIXSubPath>
+    </ProjectReference>
+  </ItemGroup>
+""";
+
     private const string RazorVsixWrapperCoreComponentsComment =
         "  <!-- Core components deploy through the dedicated Razor ServiceHub wrapper VSIX in the merged Roslyn repo. -->";
+
+    private const string RazorRemoteRazorRoslynVsixPublishTargets = """
+  <Target Name="PublishedProjectOutputGroup" DependsOnTargets="PublishProjectOutputGroup" Returns="@(_PublishedFiles)" />
+
+  <Target Name="PublishVsixItems" DependsOnTargets="Publish;PublishedProjectOutputGroup" Returns="@(_PublishedFiles)" />
+""";
 
     private const string RazorVsixWrapperCoreComponentsProjectReferencePath =
         @"..\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents\x64\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj";
