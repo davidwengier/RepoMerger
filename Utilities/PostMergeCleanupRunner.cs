@@ -276,9 +276,9 @@ internal static class PostMergeCleanupRunner
             MoveRazorShippingSymbolPackagesAsync),
         new(
             "restore-razor-versioning-props",
-            "Restore Razor's local package and VSIX versioning props in the merged root Directory.Build.props.",
+            "Restore Razor's local package, assembly, and VSIX versioning props in the merged root Directory.Build.props.",
             "Restore Razor versioning props",
-            @"Standalone Razor defines both its package version line and its VSIX tooling version line in eng\Versions.props, so the merged Razor subtree should restore those property groups locally instead of inheriting Roslyn's package and VSIX version defaults.",
+            @"Standalone Razor defines both its package version line and its VSIX tooling version line in eng\Versions.props, but the merged Roslyn tree eagerly computes package and assembly version defaults before src\Razor\Directory.Build.props is imported. The merged Razor subtree should therefore restore both the raw Razor version inputs and the derived version outputs locally instead of inheriting Roslyn's 5.7 version line.",
             RestoreRazorVersioningPropsAsync),
         new(
             "restore-razor-vsix-dev-assets",
@@ -5422,6 +5422,54 @@ internal static class PostMergeCleanupRunner
         return summary;
     }
 
+    private static string GetRazorVersioningPropertyGroupBlock()
+    {
+        return string.Join(
+            Environment.NewLine,
+            [
+                "  <PropertyGroup Label=\"Razor Versioning\">",
+                "    <MajorVersion>10</MajorVersion>",
+                "    <MinorVersion>0</MinorVersion>",
+                "    <PatchVersion>0</PatchVersion>",
+                "    <PreReleaseVersionLabel>preview</PreReleaseVersionLabel>",
+                "    <DotNetFinalVersionKind></DotNetFinalVersionKind>",
+                "    <VersionPrefix>$(MajorVersion).$(MinorVersion).$(PatchVersion)</VersionPrefix>",
+                "    <AssemblyVersion Condition=\"'$(OfficialBuild)' == 'true' or '$(DotNetUseShippingVersions)' == 'true'\">$(MajorVersion).$(MinorVersion).0.0</AssemblyVersion>",
+                "  </PropertyGroup>",
+            ]);
+    }
+
+    private static string GetRazorToolingVersioningPropertyGroupBlock()
+    {
+        return string.Join(
+            Environment.NewLine,
+            [
+                "  <PropertyGroup Label=\"Razor Tooling Versioning\">",
+                "    <VsixVersionPrefix>18.7.1</VsixVersionPrefix>",
+                "    <AddinMajorVersion>18.7</AddinMajorVersion>",
+                "    <AddinVersion>$(AddinMajorVersion)</AddinVersion>",
+                "    <AddinVersion Condition=\"'$(OfficialBuildId)' != ''\">$(AddinVersion).$(OfficialBuildId)</AddinVersion>",
+                "    <AddinVersion Condition=\"'$(OfficialBuildId)' == ''\">$(AddinVersion).42424242.42</AddinVersion>",
+                "  </PropertyGroup>",
+            ]);
+    }
+
+    private static bool TryReplaceLabeledPropertyGroup(string content, string label, string replacement, out string updatedContent)
+    {
+        var propertyGroupPattern = new Regex(
+            $@"^  <PropertyGroup Label=""{Regex.Escape(label)}"">.*?^  </PropertyGroup>",
+            RegexOptions.Multiline | RegexOptions.Singleline);
+
+        if (!propertyGroupPattern.IsMatch(content))
+        {
+            updatedContent = content;
+            return false;
+        }
+
+        updatedContent = propertyGroupPattern.Replace(content, replacement, count: 1);
+        return true;
+    }
+
     private static async Task<string> RestoreRazorVersionPropsAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -5430,16 +5478,7 @@ internal static class PostMergeCleanupRunner
         if (!File.Exists(directoryBuildPropsPath))
             return "No Razor root Directory.Build.props file was found for version cleanup.";
 
-        var versionBlock = string.Join(
-            Environment.NewLine,
-            [
-                "  <PropertyGroup Label=\"Razor Versioning\">",
-                "    <MajorVersion>10</MajorVersion>",
-                "    <MinorVersion>0</MinorVersion>",
-                "    <PatchVersion>0</PatchVersion>",
-                "    <PreReleaseVersionLabel>preview</PreReleaseVersionLabel>",
-                "  </PropertyGroup>",
-            ]);
+        var versionBlock = GetRazorVersioningPropertyGroupBlock();
 
         var anchor = string.Join(
             Environment.NewLine,
@@ -5450,13 +5489,21 @@ internal static class PostMergeCleanupRunner
             ]);
 
         var originalContent = await File.ReadAllTextAsync(directoryBuildPropsPath).ConfigureAwait(false);
-        if (originalContent.Contains("<PropertyGroup Label=\"Razor Versioning\">", StringComparison.Ordinal))
+        if (originalContent.Contains(versionBlock, StringComparison.Ordinal))
             return "No Razor version props restore was needed.";
 
-        var updatedContent = originalContent.Replace(
-            anchor,
-            anchor + Environment.NewLine + Environment.NewLine + versionBlock,
-            StringComparison.Ordinal);
+        string updatedContent;
+        if (TryReplaceLabeledPropertyGroup(originalContent, "Razor Versioning", versionBlock, out var replacedContent))
+        {
+            updatedContent = replacedContent;
+        }
+        else
+        {
+            updatedContent = originalContent.Replace(
+                anchor,
+                anchor + Environment.NewLine + Environment.NewLine + versionBlock,
+                StringComparison.Ordinal);
+        }
 
         if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
             return "No Razor version props restore was needed.";
@@ -5473,37 +5520,25 @@ internal static class PostMergeCleanupRunner
         if (!File.Exists(directoryBuildPropsPath))
             return "No Razor root Directory.Build.props file was found for VSIX version cleanup.";
 
-        var toolingVersionBlock = string.Join(
-            Environment.NewLine,
-            [
-                "  <PropertyGroup Label=\"Razor Tooling Versioning\">",
-                "    <VsixVersionPrefix>18.7.1</VsixVersionPrefix>",
-                "    <AddinMajorVersion>18.7</AddinMajorVersion>",
-                "    <AddinVersion>$(AddinMajorVersion)</AddinVersion>",
-                "    <AddinVersion Condition=\"'$(OfficialBuildId)' != ''\">$(AddinVersion).$(OfficialBuildId)</AddinVersion>",
-                "    <AddinVersion Condition=\"'$(OfficialBuildId)' == ''\">$(AddinVersion).42424242.42</AddinVersion>",
-                "  </PropertyGroup>",
-            ]);
-
-        var anchor = string.Join(
-            Environment.NewLine,
-            [
-                "  <PropertyGroup Label=\"Razor Versioning\">",
-                "    <MajorVersion>10</MajorVersion>",
-                "    <MinorVersion>0</MinorVersion>",
-                "    <PatchVersion>0</PatchVersion>",
-                "    <PreReleaseVersionLabel>preview</PreReleaseVersionLabel>",
-                "  </PropertyGroup>",
-            ]);
+        var toolingVersionBlock = GetRazorToolingVersioningPropertyGroupBlock();
+        var versionBlock = GetRazorVersioningPropertyGroupBlock();
 
         var originalContent = await File.ReadAllTextAsync(directoryBuildPropsPath).ConfigureAwait(false);
-        if (originalContent.Contains("<PropertyGroup Label=\"Razor Tooling Versioning\">", StringComparison.Ordinal))
+        if (originalContent.Contains(toolingVersionBlock, StringComparison.Ordinal))
             return "No Razor VSIX version props restore was needed.";
 
-        var updatedContent = originalContent.Replace(
-            anchor,
-            anchor + Environment.NewLine + Environment.NewLine + toolingVersionBlock,
-            StringComparison.Ordinal);
+        string updatedContent;
+        if (TryReplaceLabeledPropertyGroup(originalContent, "Razor Tooling Versioning", toolingVersionBlock, out var replacedContent))
+        {
+            updatedContent = replacedContent;
+        }
+        else
+        {
+            updatedContent = originalContent.Replace(
+                versionBlock,
+                versionBlock + Environment.NewLine + Environment.NewLine + toolingVersionBlock,
+                StringComparison.Ordinal);
+        }
 
         if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
             return "No Razor VSIX version props restore was needed.";
