@@ -9216,9 +9216,18 @@ public class SurveyPrompt : ComponentBase
         ("Microsoft.AspNetCore.Razor.Utilities.Shared", RazorArcadePublishFeed),
         ("Microsoft.AspNetCore.Razor.Utilities.Shared.Test", RazorArcadePublishFeed),
         ("Microsoft.CodeAnalysis.Razor.Compiler", RazorArcadePublishFeed),
+        ("Microsoft.CodeAnalysis.Razor.Tooling.Internal", RazorArcadePublishFeed),
+        ("Microsoft.CodeAnalysis.Razor.Workspaces", RazorArcadePublishFeed),
+        ("Microsoft.CodeAnalysis.Remote.Razor", RazorArcadePublishFeed),
+        ("Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.arm64", RazorArcadePublishFeed),
+        ("Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64", RazorArcadePublishFeed),
         ("Microsoft.Net.Compilers.Razor.Toolset", RazorArcadePublishFeed),
+        ("Microsoft.NET.Sdk.Razor.SourceGenerators.Transport", RazorArcadePublishFeed),
+        ("Microsoft.VisualStudio.LanguageServer.ContainedLanguage", RazorArcadePublishFeed),
+        ("Microsoft.VisualStudio.LanguageServices.Razor", RazorArcadePublishFeed),
         ("Microsoft.VisualStudio.RazorExtension", RazorArcadePublishFeed),
         ("Microsoft.VisualStudioCode.RazorExtension", RazorVsImplPublishFeed),
+        ("Razor.Diagnostics.Analyzers.Test", RazorArcadePublishFeed),
         ("RazorDeployment", RazorArcadePublishFeed),
     ];
 
