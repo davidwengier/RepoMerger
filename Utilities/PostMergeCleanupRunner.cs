@@ -69,9 +69,9 @@ internal static class PostMergeCleanupRunner
             OverlayRazorRootEditorConfigAsync),
         new(
             "merge-razor-publish-data",
-            "Merge missing Razor package publish entries into Roslyn's PublishData.json without overriding Roslyn's existing branch routing.",
+            "Merge missing Razor publish entries into Roslyn's PublishData.json without overriding Roslyn's existing branch routing.",
             "Merge Razor PublishData packages",
-            "Roslyn's eng\\config\\PublishData.json should stay authoritative for feeds and branch routing, but the merged tree still needs Razor's package publish entries so build.cmd -pack/publish continues to include Razor's insertion packages.",
+            "Roslyn's eng\\config\\PublishData.json should stay authoritative for feeds and branch routing, but the merged tree still needs Razor's published package entries from both upstream PublishData.json and the extra official-build packages we verified so build.cmd -pack/publish continues to include Razor's insertion, shipping, and Utilities.Shared packages.",
             MergeRazorPublishDataAsync),
         new(
             "overlay-razor-banned-symbols",
@@ -484,18 +484,6 @@ internal static class PostMergeCleanupRunner
             "Use WindowsDesktop SDK for Razor VSIX",
             "Roslyn's WPF/XAML projects build as Microsoft.NET.Sdk.WindowsDesktop projects while still using the repo's normal compiler path. The merged RazorExtension project stays on Microsoft.NET.Sdk, and under Roslyn that configuration skips WPF markup compilation and fails on SyntaxVisualizer's InitializeComponent and treeView members. The merged Razor VSIX should follow Roslyn's WindowsDesktop SDK pattern instead of carrying a private compiler-toolset pin.",
             UseWindowsDesktopSdkForRazorVsixAsync),
-        new(
-            "ensure-razor-shipping-publish-data",
-            "Ensure Razor's shipping package publish entries are present in Roslyn's PublishData.json.",
-            "Ensure Razor shipping PublishData packages",
-            "Official Razor builds publish a shipping subset of Razor packages even though upstream PublishData.json only lists the VS insertion packages explicitly. The merged Roslyn tree should keep those shipping publish entries so build.cmd -pack/publish still publishes Microsoft.AspNetCore.Razor.Test.Common, Microsoft.CodeAnalysis.Razor.Compiler, Microsoft.Net.Compilers.Razor.Toolset, Microsoft.VisualStudio.RazorExtension, Microsoft.VisualStudioCode.RazorExtension, and RazorDeployment without disturbing Roslyn's existing branch routing.",
-            EnsureRazorShippingPublishDataAsync),
-        new(
-            "ensure-razor-utilities-shared-publish-data",
-            "Ensure Razor's Utilities.Shared package publish entries are present in Roslyn's PublishData.json.",
-            "Ensure Razor Utilities.Shared PublishData packages",
-            "Official Razor builds publish Microsoft.AspNetCore.Razor.Utilities.Shared and Microsoft.AspNetCore.Razor.Utilities.Shared.Test as nonshipping tooling packages. The merged Roslyn tree should keep those package publish entries so build.cmd -pack/publish doesn't fail once those Razor utilities packages are produced.",
-            EnsureRazorUtilitiesSharedPublishDataAsync),
         new(
             "restore-razor-local-servicehub-payload",
             "Restore Razor's local ServiceHub payload packaging so RoslynDev deployment includes Remote.Razor and its Razor dependencies.",
@@ -1032,7 +1020,12 @@ internal static class PostMergeCleanupRunner
             sourceFeeds = sourcePublishData["feeds"] as JsonObject;
         }
 
-        var targetFeeds = targetPublishData["feeds"] as JsonObject;
+        if (targetPublishData["feeds"] is not JsonObject targetFeeds)
+        {
+            targetFeeds = [];
+            targetPublishData["feeds"] = targetFeeds;
+        }
+
         var addedPackages = new List<string>();
         var updatedPackages = new List<string>();
         var addedFeeds = new List<string>();
@@ -1045,9 +1038,9 @@ internal static class PostMergeCleanupRunner
                     continue;
 
                 targetPackages[packageEntry.Key] = packageEntry.Value?.DeepClone();
-                addedPackages.Add(packageEntry.Key);
+                addedPackages.Add(FormatPublishDataPackageAssignment(packageEntry.Key, packageEntry.Value));
 
-                if (sourceFeeds is null || targetFeeds is null || packageEntry.Value is not JsonValue feedNameNode)
+                if (sourceFeeds is null || packageEntry.Value is not JsonValue feedNameNode)
                     continue;
 
                 if (!feedNameNode.TryGetValue<string>(out var feedName) || string.IsNullOrWhiteSpace(feedName))
@@ -1061,22 +1054,14 @@ internal static class PostMergeCleanupRunner
             }
         }
 
-        foreach (var packageName in RazorArcadePublishDataPackages)
-        {
-            if (targetPackages.TryGetPropertyValue(packageName, out var existingValue) &&
-                existingValue is JsonValue existingFeedNode &&
-                existingFeedNode.TryGetValue<string>(out var existingFeed) &&
-                string.Equals(existingFeed, RazorArcadePublishFeed, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            targetPackages[packageName] = JsonValue.Create(RazorArcadePublishFeed);
-            if (existingValue is null)
-                addedPackages.Add(packageName);
-            else
-                updatedPackages.Add(packageName);
-        }
+        EnsurePublishDataPackageMappings(
+            targetPackages,
+            targetFeeds,
+            sourceFeeds,
+            RazorExplicitPublishDataPackages,
+            addedPackages,
+            updatedPackages,
+            addedFeeds);
 
         if (addedPackages.Count == 0 && updatedPackages.Count == 0 && addedFeeds.Count == 0)
             return "No Razor PublishData package merge was needed.";
@@ -1093,7 +1078,7 @@ internal static class PostMergeCleanupRunner
         if (updatedPackages.Count > 0)
         {
             summaryParts.Add(
-                $"Updated {updatedPackages.Count} Razor package publish entr{(updatedPackages.Count == 1 ? "y" : "ies")} in '{Path.GetRelativePath(targetRepoRoot, targetPublishDataPath)}' to use '{RazorArcadePublishFeed}': {string.Join(", ", updatedPackages)}.");
+                $"Updated {updatedPackages.Count} Razor package publish entr{(updatedPackages.Count == 1 ? "y" : "ies")} in '{Path.GetRelativePath(targetRepoRoot, targetPublishDataPath)}': {string.Join(", ", updatedPackages)}.");
         }
 
         if (addedFeeds.Count > 0)
@@ -1105,69 +1090,24 @@ internal static class PostMergeCleanupRunner
         return string.Join(" ", summaryParts);
     }
 
-    private static async Task<string> EnsureRazorShippingPublishDataAsync(StageContext context)
+    private static void EnsurePublishDataPackageMappings(
+        JsonObject targetPackages,
+        JsonObject targetFeeds,
+        JsonObject? sourceFeeds,
+        IEnumerable<(string PackageName, string DesiredFeed)> desiredPackageFeeds,
+        List<string> addedPackages,
+        List<string> updatedPackages,
+        List<string> addedFeeds)
     {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var sourcePublishDataPath = Path.Combine(context.State.SourceCloneDirectory, "eng", "config", "PublishData.json");
-        var targetPublishDataPath = Path.Combine(targetRepoRoot, "eng", "config", "PublishData.json");
-        if (!File.Exists(targetPublishDataPath))
-            return "No repo-root eng\\config\\PublishData.json file was found for Razor shipping publish-data cleanup.";
-
-        var targetPublishData = await LoadJsonObjectAsync(targetPublishDataPath).ConfigureAwait(false);
-        if (targetPublishData["packages"] is not JsonObject targetPackages)
+        foreach (var (packageName, desiredFeed) in desiredPackageFeeds)
         {
-            targetPackages = [];
-            targetPublishData["packages"] = targetPackages;
-        }
-
-        JsonObject? sourcePackages = null;
-        JsonObject? sourceFeeds = null;
-        if (File.Exists(sourcePublishDataPath))
-        {
-            var sourcePublishData = await LoadJsonObjectAsync(sourcePublishDataPath).ConfigureAwait(false);
-            sourcePackages = sourcePublishData["packages"] as JsonObject;
-            sourceFeeds = sourcePublishData["feeds"] as JsonObject;
-        }
-
-        var sourcePackageFeeds = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (sourcePackages is not null)
-        {
-            foreach (var packageEntry in EnumeratePublishDataPackageEntries(sourcePackages))
-            {
-                if (packageEntry.Value is not JsonValue feedNode ||
-                    !feedNode.TryGetValue<string>(out var feedName) ||
-                    string.IsNullOrWhiteSpace(feedName))
-                {
-                    continue;
-                }
-
-                sourcePackageFeeds[packageEntry.Key] = feedName;
-            }
-        }
-
-        if (targetPublishData["feeds"] is not JsonObject targetFeeds)
-        {
-            targetFeeds = [];
-            targetPublishData["feeds"] = targetFeeds;
-        }
-
-        var addedPackages = new List<string>();
-        var updatedPackages = new List<string>();
-        var addedFeeds = new List<string>();
-
-        foreach (var (packageName, fallbackFeed) in RazorShippingPublishDataPackages)
-        {
-            var desiredFeed = sourcePackageFeeds.TryGetValue(packageName, out var sourceFeed)
-                ? sourceFeed
-                : fallbackFeed;
-
             if (!string.Equals(desiredFeed, RazorArcadePublishFeed, StringComparison.Ordinal) &&
                 !targetFeeds.ContainsKey(desiredFeed))
             {
                 if (sourceFeeds is null || !sourceFeeds.TryGetPropertyValue(desiredFeed, out var sourceFeedValue))
                 {
                     throw new InvalidOperationException(
-                        $"Could not find feed definition for '{desiredFeed}' while ensuring Razor shipping publish-data entries.");
+                        $"Could not find feed definition for '{desiredFeed}' while merging Razor publish-data entries.");
                 }
 
                 targetFeeds[desiredFeed] = sourceFeedValue?.DeepClone();
@@ -1189,146 +1129,18 @@ internal static class PostMergeCleanupRunner
             else
                 updatedPackages.Add(packageAssignment);
         }
-
-        if (addedPackages.Count == 0 && updatedPackages.Count == 0 && addedFeeds.Count == 0)
-            return "No Razor shipping PublishData package updates were needed.";
-
-        await SaveJsonAsync(targetPublishData, targetPublishDataPath).ConfigureAwait(false);
-
-        var publishDataPath = Path.GetRelativePath(targetRepoRoot, targetPublishDataPath);
-        var summaryParts = new List<string>();
-        if (addedPackages.Count > 0)
-        {
-            summaryParts.Add(
-                $"Added {addedPackages.Count} Razor shipping package publish entr{(addedPackages.Count == 1 ? "y" : "ies")} to '{publishDataPath}': {string.Join(", ", addedPackages)}.");
-        }
-
-        if (updatedPackages.Count > 0)
-        {
-            summaryParts.Add(
-                $"Updated {updatedPackages.Count} Razor shipping package publish entr{(updatedPackages.Count == 1 ? "y" : "ies")} in '{publishDataPath}': {string.Join(", ", updatedPackages)}.");
-        }
-
-        if (addedFeeds.Count > 0)
-        {
-            summaryParts.Add(
-                $"Also added {addedFeeds.Count} missing feed definition{(addedFeeds.Count == 1 ? string.Empty : "s")}: {string.Join(", ", addedFeeds)}.");
-        }
-
-        return string.Join(" ", summaryParts);
     }
 
-    private static async Task<string> EnsureRazorUtilitiesSharedPublishDataAsync(StageContext context)
+    private static string FormatPublishDataPackageAssignment(string packageName, JsonNode? packageValue)
     {
-        var targetRepoRoot = context.TargetRepoRoot;
-        var sourcePublishDataPath = Path.Combine(context.State.SourceCloneDirectory, "eng", "config", "PublishData.json");
-        var targetPublishDataPath = Path.Combine(targetRepoRoot, "eng", "config", "PublishData.json");
-        if (!File.Exists(targetPublishDataPath))
-            return "No repo-root eng\\config\\PublishData.json file was found for Razor Utilities.Shared publish-data cleanup.";
-
-        var targetPublishData = await LoadJsonObjectAsync(targetPublishDataPath).ConfigureAwait(false);
-        if (targetPublishData["packages"] is not JsonObject targetPackages)
+        if (packageValue is JsonValue feedNode &&
+            feedNode.TryGetValue<string>(out var feedName) &&
+            !string.IsNullOrWhiteSpace(feedName))
         {
-            targetPackages = [];
-            targetPublishData["packages"] = targetPackages;
+            return $"{packageName} -> {feedName}";
         }
 
-        JsonObject? sourcePackages = null;
-        JsonObject? sourceFeeds = null;
-        if (File.Exists(sourcePublishDataPath))
-        {
-            var sourcePublishData = await LoadJsonObjectAsync(sourcePublishDataPath).ConfigureAwait(false);
-            sourcePackages = sourcePublishData["packages"] as JsonObject;
-            sourceFeeds = sourcePublishData["feeds"] as JsonObject;
-        }
-
-        var sourcePackageFeeds = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (sourcePackages is not null)
-        {
-            foreach (var packageEntry in EnumeratePublishDataPackageEntries(sourcePackages))
-            {
-                if (packageEntry.Value is not JsonValue feedNode ||
-                    !feedNode.TryGetValue<string>(out var feedName) ||
-                    string.IsNullOrWhiteSpace(feedName))
-                {
-                    continue;
-                }
-
-                sourcePackageFeeds[packageEntry.Key] = feedName;
-            }
-        }
-
-        if (targetPublishData["feeds"] is not JsonObject targetFeeds)
-        {
-            targetFeeds = [];
-            targetPublishData["feeds"] = targetFeeds;
-        }
-
-        var addedPackages = new List<string>();
-        var updatedPackages = new List<string>();
-        var addedFeeds = new List<string>();
-
-        foreach (var (packageName, fallbackFeed) in RazorUtilitiesSharedPublishDataPackages)
-        {
-            var desiredFeed = sourcePackageFeeds.TryGetValue(packageName, out var sourceFeed)
-                ? sourceFeed
-                : fallbackFeed;
-
-            if (!string.Equals(desiredFeed, RazorArcadePublishFeed, StringComparison.Ordinal) &&
-                !targetFeeds.ContainsKey(desiredFeed))
-            {
-                if (sourceFeeds is null || !sourceFeeds.TryGetPropertyValue(desiredFeed, out var sourceFeedValue))
-                {
-                    throw new InvalidOperationException(
-                        $"Could not find feed definition for '{desiredFeed}' while ensuring Razor Utilities.Shared publish-data entries.");
-                }
-
-                targetFeeds[desiredFeed] = sourceFeedValue?.DeepClone();
-                addedFeeds.Add(desiredFeed);
-            }
-
-            if (targetPackages.TryGetPropertyValue(packageName, out var existingValue) &&
-                existingValue is JsonValue existingFeedNode &&
-                existingFeedNode.TryGetValue<string>(out var existingFeed) &&
-                string.Equals(existingFeed, desiredFeed, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            targetPackages[packageName] = JsonValue.Create(desiredFeed);
-            var packageAssignment = $"{packageName} -> {desiredFeed}";
-            if (existingValue is null)
-                addedPackages.Add(packageAssignment);
-            else
-                updatedPackages.Add(packageAssignment);
-        }
-
-        if (addedPackages.Count == 0 && updatedPackages.Count == 0 && addedFeeds.Count == 0)
-            return "No Razor Utilities.Shared PublishData package updates were needed.";
-
-        await SaveJsonAsync(targetPublishData, targetPublishDataPath).ConfigureAwait(false);
-
-        var publishDataPath = Path.GetRelativePath(targetRepoRoot, targetPublishDataPath);
-        var summaryParts = new List<string>();
-        if (addedPackages.Count > 0)
-        {
-            summaryParts.Add(
-                $"Added {addedPackages.Count} Razor Utilities.Shared package publish entr{(addedPackages.Count == 1 ? "y" : "ies")} to '{publishDataPath}': {string.Join(", ", addedPackages)}.");
-        }
-
-        if (updatedPackages.Count > 0)
-        {
-            summaryParts.Add(
-                $"Updated {updatedPackages.Count} Razor Utilities.Shared package publish entr{(updatedPackages.Count == 1 ? "y" : "ies")} in '{publishDataPath}': {string.Join(", ", updatedPackages)}.");
-        }
-
-        if (addedFeeds.Count > 0)
-        {
-            summaryParts.Add(
-                $"Also added {addedFeeds.Count} missing feed definition{(addedFeeds.Count == 1 ? string.Empty : "s")}: {string.Join(", ", addedFeeds)}.");
-        }
-
-        return string.Join(" ", summaryParts);
+        return packageName;
     }
 
     private static async Task<string> OverlayRazorRootEditorConfigAsync(StageContext context)
@@ -9397,29 +9209,17 @@ public class SurveyPrompt : ComponentBase
     private const string RazorVsImplPublishFeed = "vs-impl";
     private const string RazorSdkPackageVersion = "11.0.100-preview.4.26215.114";
 
-    private static readonly string[] RazorArcadePublishDataPackages =
+    private static readonly (string PackageName, string DesiredFeed)[] RazorExplicitPublishDataPackages =
     [
-        "Microsoft.AspNetCore.Mvc.Razor.Extensions.Tooling.Internal",
-        "Microsoft.CodeAnalysis.Razor.Compiler",
-        "Microsoft.Net.Compilers.Razor.Toolset",
-        "Microsoft.VisualStudio.RazorExtension",
-        "RazorDeployment",
-    ];
-
-    private static readonly (string PackageName, string FallbackFeed)[] RazorShippingPublishDataPackages =
-    [
+        ("Microsoft.AspNetCore.Mvc.Razor.Extensions.Tooling.Internal", RazorArcadePublishFeed),
         ("Microsoft.AspNetCore.Razor.Test.Common", RazorArcadePublishFeed),
+        ("Microsoft.AspNetCore.Razor.Utilities.Shared", RazorArcadePublishFeed),
+        ("Microsoft.AspNetCore.Razor.Utilities.Shared.Test", RazorArcadePublishFeed),
         ("Microsoft.CodeAnalysis.Razor.Compiler", RazorArcadePublishFeed),
         ("Microsoft.Net.Compilers.Razor.Toolset", RazorArcadePublishFeed),
         ("Microsoft.VisualStudio.RazorExtension", RazorArcadePublishFeed),
         ("Microsoft.VisualStudioCode.RazorExtension", RazorVsImplPublishFeed),
         ("RazorDeployment", RazorArcadePublishFeed),
-    ];
-
-    private static readonly (string PackageName, string FallbackFeed)[] RazorUtilitiesSharedPublishDataPackages =
-    [
-        ("Microsoft.AspNetCore.Razor.Utilities.Shared", RazorArcadePublishFeed),
-        ("Microsoft.AspNetCore.Razor.Utilities.Shared.Test", RazorArcadePublishFeed),
     ];
 
     private static readonly string[] RazorVsixPkgDefBindingRedirectProjectReferences =
