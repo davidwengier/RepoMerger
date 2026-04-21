@@ -490,6 +490,12 @@ internal static class PostMergeCleanupRunner
             "Restore Razor local ServiceHub payload",
             "Roslyn's build.cmd -deployExtensions flow deploys the merged Microsoft.VisualStudio.RazorExtension VSIX itself and expects PublishedProjectOutputGroup payloads that probe entirely from ServiceHubCore. The merged Razor VSIX should keep Razor's original local-only Microsoft.CodeAnalysis.Remote.Razor project reference, align that project with Roslyn's PublishedProjectOutputGroup and PublishVsixItems convention, and explicitly include Razor.Workspaces, Razor.Compiler, and Utilities.Shared from artifacts\\bin so RoslynDev deployments carry the full ServiceHub payload Visual Studio activates.",
             RestoreRazorLocalServiceHubPayloadAsync),
+        new(
+            "restore-razor-vs-ide-test-framework",
+            "Restore Razor's explicit IdeTestFramework import when its Visual Studio integration tests use Roslyn's in-repo Xunit harness project.",
+            "Restore Razor VS IdeTestFramework wiring",
+            "Upstream Razor consumes Microsoft.VisualStudio.Extensibility.Testing.Xunit as a package, which imports Microsoft.VisualStudio.Extensibility.Testing.Xunit.targets automatically. After the merge, that dependency becomes an in-repo project reference like Roslyn's own New.IntegrationTests project, so Razor must add the same explicit targets import or IdeFact tests run under the default xUnit framework and throw NotSupportedException before the IDE harness can launch Visual Studio.",
+            RestoreRazorVisualStudioIdeTestFrameworkAsync),
     ];
 
     public static IReadOnlyList<string> StepNames { get; } = Steps
@@ -4880,6 +4886,49 @@ internal static class PostMergeCleanupRunner
         return changedFiles.Count == 0
             ? "No Razor Visual Studio test harness project reference cleanup was needed."
             : $"Normalized Razor Visual Studio test harness project references in {changedFiles.Count} file(s): {string.Join(", ", changedFiles)}.";
+    }
+
+    private static async Task<string> RestoreRazorVisualStudioIdeTestFrameworkAsync(StageContext context)
+    {
+        var targetRepoRoot = context.TargetRepoRoot;
+        var projectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "test",
+            "Microsoft.VisualStudio.Razor.IntegrationTests",
+            "Microsoft.VisualStudio.Razor.IntegrationTests.csproj");
+
+        if (!File.Exists(projectPath))
+            return "No Razor Visual Studio integration test project was found for IdeTestFramework cleanup.";
+
+        var originalContent = await File.ReadAllTextAsync(projectPath).ConfigureAwait(false);
+        var updatedContent = EnsureRazorVisualStudioIdeTestFrameworkImport(originalContent);
+        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+            return "No Razor Visual Studio IdeTestFramework import cleanup was needed.";
+
+        await WriteTextPreservingUtf8BomAsync(projectPath, updatedContent, templatePath: projectPath).ConfigureAwait(false);
+        return
+            $"Added Roslyn's Xunit test-framework import to '{Path.GetRelativePath(targetRepoRoot, projectPath)}' " +
+            "so IdeFact tests run under IdeTestFramework when the merged project uses Roslyn's in-repo harness.";
+    }
+
+    private static string EnsureRazorVisualStudioIdeTestFrameworkImport(string content)
+    {
+        if (!content.Contains("Microsoft.VisualStudio.Extensibility.Testing.Xunit.csproj", StringComparison.OrdinalIgnoreCase) ||
+            content.Contains("Microsoft.VisualStudio.Extensibility.Testing.Xunit.targets", StringComparison.OrdinalIgnoreCase))
+        {
+            return content;
+        }
+
+        var projectEndIndex = content.LastIndexOf("</Project>", StringComparison.Ordinal);
+        if (projectEndIndex < 0)
+            return content;
+
+        var newline = content.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var importLine =
+            @"  <Import Project=""..\..\..\..\..\VisualStudio\IntegrationTest\Harness\XUnitShared\build\Microsoft.VisualStudio.Extensibility.Testing.Xunit.targets"" />";
+        return content.Insert(projectEndIndex, $"{newline}{newline}{importLine}{newline}");
     }
 
     private static async Task<string> NormalizeRazorLiveShareTestSessionAsync(StageContext context)
