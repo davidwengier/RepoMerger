@@ -498,9 +498,9 @@ internal static class PostMergeCleanupRunner
             RestoreRazorVisualStudioIdeTestFrameworkAsync),
         new(
             "preserve-razor-servicehub-r2r-publish-output",
-            "Keep Razor's artifact-backed ServiceHub dependency includes local-only so official builds preserve the Remote.Razor publish output and its ReadyToRun binaries.",
-            "Preserve Razor ServiceHub R2R publish output",
-            "Standalone Razor official builds package the Remote.Razor publish output, which carries the ReadyToRun ServiceHub binaries. The merged tree adds plain artifact-backed fallback includes with the same target paths for local deployment, so the post-merge cleanup should keep those fallbacks only for non-official builds and let official builds keep the published R2R payload.",
+            "Keep Razor's artifact-backed ServiceHub dependency includes as fallbacks when Remote.Razor publish output omits Razor dependencies.",
+            "Preserve Razor ServiceHub publish fallbacks",
+            "Standalone Razor official builds package the Remote.Razor publish output, which should carry the ReadyToRun ServiceHub binaries. In the merged Roslyn tree that publish output can omit Razor.Workspaces, Razor.Compiler, or Utilities.Shared, so the post-merge cleanup should preserve the published R2R payload when those files exist and fall back to artifact-backed copies only when publish drops them.",
             PreserveRazorServiceHubReadyToRunPublishOutputAsync),
     ];
 
@@ -5935,9 +5935,9 @@ internal static class PostMergeCleanupRunner
             return "No Remote.Razor project was found for ServiceHub ReadyToRun cleanup.";
 
         var originalContent = await File.ReadAllTextAsync(remoteRazorProjectPath).ConfigureAwait(false);
-        if (originalContent.Contains("""<_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Compiler.dll" Condition="'$(OfficialBuildId)' == ''" />""", StringComparison.Ordinal))
+        if (originalContent.Contains("""<_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Compiler.dll" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')" />""", StringComparison.Ordinal))
         {
-            return "No Razor ServiceHub ReadyToRun publish-output cleanup changes were needed.";
+            return "No Razor ServiceHub publish-fallback cleanup changes were needed.";
         }
 
         var artifactIncludeBlock = string.Join(
@@ -5958,9 +5958,22 @@ internal static class PostMergeCleanupRunner
                 """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Workspaces.dll" Condition="'$(OfficialBuildId)' == ''" />""",
                 """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\**\Microsoft.CodeAnalysis.Razor.Workspaces.resources.dll" Condition="'$(OfficialBuildId)' == ''" />"""
             ]);
+        var publishFallbackArtifactIncludeBlock = string.Join(
+            Environment.NewLine,
+            [
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\Microsoft.AspNetCore.Razor.Utilities.Shared.dll" Condition="!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll')" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\**\Microsoft.AspNetCore.Razor.Utilities.Shared.resources.dll" Condition="!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll')" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Compiler.dll" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\Microsoft.CodeAnalysis.Razor.Workspaces.dll" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll')" />""",
+                """      <_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\**\Microsoft.CodeAnalysis.Razor.Workspaces.resources.dll" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll')" />"""
+            ]);
         var updatedContent = originalContent.Replace(
             artifactIncludeBlock,
+            publishFallbackArtifactIncludeBlock,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
             localOnlyArtifactIncludeBlock,
+            publishFallbackArtifactIncludeBlock,
             StringComparison.Ordinal);
         if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
         {
@@ -5974,7 +5987,7 @@ internal static class PostMergeCleanupRunner
             "add",
             "--",
             Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)).ConfigureAwait(false);
-        return $"Restricted Razor artifact-backed ServiceHub dependency includes to non-official builds in '{Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)}'.";
+        return $"Updated Razor artifact-backed ServiceHub dependency includes in '{Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)}' to fall back only when publish output omits those dependencies.";
     }
 
     private static async Task<string> IncludeRazorCoreComponentsVsixManifestsAsync(StageContext context)
