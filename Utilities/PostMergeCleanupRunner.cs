@@ -5935,12 +5935,6 @@ internal static class PostMergeCleanupRunner
             return "No Remote.Razor project was found for ServiceHub ReadyToRun cleanup.";
 
         var originalContent = await File.ReadAllTextAsync(remoteRazorProjectPath).ConfigureAwait(false);
-        if (originalContent.Contains("""<Target Name="PublishRazorServiceHubDependencyProjects" Condition="'$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != '' and (!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll'))">""", StringComparison.Ordinal)
-            && originalContent.Contains("""<_PublishedFiles Include="$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\Microsoft.CodeAnalysis.Razor.Compiler.dll" Condition="'$(PublishReadyToRun)' == 'true' and !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')" />""", StringComparison.Ordinal))
-        {
-            return "No Razor ServiceHub ReadyToRun publish-fallback cleanup changes were needed.";
-        }
-
         var artifactIncludeBlock = string.Join(
             Environment.NewLine,
             [
@@ -6014,6 +6008,80 @@ internal static class PostMergeCleanupRunner
                 """    <MSBuild Projects="@(_RazorServiceHubDependencyProject)" Condition="'@(_RazorServiceHubDependencyProject)' != ''" BuildInParallel="$(BuildInParallel)" RemoveProperties="OutDir;OutputPath;PublishDir" Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework);RuntimeIdentifier=$(RuntimeIdentifier);PublishReadyToRun=$(PublishReadyToRun);%(_RazorServiceHubDependencyProject.SetPublishDir)" Targets="Publish" />""",
                 """  </Target>"""
             ]);
+        var publishDependencyProjectsTargetWithRestore = string.Join(
+            Environment.NewLine,
+            [
+                """  <Target Name="PublishRazorServiceHubDependencyProjects" Condition="'$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != '' and (!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll'))">""",
+                """    <ItemGroup>""",
+                """      <_RazorServiceHubDependencyProject Include="$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj" Condition="!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll')">""",
+                """        <SetPublishDir>PublishDir=$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</SetPublishDir>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\..\..\Compiler\Microsoft.CodeAnalysis.Razor.Compiler\src\Microsoft.CodeAnalysis.Razor.Compiler.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')">""",
+                """        <SetPublishDir>PublishDir=$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</SetPublishDir>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\Microsoft.CodeAnalysis.Razor.Workspaces\Microsoft.CodeAnalysis.Razor.Workspaces.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll')">""",
+                """        <SetPublishDir>PublishDir=$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</SetPublishDir>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """    </ItemGroup>""",
+                """    <MSBuild Projects="@(_RazorServiceHubDependencyProject)" Condition="'@(_RazorServiceHubDependencyProject)' != ''" BuildInParallel="$(BuildInParallel)" RemoveProperties="OutDir;OutputPath;PublishDir" Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework);RuntimeIdentifier=$(RuntimeIdentifier);PublishReadyToRun=$(PublishReadyToRun);%(_RazorServiceHubDependencyProject.SetPublishDir)" Targets="Restore;Publish" />""",
+                """  </Target>"""
+            ]);
+        var publishDependencyProjectsTargetWithLegacyRestore = string.Join(
+            Environment.NewLine,
+            [
+                """  <Target Name="PublishRazorServiceHubDependencyProjects" Condition="'$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != '' and (!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll'))">""",
+                """    <ItemGroup>""",
+                """      <_RazorServiceHubDependencyProject Include="$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj" Condition="!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll')">""",
+                """        <SetPublishDir>PublishDir=$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</SetPublishDir>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\..\..\Compiler\Microsoft.CodeAnalysis.Razor.Compiler\src\Microsoft.CodeAnalysis.Razor.Compiler.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')">""",
+                """        <SetPublishDir>PublishDir=$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</SetPublishDir>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\Microsoft.CodeAnalysis.Razor.Workspaces\Microsoft.CodeAnalysis.Razor.Workspaces.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll')">""",
+                """        <SetPublishDir>PublishDir=$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</SetPublishDir>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """    </ItemGroup>""",
+                """    <MSBuild Projects="@(_RazorServiceHubDependencyProject)" Condition="'@(_RazorServiceHubDependencyProject)' != ''" BuildInParallel="$(BuildInParallel)" RemoveProperties="OutDir;OutputPath;PublishDir" Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework);RuntimeIdentifier=$(RuntimeIdentifier);PublishReadyToRun=$(PublishReadyToRun);RestoreUseStaticGraphEvaluation=false;%(_RazorServiceHubDependencyProject.SetPublishDir)" Targets="Restore;Publish" />""",
+                """  </Target>"""
+            ]);
+        var publishDependencyProjectsTargetWithCliPublish = string.Join(
+            Environment.NewLine,
+            [
+                """  <Target Name="PublishRazorServiceHubDependencyProjects" Condition="'$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != '' and (!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll'))">""",
+                """    <ItemGroup>""",
+                """      <_RazorServiceHubDependencyProject Include="$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj" Condition="!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll')">""",
+                """        <PublishDirPath>$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish</PublishDirPath>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\..\..\Compiler\Microsoft.CodeAnalysis.Razor.Compiler\src\Microsoft.CodeAnalysis.Razor.Compiler.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')">""",
+                """        <PublishDirPath>$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish</PublishDirPath>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\Microsoft.CodeAnalysis.Razor.Workspaces\Microsoft.CodeAnalysis.Razor.Workspaces.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll')">""",
+                """        <PublishDirPath>$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish</PublishDirPath>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyPublishCommand Include="@(_RazorServiceHubDependencyProject -> 'dotnet publish &quot;%(Identity)&quot; -c &quot;$(Configuration)&quot; -f &quot;$(TargetFramework)&quot; -r &quot;$(RuntimeIdentifier)&quot; -p:PublishReadyToRun=$(PublishReadyToRun) -p:RestoreUseStaticGraphEvaluation=false -p:PublishDir=&quot;%(PublishDirPath)&quot; -tl:off -nologo -v:minimal')" />""",
+                """    </ItemGroup>""",
+                """    <Exec Command="%(_RazorServiceHubDependencyPublishCommand.Identity)" Condition="'@(_RazorServiceHubDependencyPublishCommand)' != ''" WorkingDirectory="$(MSBuildProjectDirectory)" />""",
+                """  </Target>"""
+            ]);
+        var publishDependencyProjectsTargetWithCliPublishAndTrailingSlash = string.Join(
+            Environment.NewLine,
+            [
+                """  <Target Name="PublishRazorServiceHubDependencyProjects" Condition="'$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != '' and (!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll'))">""",
+                """    <ItemGroup>""",
+                """      <_RazorServiceHubDependencyProject Include="$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj" Condition="!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll')">""",
+                """        <PublishDirPath>$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</PublishDirPath>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\..\..\Compiler\Microsoft.CodeAnalysis.Razor.Compiler\src\Microsoft.CodeAnalysis.Razor.Compiler.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')">""",
+                """        <PublishDirPath>$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</PublishDirPath>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\Microsoft.CodeAnalysis.Razor.Workspaces\Microsoft.CodeAnalysis.Razor.Workspaces.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll')">""",
+                """        <PublishDirPath>$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</PublishDirPath>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyPublishCommand Include="@(_RazorServiceHubDependencyProject -> 'dotnet publish &quot;%(Identity)&quot; -c &quot;$(Configuration)&quot; -f &quot;$(TargetFramework)&quot; -r &quot;$(RuntimeIdentifier)&quot; -p:PublishReadyToRun=$(PublishReadyToRun) -p:RestoreUseStaticGraphEvaluation=false -p:PublishDir=&quot;%(PublishDirPath)&quot; -tl:off -nologo -v:minimal')" />""",
+                """    </ItemGroup>""",
+                """    <Exec Command="%(_RazorServiceHubDependencyPublishCommand.Identity)" Condition="'@(_RazorServiceHubDependencyPublishCommand)' != ''" WorkingDirectory="$(MSBuildProjectDirectory)" />""",
+                """  </Target>"""
+            ]);
         var publishDependencyProjectsTargetWithBuildOutputPaths = string.Join(
             Environment.NewLine,
             [
@@ -6034,6 +6102,7 @@ internal static class PostMergeCleanupRunner
             ]);
         const string publishProjectOutputGroupHeader = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="Publish" Returns="@(_PublishedFiles)">""";
         const string publishProjectOutputGroupHeaderWithDependencyPublish = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="Publish;PublishRazorServiceHubDependencyProjects" Returns="@(_PublishedFiles)">""";
+        const string publishProjectOutputGroupHeaderWithDependencyPublishFirst = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="PublishRazorServiceHubDependencyProjects;Publish" Returns="@(_PublishedFiles)">""";
         var updatedContent = originalContent.Replace(
             artifactIncludeBlock,
             readyToRunFallbackArtifactIncludeBlock,
@@ -6052,22 +6121,49 @@ internal static class PostMergeCleanupRunner
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithBuildOutputPaths,
+            publishDependencyProjectsTargetWithCliPublish,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
             publishDependencyProjectsTarget,
+            publishDependencyProjectsTargetWithCliPublish,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
+            publishDependencyProjectsTargetWithRestore,
+            publishDependencyProjectsTargetWithCliPublish,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
+            publishDependencyProjectsTargetWithLegacyRestore,
+            publishDependencyProjectsTargetWithCliPublish,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
+            publishDependencyProjectsTargetWithCliPublishAndTrailingSlash,
+            publishDependencyProjectsTargetWithCliPublish,
             StringComparison.Ordinal);
         if (!updatedContent.Contains("""<Target Name="PublishRazorServiceHubDependencyProjects" """, StringComparison.Ordinal))
         {
             updatedContent = updatedContent.Replace(
                 publishProjectOutputGroupHeader,
-                publishDependencyProjectsTarget + Environment.NewLine + Environment.NewLine + publishProjectOutputGroupHeaderWithDependencyPublish,
+                publishDependencyProjectsTargetWithCliPublish + Environment.NewLine + Environment.NewLine + publishProjectOutputGroupHeaderWithDependencyPublishFirst,
                 StringComparison.Ordinal);
         }
 
         updatedContent = updatedContent.Replace(
             publishProjectOutputGroupHeader,
+            publishProjectOutputGroupHeaderWithDependencyPublishFirst,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
             publishProjectOutputGroupHeaderWithDependencyPublish,
+            publishProjectOutputGroupHeaderWithDependencyPublishFirst,
             StringComparison.Ordinal);
         if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
         {
+            if (originalContent.Contains(publishDependencyProjectsTargetWithCliPublish, StringComparison.Ordinal)
+                && originalContent.Contains(readyToRunFallbackArtifactIncludeBlock, StringComparison.Ordinal)
+                && originalContent.Contains(publishProjectOutputGroupHeaderWithDependencyPublishFirst, StringComparison.Ordinal))
+            {
+                return "No Razor ServiceHub ReadyToRun publish-fallback cleanup changes were needed.";
+            }
+
             throw new InvalidOperationException(
                 $"Could not find the Razor ServiceHub publish fallback block in '{remoteRazorProjectPath}'.");
         }
