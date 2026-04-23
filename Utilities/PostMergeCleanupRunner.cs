@@ -6063,6 +6063,28 @@ internal static class PostMergeCleanupRunner
                 """    <Exec Command="%(_RazorServiceHubDependencyPublishCommand.Identity)" Condition="'@(_RazorServiceHubDependencyPublishCommand)' != ''" WorkingDirectory="$(MSBuildProjectDirectory)" />""",
                 """  </Target>"""
             ]);
+        var publishDependencyProjectsTargetWithIsolatedCliPublish = string.Join(
+            Environment.NewLine,
+            [
+                """  <Target Name="PublishRazorServiceHubDependencyProjects" Condition="'$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != '' and (!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll'))">""",
+                """    <ItemGroup>""",
+                """      <_RazorServiceHubDependencyProject Include="$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj" Condition="!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll')">""",
+                """        <PublishDirPath>$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish</PublishDirPath>""",
+                """        <IsolatedArtifactsDirPath>$(ArtifactsDir)servicehub-fallback-publish\Microsoft.AspNetCore.Razor.Utilities.Shared</IsolatedArtifactsDirPath>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\..\..\Compiler\Microsoft.CodeAnalysis.Razor.Compiler\src\Microsoft.CodeAnalysis.Razor.Compiler.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll')">""",
+                """        <PublishDirPath>$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish</PublishDirPath>""",
+                """        <IsolatedArtifactsDirPath>$(ArtifactsDir)servicehub-fallback-publish\Microsoft.CodeAnalysis.Razor.Compiler</IsolatedArtifactsDirPath>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyProject Include="..\Microsoft.CodeAnalysis.Razor.Workspaces\Microsoft.CodeAnalysis.Razor.Workspaces.csproj" Condition="!Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll')">""",
+                """        <PublishDirPath>$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish</PublishDirPath>""",
+                """        <IsolatedArtifactsDirPath>$(ArtifactsDir)servicehub-fallback-publish\Microsoft.CodeAnalysis.Razor.Workspaces</IsolatedArtifactsDirPath>""",
+                """      </_RazorServiceHubDependencyProject>""",
+                """      <_RazorServiceHubDependencyPublishCommand Include="@(_RazorServiceHubDependencyProject -> 'dotnet publish &quot;%(Identity)&quot; -c &quot;$(Configuration)&quot; -f &quot;$(TargetFramework)&quot; -r &quot;$(RuntimeIdentifier)&quot; --disable-build-servers -p:PublishReadyToRun=$(PublishReadyToRun) -p:RestoreUseStaticGraphEvaluation=false -p:ArtifactsDir=&quot;%(IsolatedArtifactsDirPath)&quot; -p:PublishDir=&quot;%(PublishDirPath)&quot; -tl:off -nologo -v:minimal')" />""",
+                """    </ItemGroup>""",
+                """    <Exec Command="%(_RazorServiceHubDependencyPublishCommand.Identity)" Condition="'@(_RazorServiceHubDependencyPublishCommand)' != ''" WorkingDirectory="$(MSBuildProjectDirectory)" />""",
+                """  </Target>"""
+            ]);
         var publishDependencyProjectsTargetWithCliPublishAndTrailingSlash = string.Join(
             Environment.NewLine,
             [
@@ -6121,29 +6143,33 @@ internal static class PostMergeCleanupRunner
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithBuildOutputPaths,
-            publishDependencyProjectsTargetWithCliPublish,
+            publishDependencyProjectsTargetWithIsolatedCliPublish,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTarget,
-            publishDependencyProjectsTargetWithCliPublish,
+            publishDependencyProjectsTargetWithIsolatedCliPublish,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithRestore,
-            publishDependencyProjectsTargetWithCliPublish,
+            publishDependencyProjectsTargetWithIsolatedCliPublish,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithLegacyRestore,
-            publishDependencyProjectsTargetWithCliPublish,
+            publishDependencyProjectsTargetWithIsolatedCliPublish,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithCliPublishAndTrailingSlash,
+            publishDependencyProjectsTargetWithIsolatedCliPublish,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithCliPublish,
+            publishDependencyProjectsTargetWithIsolatedCliPublish,
             StringComparison.Ordinal);
         if (!updatedContent.Contains("""<Target Name="PublishRazorServiceHubDependencyProjects" """, StringComparison.Ordinal))
         {
             updatedContent = updatedContent.Replace(
                 publishProjectOutputGroupHeader,
-                publishDependencyProjectsTargetWithCliPublish + Environment.NewLine + Environment.NewLine + publishProjectOutputGroupHeaderWithDependencyPublishFirst,
+                publishDependencyProjectsTargetWithIsolatedCliPublish + Environment.NewLine + Environment.NewLine + publishProjectOutputGroupHeaderWithDependencyPublishFirst,
                 StringComparison.Ordinal);
         }
 
@@ -6157,7 +6183,7 @@ internal static class PostMergeCleanupRunner
             StringComparison.Ordinal);
         if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
         {
-            if (originalContent.Contains(publishDependencyProjectsTargetWithCliPublish, StringComparison.Ordinal)
+            if (originalContent.Contains(publishDependencyProjectsTargetWithIsolatedCliPublish, StringComparison.Ordinal)
                 && originalContent.Contains(readyToRunFallbackArtifactIncludeBlock, StringComparison.Ordinal)
                 && originalContent.Contains(publishProjectOutputGroupHeaderWithDependencyPublishFirst, StringComparison.Ordinal))
             {
