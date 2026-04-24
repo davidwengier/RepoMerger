@@ -6085,6 +6085,57 @@ internal static class PostMergeCleanupRunner
                 """    <Exec Command="%(_RazorServiceHubDependencyPublishCommand.Identity)" Condition="'@(_RazorServiceHubDependencyPublishCommand)' != ''" WorkingDirectory="$(MSBuildProjectDirectory)" />""",
                 """  </Target>"""
             ]);
+        var publishDependencyProjectsTargetWithOfficialBuildIdIsolatedCliPublish = publishDependencyProjectsTargetWithIsolatedCliPublish.Replace(
+            """-p:PublishReadyToRun=$(PublishReadyToRun)""",
+            """-p:OfficialBuildId=&quot;$(OfficialBuildId)&quot; -p:PublishReadyToRun=$(PublishReadyToRun)""",
+            StringComparison.Ordinal);
+        var repairDependencyMetadataTarget = string.Join(
+            Environment.NewLine,
+            [
+                """  <Target Name="RepairRazorServiceHubDependencyMetadata" Condition="'$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != '' and Exists('$(PublishDir)Microsoft.CodeAnalysis.Remote.Razor.deps.json') and (!Exists('$(PublishDir)Microsoft.AspNetCore.Razor.Utilities.Shared.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Compiler.dll') or !Exists('$(PublishDir)Microsoft.CodeAnalysis.Razor.Workspaces.dll'))">""",
+                """    <PropertyGroup>""",
+                """      <_RazorServiceHubDependencyMetadataScriptPath>$(IntermediateOutputPath)RepairRazorServiceHubDependencyMetadata.ps1</_RazorServiceHubDependencyMetadataScriptPath>""",
+                """    </PropertyGroup>""",
+                """    <ItemGroup>""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="param([string]$DepsPath,[string]$UtilitiesAssemblyPath,[string]$CompilerAssemblyPath,[string]$WorkspacesAssemblyPath)" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$ErrorActionPreference = 'Stop'" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="if (-not (Test-Path $DepsPath)) { throw ('Deps file ''{0}'' was not found.' -f $DepsPath) }" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$deps = Get-Content $DepsPath -Raw | ConvertFrom-Json" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="function Get-JsonPropertyValue($object, [string]$name) { $property = $object.PSObject.Properties[$name]; if ($null -eq $property) { return $null }; return $property.Value }" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="function Set-JsonPropertyValue($object, [string]$name, $value) { $property = $object.PSObject.Properties[$name]; if ($null -eq $property) { $object | Add-Member -NotePropertyName $name -NotePropertyValue $value -Force } else { $property.Value = $value } }" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$runtimeTargetName = $deps.runtimeTarget.name" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$runtimeTargets = Get-JsonPropertyValue $deps.targets $runtimeTargetName" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$rootKey = $runtimeTargets.PSObject.Properties.Name | Where-Object { $_ -like 'Microsoft.CodeAnalysis.Remote.Razor/*' } | Select-Object -First 1" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="if ([string]::IsNullOrEmpty($rootKey)) { throw 'Could not locate the Remote.Razor runtime target in the deps file.' }" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$rootTarget = Get-JsonPropertyValue $runtimeTargets $rootKey" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$rootDependencies = $rootTarget.dependencies" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$razorVersion = $rootKey.Substring('Microsoft.CodeAnalysis.Remote.Razor/'.Length)" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$roslynVersion = Get-JsonPropertyValue $rootDependencies 'Microsoft.CodeAnalysis.Remote.ServiceHub'" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="if ([string]::IsNullOrEmpty($roslynVersion)) { throw 'Could not determine the Roslyn package version from the Remote.ServiceHub dependency.' }" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="function Get-PackageVersion($libraries, [string]$packageId, [string]$fallbackVersion) { $key = $libraries.PSObject.Properties.Name | Where-Object { $_ -like ($packageId + '/*') } | Sort-Object | Select-Object -First 1; if ($null -eq $key) { return $fallbackVersion }; return $key.Substring($packageId.Length + 1) }" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="function Get-AssemblyEntry([string]$assemblyPath) { if (-not (Test-Path $assemblyPath)) { throw ('Fallback assembly ''{0}'' was not found.' -f $assemblyPath) }; $fileVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($assemblyPath).FileVersion; $assemblyVersion = [System.Reflection.AssemblyName]::GetAssemblyName($assemblyPath).Version.ToString(); return [ordered]@{ assemblyVersion = $assemblyVersion; fileVersion = $fileVersion } }" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="function New-LocaleResources([string]$resourceBaseName) { $resources = [ordered]@{}; foreach ($locale in 'cs','de','es','fr','it','ja','ko','pl','pt-BR','ru','tr','zh-Hans','zh-Hant') { $resourcePath = [string]::Format('{0}/{1}.resources.dll', $locale, $resourceBaseName); $resources[$resourcePath] = [ordered]@{ locale = $locale } }; return $resources }" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$libraries = $deps.libraries" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$objectPoolVersion = Get-PackageVersion $libraries 'Microsoft.Extensions.ObjectPool' '10.0.1'" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$csharpVersion = Get-PackageVersion $libraries 'Microsoft.CodeAnalysis.CSharp' $roslynVersion" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$externalAccessRazorFeaturesVersion = Get-PackageVersion $libraries 'Microsoft.CodeAnalysis.ExternalAccess.Razor.Features' $roslynVersion" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$workspacesCommonVersion = Get-PackageVersion $libraries 'Microsoft.CodeAnalysis.Workspaces.Common' $roslynVersion" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="Set-JsonPropertyValue $rootDependencies 'Microsoft.CodeAnalysis.Razor.Workspaces' $razorVersion" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$utilitiesKey = 'Microsoft.AspNetCore.Razor.Utilities.Shared/' + $razorVersion" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$compilerKey = 'Microsoft.CodeAnalysis.Razor.Compiler/' + $razorVersion" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="$workspacesKey = 'Microsoft.CodeAnalysis.Razor.Workspaces/' + $razorVersion" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="Set-JsonPropertyValue $runtimeTargets $utilitiesKey ([pscustomobject][ordered]@{ dependencies = [pscustomobject][ordered]@{ 'Microsoft.Extensions.ObjectPool' = $objectPoolVersion }; runtime = [pscustomobject][ordered]@{ 'Microsoft.AspNetCore.Razor.Utilities.Shared.dll' = (Get-AssemblyEntry $UtilitiesAssemblyPath) }; resources = [pscustomobject](New-LocaleResources 'Microsoft.AspNetCore.Razor.Utilities.Shared') })" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="Set-JsonPropertyValue $runtimeTargets $compilerKey ([pscustomobject][ordered]@{ dependencies = [pscustomobject][ordered]@{ 'Microsoft.AspNetCore.Razor.Utilities.Shared' = $razorVersion; 'Microsoft.CodeAnalysis.CSharp' = $csharpVersion }; runtime = [pscustomobject][ordered]@{ 'Microsoft.CodeAnalysis.Razor.Compiler.dll' = (Get-AssemblyEntry $CompilerAssemblyPath) } })" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="Set-JsonPropertyValue $runtimeTargets $workspacesKey ([pscustomobject][ordered]@{ dependencies = [pscustomobject][ordered]@{ 'Microsoft.AspNetCore.Razor.Utilities.Shared' = $razorVersion; 'Microsoft.CodeAnalysis.CSharp' = $csharpVersion; 'Microsoft.CodeAnalysis.ExternalAccess.Razor.Features' = $externalAccessRazorFeaturesVersion; 'Microsoft.CodeAnalysis.Razor.Compiler' = $razorVersion; 'Microsoft.CodeAnalysis.Workspaces.Common' = $workspacesCommonVersion }; runtime = [pscustomobject][ordered]@{ 'Microsoft.CodeAnalysis.Razor.Workspaces.dll' = (Get-AssemblyEntry $WorkspacesAssemblyPath) }; resources = [pscustomobject](New-LocaleResources 'Microsoft.CodeAnalysis.Razor.Workspaces') })" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="Set-JsonPropertyValue $libraries $utilitiesKey ([pscustomobject][ordered]@{ type = 'project'; serviceable = $false; sha512 = '' })" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="Set-JsonPropertyValue $libraries $compilerKey ([pscustomobject][ordered]@{ type = 'project'; serviceable = $false; sha512 = '' })" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="Set-JsonPropertyValue $libraries $workspacesKey ([pscustomobject][ordered]@{ type = 'project'; serviceable = $false; sha512 = '' })" />""",
+                """      <_RazorServiceHubDependencyMetadataScriptLine Include="[System.IO.File]::WriteAllText($DepsPath, ($deps | ConvertTo-Json -Depth 100), [System.Text.UTF8Encoding]::new($false))" />""",
+                """    </ItemGroup>""",
+                """    <WriteLinesToFile File="$(_RazorServiceHubDependencyMetadataScriptPath)" Lines="@(_RazorServiceHubDependencyMetadataScriptLine)" Overwrite="true" />""",
+                """    <Exec Command="powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(_RazorServiceHubDependencyMetadataScriptPath)&quot; -DepsPath &quot;$(PublishDir)Microsoft.CodeAnalysis.Remote.Razor.deps.json&quot; -UtilitiesAssemblyPath &quot;$(ArtifactsDir)bin\Microsoft.AspNetCore.Razor.Utilities.Shared\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\Microsoft.AspNetCore.Razor.Utilities.Shared.dll&quot; -CompilerAssemblyPath &quot;$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Compiler\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\Microsoft.CodeAnalysis.Razor.Compiler.dll&quot; -WorkspacesAssemblyPath &quot;$(ArtifactsDir)bin\Microsoft.CodeAnalysis.Razor.Workspaces\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\Microsoft.CodeAnalysis.Razor.Workspaces.dll&quot;" WorkingDirectory="$(MSBuildProjectDirectory)" />""",
+                """  </Target>"""
+            ]);
         var publishDependencyProjectsTargetWithCliPublishAndTrailingSlash = string.Join(
             Environment.NewLine,
             [
@@ -6125,7 +6176,46 @@ internal static class PostMergeCleanupRunner
         const string publishProjectOutputGroupHeader = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="Publish" Returns="@(_PublishedFiles)">""";
         const string publishProjectOutputGroupHeaderWithDependencyPublish = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="Publish;PublishRazorServiceHubDependencyProjects" Returns="@(_PublishedFiles)">""";
         const string publishProjectOutputGroupHeaderWithDependencyPublishFirst = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="PublishRazorServiceHubDependencyProjects;Publish" Returns="@(_PublishedFiles)">""";
-        var updatedContent = originalContent.Replace(
+        const string publishProjectOutputGroupHeaderWithDependencyPublishAndMetadataRepair = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="PublishRazorServiceHubDependencyProjects;Publish;RepairRazorServiceHubDependencyMetadata" Returns="@(_PublishedFiles)">""";
+        var updatedContent = originalContent;
+        updatedContent = EnsureProjectReferenceHasMetadataElement(
+            updatedContent,
+            RazorRemoteRazorWorkspacesProjectReferencePath,
+            "Private",
+            "true");
+        updatedContent = EnsureProjectReferenceHasMetadataElement(
+            updatedContent,
+            RazorRemoteRazorRemoteServiceHubProjectReferencePath,
+            "Private",
+            "true");
+        updatedContent = EnsureProjectReferenceAfterProjectReference(
+            updatedContent,
+            RazorRemoteRazorWorkspacesProjectReferencePath,
+            RazorRemoteRazorCompilerProjectReferencePath);
+        updatedContent = EnsureProjectReferenceHasMetadataElement(
+            updatedContent,
+            RazorRemoteRazorCompilerProjectReferencePath,
+            "Private",
+            "true");
+        updatedContent = EnsureProjectReferenceAfterProjectReference(
+            updatedContent,
+            RazorRemoteRazorCompilerProjectReferencePath,
+            RazorRemoteRazorUtilitiesProjectReferencePath);
+        updatedContent = EnsureProjectReferenceHasMetadataElement(
+            updatedContent,
+            RazorRemoteRazorUtilitiesProjectReferencePath,
+            "Private",
+            "true");
+        updatedContent = EnsureProjectReferenceAfterProjectReference(
+            updatedContent,
+            RazorRemoteRazorUtilitiesProjectReferencePath,
+            RazorRemoteRazorExternalAccessFeaturesProjectReferencePath);
+        updatedContent = EnsureProjectReferenceHasMetadataElement(
+            updatedContent,
+            RazorRemoteRazorExternalAccessFeaturesProjectReferencePath,
+            "Private",
+            "true");
+        updatedContent = updatedContent.Replace(
             artifactIncludeBlock,
             readyToRunFallbackArtifactIncludeBlock,
             StringComparison.Ordinal);
@@ -6142,50 +6232,85 @@ internal static class PostMergeCleanupRunner
             readyToRunFallbackArtifactIncludeBlock,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
-            publishDependencyProjectsTargetWithBuildOutputPaths,
             publishDependencyProjectsTargetWithIsolatedCliPublish,
+            publishDependencyProjectsTargetWithOfficialBuildIdIsolatedCliPublish,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
+            publishDependencyProjectsTargetWithBuildOutputPaths,
+            publishDependencyProjectsTargetWithOfficialBuildIdIsolatedCliPublish,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTarget,
-            publishDependencyProjectsTargetWithIsolatedCliPublish,
+            publishDependencyProjectsTargetWithOfficialBuildIdIsolatedCliPublish,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithRestore,
-            publishDependencyProjectsTargetWithIsolatedCliPublish,
+            publishDependencyProjectsTargetWithOfficialBuildIdIsolatedCliPublish,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithLegacyRestore,
-            publishDependencyProjectsTargetWithIsolatedCliPublish,
+            publishDependencyProjectsTargetWithOfficialBuildIdIsolatedCliPublish,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithCliPublishAndTrailingSlash,
-            publishDependencyProjectsTargetWithIsolatedCliPublish,
+            publishDependencyProjectsTargetWithOfficialBuildIdIsolatedCliPublish,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishDependencyProjectsTargetWithCliPublish,
-            publishDependencyProjectsTargetWithIsolatedCliPublish,
+            publishDependencyProjectsTargetWithOfficialBuildIdIsolatedCliPublish,
             StringComparison.Ordinal);
         if (!updatedContent.Contains("""<Target Name="PublishRazorServiceHubDependencyProjects" """, StringComparison.Ordinal))
         {
             updatedContent = updatedContent.Replace(
                 publishProjectOutputGroupHeader,
-                publishDependencyProjectsTargetWithIsolatedCliPublish + Environment.NewLine + Environment.NewLine + publishProjectOutputGroupHeaderWithDependencyPublishFirst,
+                publishDependencyProjectsTargetWithOfficialBuildIdIsolatedCliPublish + Environment.NewLine + Environment.NewLine + repairDependencyMetadataTarget + Environment.NewLine + Environment.NewLine + publishProjectOutputGroupHeaderWithDependencyPublishAndMetadataRepair,
                 StringComparison.Ordinal);
         }
 
         updatedContent = updatedContent.Replace(
             publishProjectOutputGroupHeader,
-            publishProjectOutputGroupHeaderWithDependencyPublishFirst,
+            publishProjectOutputGroupHeaderWithDependencyPublishAndMetadataRepair,
             StringComparison.Ordinal);
         updatedContent = updatedContent.Replace(
             publishProjectOutputGroupHeaderWithDependencyPublish,
-            publishProjectOutputGroupHeaderWithDependencyPublishFirst,
+            publishProjectOutputGroupHeaderWithDependencyPublishAndMetadataRepair,
             StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
+            publishProjectOutputGroupHeaderWithDependencyPublishFirst,
+            publishProjectOutputGroupHeaderWithDependencyPublishAndMetadataRepair,
+            StringComparison.Ordinal);
+        if (!updatedContent.Contains("""<Target Name="RepairRazorServiceHubDependencyMetadata" """, StringComparison.Ordinal))
+        {
+            updatedContent = updatedContent.Replace(
+                publishProjectOutputGroupHeaderWithDependencyPublishAndMetadataRepair,
+                repairDependencyMetadataTarget + Environment.NewLine + Environment.NewLine + publishProjectOutputGroupHeaderWithDependencyPublishAndMetadataRepair,
+                StringComparison.Ordinal);
+        }
+
+        updatedContent = RemoveNamedTarget(updatedContent, "PublishRazorServiceHubDependencyProjects");
+        updatedContent = RemoveNamedTarget(updatedContent, "RepairRazorServiceHubDependencyMetadata");
+        updatedContent = updatedContent.Replace(
+            publishProjectOutputGroupHeaderWithDependencyPublishAndMetadataRepair,
+            publishProjectOutputGroupHeader,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
+            publishProjectOutputGroupHeaderWithDependencyPublishFirst,
+            publishProjectOutputGroupHeader,
+            StringComparison.Ordinal);
+        updatedContent = updatedContent.Replace(
+            publishProjectOutputGroupHeaderWithDependencyPublish,
+            publishProjectOutputGroupHeader,
+            StringComparison.Ordinal);
+        updatedContent = RemoveEmptyMsBuildItemGroups(updatedContent);
         if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
         {
-            if (originalContent.Contains(publishDependencyProjectsTargetWithIsolatedCliPublish, StringComparison.Ordinal)
-                && originalContent.Contains(readyToRunFallbackArtifactIncludeBlock, StringComparison.Ordinal)
-                && originalContent.Contains(publishProjectOutputGroupHeaderWithDependencyPublishFirst, StringComparison.Ordinal))
+            if (updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorCompilerProjectReferencePath}">""", StringComparison.Ordinal)
+                && updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorUtilitiesProjectReferencePath}">""", StringComparison.Ordinal)
+                && updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorExternalAccessFeaturesProjectReferencePath}">""", StringComparison.Ordinal)
+                && updatedContent.Contains(readyToRunFallbackArtifactIncludeBlock, StringComparison.Ordinal)
+                && updatedContent.Contains(publishProjectOutputGroupHeader, StringComparison.Ordinal)
+                && !updatedContent.Contains("""<Target Name="RepairRazorServiceHubDependencyMetadata" """, StringComparison.Ordinal)
+                && !updatedContent.Contains("""<Target Name="PublishRazorServiceHubDependencyProjects" """, StringComparison.Ordinal))
             {
                 return "No Razor ServiceHub ReadyToRun publish-fallback cleanup changes were needed.";
             }
@@ -6200,7 +6325,7 @@ internal static class PostMergeCleanupRunner
             "add",
             "--",
             Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)).ConfigureAwait(false);
-        return $"Updated Razor ServiceHub dependency fallbacks in '{Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)}' to publish ReadyToRun dependency outputs before falling back.";
+        return $"Updated Razor ServiceHub publish closure in '{Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)}' so official Remote.Razor publish carries the full Razor dependency graph and keeps artifact-backed R2R outputs only as fallbacks.";
     }
 
     private static async Task<string> IncludeRazorCoreComponentsVsixManifestsAsync(StageContext context)
@@ -9667,6 +9792,21 @@ public class SurveyPrompt : ComponentBase
 
   <Target Name="PublishVsixItems" DependsOnTargets="Publish;PublishedProjectOutputGroup" Returns="@(_PublishedFiles)" />
 """;
+
+    private const string RazorRemoteRazorWorkspacesProjectReferencePath =
+        @"..\Microsoft.CodeAnalysis.Razor.Workspaces\Microsoft.CodeAnalysis.Razor.Workspaces.csproj";
+
+    private const string RazorRemoteRazorRemoteServiceHubProjectReferencePath =
+        @"..\..\..\..\..\Workspaces\Remote\ServiceHub\Microsoft.CodeAnalysis.Remote.ServiceHub.csproj";
+
+    private const string RazorRemoteRazorCompilerProjectReferencePath =
+        @"..\..\..\Compiler\Microsoft.CodeAnalysis.Razor.Compiler\src\Microsoft.CodeAnalysis.Razor.Compiler.csproj";
+
+    private const string RazorRemoteRazorUtilitiesProjectReferencePath =
+        @"$(SharedSourceRoot)Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj";
+
+    private const string RazorRemoteRazorExternalAccessFeaturesProjectReferencePath =
+        @"..\..\..\..\..\Tools\ExternalAccess\Razor\Features\Microsoft.CodeAnalysis.ExternalAccess.Razor.Features.csproj";
 
     private const string RazorVsixWrapperCoreComponentsProjectReferencePath =
         @"..\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents\x64\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj";
