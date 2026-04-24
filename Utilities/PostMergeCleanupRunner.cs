@@ -4937,6 +4937,20 @@ internal static class PostMergeCleanupRunner
         return content.Insert(projectEndIndex, $"{newline}{newline}{importLine}{newline}");
     }
 
+    private static string EnsureBlockBeforeProjectEnd(string content, string uniqueNeedle, string block)
+    {
+        if (content.Contains(uniqueNeedle, StringComparison.Ordinal))
+            return content;
+
+        var projectEndIndex = content.LastIndexOf("</Project>", StringComparison.Ordinal);
+        if (projectEndIndex < 0)
+            return content;
+
+        var newline = content.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var normalizedBlock = block.ReplaceLineEndings(newline);
+        return content.Insert(projectEndIndex, $"{newline}{newline}{normalizedBlock}{newline}");
+    }
+
     private static async Task<string> NormalizeRazorLiveShareTestSessionAsync(StageContext context)
     {
         var targetRepoRoot = context.TargetRepoRoot;
@@ -5931,6 +5945,20 @@ internal static class PostMergeCleanupRunner
             "src",
             "Microsoft.CodeAnalysis.Remote.Razor",
             "Microsoft.CodeAnalysis.Remote.Razor.csproj");
+        var workspacesProjectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Razor",
+            "src",
+            "Microsoft.CodeAnalysis.Razor.Workspaces",
+            "Microsoft.CodeAnalysis.Razor.Workspaces.csproj");
+        var compilerProjectPath = Path.Combine(
+            context.TargetRoot,
+            "src",
+            "Compiler",
+            "Microsoft.CodeAnalysis.Razor.Compiler",
+            "src",
+            "Microsoft.CodeAnalysis.Razor.Compiler.csproj");
         if (!File.Exists(remoteRazorProjectPath))
             return "No Remote.Razor project was found for ServiceHub ReadyToRun cleanup.";
 
@@ -6177,6 +6205,7 @@ internal static class PostMergeCleanupRunner
         const string publishProjectOutputGroupHeaderWithDependencyPublish = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="Publish;PublishRazorServiceHubDependencyProjects" Returns="@(_PublishedFiles)">""";
         const string publishProjectOutputGroupHeaderWithDependencyPublishFirst = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="PublishRazorServiceHubDependencyProjects;Publish" Returns="@(_PublishedFiles)">""";
         const string publishProjectOutputGroupHeaderWithDependencyPublishAndMetadataRepair = """  <Target Name="PublishProjectOutputGroup" DependsOnTargets="PublishRazorServiceHubDependencyProjects;Publish;RepairRazorServiceHubDependencyMetadata" Returns="@(_PublishedFiles)">""";
+        var summaries = new List<string>();
         var updatedContent = originalContent;
         updatedContent = EnsureProjectReferenceHasMetadataElement(
             updatedContent,
@@ -6302,30 +6331,88 @@ internal static class PostMergeCleanupRunner
             publishProjectOutputGroupHeader,
             StringComparison.Ordinal);
         updatedContent = RemoveEmptyMsBuildItemGroups(updatedContent);
-        if (string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
-        {
-            if (updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorCompilerProjectReferencePath}">""", StringComparison.Ordinal)
-                && updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorUtilitiesProjectReferencePath}">""", StringComparison.Ordinal)
-                && updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorExternalAccessFeaturesProjectReferencePath}">""", StringComparison.Ordinal)
-                && updatedContent.Contains(readyToRunFallbackArtifactIncludeBlock, StringComparison.Ordinal)
-                && updatedContent.Contains(publishProjectOutputGroupHeader, StringComparison.Ordinal)
-                && !updatedContent.Contains("""<Target Name="RepairRazorServiceHubDependencyMetadata" """, StringComparison.Ordinal)
-                && !updatedContent.Contains("""<Target Name="PublishRazorServiceHubDependencyProjects" """, StringComparison.Ordinal))
-            {
-                return "No Razor ServiceHub ReadyToRun publish-fallback cleanup changes were needed.";
-            }
+        var remoteProjectAlreadyValid =
+            updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorCompilerProjectReferencePath}">""", StringComparison.Ordinal)
+            && updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorUtilitiesProjectReferencePath}">""", StringComparison.Ordinal)
+            && updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorExternalAccessFeaturesProjectReferencePath}">""", StringComparison.Ordinal)
+            && updatedContent.Contains(readyToRunFallbackArtifactIncludeBlock, StringComparison.Ordinal)
+            && updatedContent.Contains(publishProjectOutputGroupHeader, StringComparison.Ordinal)
+            && !updatedContent.Contains("""<Target Name="RepairRazorServiceHubDependencyMetadata" """, StringComparison.Ordinal)
+            && !updatedContent.Contains("""<Target Name="PublishRazorServiceHubDependencyProjects" """, StringComparison.Ordinal);
 
+        if (!string.Equals(originalContent, updatedContent, StringComparison.Ordinal))
+        {
+            await WriteTextPreservingUtf8BomAsync(remoteRazorProjectPath, updatedContent, templatePath: remoteRazorProjectPath).ConfigureAwait(false);
+            await GitRunner.RunGitAsync(
+                targetRepoRoot,
+                "add",
+                "--",
+                Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)).ConfigureAwait(false);
+            summaries.Add(
+                $"Updated Razor ServiceHub publish closure in '{Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)}' " +
+                "so official Remote.Razor publish carries the full Razor dependency graph and keeps artifact-backed R2R outputs only as fallbacks.");
+        }
+        else if (!remoteProjectAlreadyValid)
+        {
             throw new InvalidOperationException(
                 $"Could not find the Razor ServiceHub publish fallback block in '{remoteRazorProjectPath}'.");
         }
 
-        await WriteTextPreservingUtf8BomAsync(remoteRazorProjectPath, updatedContent, templatePath: remoteRazorProjectPath).ConfigureAwait(false);
-        await GitRunner.RunGitAsync(
-            targetRepoRoot,
-            "add",
-            "--",
-            Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)).ConfigureAwait(false);
-        return $"Updated Razor ServiceHub publish closure in '{Path.GetRelativePath(targetRepoRoot, remoteRazorProjectPath)}' so official Remote.Razor publish carries the full Razor dependency graph and keeps artifact-backed R2R outputs only as fallbacks.";
+        if (File.Exists(workspacesProjectPath))
+        {
+            var originalWorkspacesContent = await File.ReadAllTextAsync(workspacesProjectPath).ConfigureAwait(false);
+            var updatedWorkspacesContent = EnsureBlockBeforeProjectEnd(
+                originalWorkspacesContent,
+                RazorWorkspacesLanguageServerProtocolProjectReferencePath,
+                RazorWorkspacesReadyToRunPublishReferenceBlock);
+            if (!string.Equals(originalWorkspacesContent, updatedWorkspacesContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(workspacesProjectPath, updatedWorkspacesContent, templatePath: workspacesProjectPath).ConfigureAwait(false);
+                await GitRunner.RunGitAsync(
+                    targetRepoRoot,
+                    "add",
+                    "--",
+                    Path.GetRelativePath(targetRepoRoot, workspacesProjectPath)).ConfigureAwait(false);
+                summaries.Add(
+                    $"Added publish-only Roslyn transitive refs to '{Path.GetRelativePath(targetRepoRoot, workspacesProjectPath)}' " +
+                    "so merged Razor.Workspaces keeps the same ReadyToRun dependency closure as standalone Razor.");
+            }
+            else if (!updatedWorkspacesContent.Contains(RazorWorkspacesLanguageServerProtocolProjectReferencePath, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Could not add the Razor.Workspaces ReadyToRun publish closure block in '{workspacesProjectPath}'.");
+            }
+        }
+
+        if (File.Exists(compilerProjectPath))
+        {
+            var originalCompilerContent = await File.ReadAllTextAsync(compilerProjectPath).ConfigureAwait(false);
+            var updatedCompilerContent = EnsureBlockBeforeProjectEnd(
+                originalCompilerContent,
+                RazorCompilerCommonProjectReferencePath,
+                RazorCompilerReadyToRunPublishReferenceBlock);
+            if (!string.Equals(originalCompilerContent, updatedCompilerContent, StringComparison.Ordinal))
+            {
+                await WriteTextPreservingUtf8BomAsync(compilerProjectPath, updatedCompilerContent, templatePath: compilerProjectPath).ConfigureAwait(false);
+                await GitRunner.RunGitAsync(
+                    targetRepoRoot,
+                    "add",
+                    "--",
+                    Path.GetRelativePath(targetRepoRoot, compilerProjectPath)).ConfigureAwait(false);
+                summaries.Add(
+                    $"Added publish-only Roslyn transitive refs to '{Path.GetRelativePath(targetRepoRoot, compilerProjectPath)}' " +
+                    "so merged Razor.Compiler keeps the same ReadyToRun dependency closure as standalone Razor.");
+            }
+            else if (!updatedCompilerContent.Contains(RazorCompilerCommonProjectReferencePath, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Could not add the Razor.Compiler ReadyToRun publish closure block in '{compilerProjectPath}'.");
+            }
+        }
+
+        return summaries.Count == 0
+            ? "No Razor ServiceHub ReadyToRun publish-fallback cleanup changes were needed."
+            : string.Join(" ", summaries);
     }
 
     private static async Task<string> IncludeRazorCoreComponentsVsixManifestsAsync(StageContext context)
@@ -9807,6 +9894,67 @@ public class SurveyPrompt : ComponentBase
 
     private const string RazorRemoteRazorExternalAccessFeaturesProjectReferencePath =
         @"..\..\..\..\..\Tools\ExternalAccess\Razor\Features\Microsoft.CodeAnalysis.ExternalAccess.Razor.Features.csproj";
+
+    private const string RazorCompilerCommonProjectReferencePath =
+        @"..\..\..\..\..\Compilers\Core\Portable\Microsoft.CodeAnalysis.csproj";
+
+    private const string RazorWorkspacesLanguageServerProtocolProjectReferencePath =
+        @"..\..\..\..\..\LanguageServer\Protocol\Microsoft.CodeAnalysis.LanguageServer.Protocol.csproj";
+
+    private const string RazorCompilerReadyToRunPublishReferenceBlock = """
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0' and '$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != ''">
+    <ProjectReference Update="$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Compilers\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\..\..\Compilers\Core\Portable\Microsoft.CodeAnalysis.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+  </ItemGroup>
+""";
+
+    private const string RazorWorkspacesReadyToRunPublishReferenceBlock = """
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0' and '$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != ''">
+    <ProjectReference Update="..\..\..\..\..\Compilers\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Tools\ExternalAccess\Razor\Features\Microsoft.CodeAnalysis.ExternalAccess.Razor.Features.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Workspaces\Core\Portable\Microsoft.CodeAnalysis.Workspaces.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\Compiler\Microsoft.CodeAnalysis.Razor.Compiler\src\Microsoft.CodeAnalysis.Razor.Compiler.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\..\..\Compilers\Core\Portable\Microsoft.CodeAnalysis.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\..\..\Features\Core\Portable\Microsoft.CodeAnalysis.Features.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\..\..\Features\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.Features.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\..\..\Workspaces\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.Workspaces.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\..\..\LanguageServer\Protocol\Microsoft.CodeAnalysis.LanguageServer.Protocol.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\..\..\Workspaces\Remote\Core\Microsoft.CodeAnalysis.Remote.Workspaces.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\..\..\Scripting\Core\Microsoft.CodeAnalysis.Scripting.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+  </ItemGroup>
+""";
 
     private const string RazorVsixWrapperCoreComponentsProjectReferencePath =
         @"..\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents\x64\Microsoft.CodeAnalysis.Remote.Razor.CoreComponents.x64.csproj";
