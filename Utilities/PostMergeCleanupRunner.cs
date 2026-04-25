@@ -6244,9 +6244,17 @@ internal static class PostMergeCleanupRunner
             RazorRemoteRazorExternalAccessFeaturesProjectReferencePath,
             "Private",
             "true");
+        updatedContent = updatedContent.Replace(
+            RazorRemoteRazorLegacyReadyToRunPublishReferenceBlock,
+            RazorRemoteRazorReadyToRunPublishReferenceBlock,
+            StringComparison.Ordinal);
         updatedContent = EnsureBlockBeforeProjectEnd(
             updatedContent,
-            RazorRemoteRazorExternalAccessRazorCompilerProjectReferencePath,
+            RazorRemoteRazorCompileReferenceMarker,
+            RazorRemoteRazorCompileReferenceBlock);
+        updatedContent = EnsureBlockBeforeProjectEnd(
+            updatedContent,
+            RazorRemoteRazorReadyToRunPublishReferenceMarker,
             RazorRemoteRazorReadyToRunPublishReferenceBlock);
         updatedContent = updatedContent.Replace(
             artifactIncludeBlock,
@@ -6339,7 +6347,8 @@ internal static class PostMergeCleanupRunner
             updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorCompilerProjectReferencePath}">""", StringComparison.Ordinal)
             && updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorUtilitiesProjectReferencePath}">""", StringComparison.Ordinal)
             && updatedContent.Contains($"""<ProjectReference Include="{RazorRemoteRazorExternalAccessFeaturesProjectReferencePath}">""", StringComparison.Ordinal)
-            && updatedContent.Contains(RazorRemoteRazorExternalAccessRazorCompilerProjectReferencePath, StringComparison.Ordinal)
+            && updatedContent.Contains(RazorRemoteRazorCompileReferenceMarker, StringComparison.Ordinal)
+            && updatedContent.Contains(RazorRemoteRazorReadyToRunPublishReferenceMarker, StringComparison.Ordinal)
             && updatedContent.Contains(readyToRunFallbackArtifactIncludeBlock, StringComparison.Ordinal)
             && updatedContent.Contains(publishProjectOutputGroupHeader, StringComparison.Ordinal)
             && !updatedContent.Contains("""<Target Name="RepairRazorServiceHubDependencyMetadata" """, StringComparison.Ordinal)
@@ -9909,6 +9918,12 @@ public class SurveyPrompt : ComponentBase
     private const string RazorWorkspacesLanguageServerProtocolProjectReferencePath =
         @"..\..\..\..\..\LanguageServer\Protocol\Microsoft.CodeAnalysis.LanguageServer.Protocol.csproj";
 
+    private const string RazorRemoteRazorCompileReferenceMarker =
+        "Remote.Razor needs direct Roslyn compile-time references when Remote.ServiceHub is a project reference.";
+
+    private const string RazorRemoteRazorReadyToRunPublishReferenceMarker =
+        "Remote.Razor publish needs Roslyn references copy-local for R2R closure.";
+
     private const string RazorCompilerReadyToRunPublishReferenceBlock = """
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0' and '$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != ''">
     <ProjectReference Update="$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj">
@@ -9923,7 +9938,7 @@ public class SurveyPrompt : ComponentBase
   </ItemGroup>
 """;
 
-    private const string RazorRemoteRazorReadyToRunPublishReferenceBlock = """
+    private const string RazorRemoteRazorLegacyReadyToRunPublishReferenceBlock = """
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0' and '$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != ''">
     <ProjectReference Update="..\Microsoft.CodeAnalysis.Razor.Workspaces\Microsoft.CodeAnalysis.Razor.Workspaces.csproj">
       <Private>true</Private>
@@ -9977,6 +9992,85 @@ public class SurveyPrompt : ComponentBase
       <Private>true</Private>
     </ProjectReference>
     <ProjectReference Include="..\..\..\..\..\Tools\ExternalAccess\RazorCompiler\Microsoft.CodeAnalysis.ExternalAccess.RazorCompiler.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+  </ItemGroup>
+""";
+
+    private const string RazorRemoteRazorCompileReferenceBlock = """
+  <!-- Remote.Razor needs direct Roslyn compile-time references when Remote.ServiceHub is a project reference. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <ProjectReference Include="..\..\..\..\..\Compilers\Core\Portable\Microsoft.CodeAnalysis.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Compilers\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Features\Core\Portable\Microsoft.CodeAnalysis.Features.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Features\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.Features.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Workspaces\Core\Portable\Microsoft.CodeAnalysis.Workspaces.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Workspaces\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.Workspaces.csproj" />
+    <ProjectReference Include="..\..\..\..\..\LanguageServer\Protocol\Microsoft.CodeAnalysis.LanguageServer.Protocol.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Workspaces\Remote\Core\Microsoft.CodeAnalysis.Remote.Workspaces.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Scripting\Core\Microsoft.CodeAnalysis.Scripting.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Features\ExternalAccess\AspNetCore\Microsoft.CodeAnalysis.ExternalAccess.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Features\ExternalAccess\Copilot\Microsoft.CodeAnalysis.ExternalAccess.Copilot.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Tools\ExternalAccess\Extensions\Microsoft.CodeAnalysis.ExternalAccess.Extensions.csproj" />
+    <ProjectReference Include="..\..\..\..\..\Tools\ExternalAccess\RazorCompiler\Microsoft.CodeAnalysis.ExternalAccess.RazorCompiler.csproj" />
+  </ItemGroup>
+""";
+
+    private const string RazorRemoteRazorReadyToRunPublishReferenceBlock = """
+  <!-- Remote.Razor publish needs Roslyn references copy-local for R2R closure. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0' and '$(PublishReadyToRun)' == 'true' and '$(RuntimeIdentifier)' != ''">
+    <ProjectReference Update="..\Microsoft.CodeAnalysis.Razor.Workspaces\Microsoft.CodeAnalysis.Razor.Workspaces.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\Compiler\Microsoft.CodeAnalysis.Razor.Compiler\src\Microsoft.CodeAnalysis.Razor.Compiler.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="$(SharedSourceRoot)\Microsoft.AspNetCore.Razor.Utilities.Shared\Microsoft.AspNetCore.Razor.Utilities.Shared.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Tools\ExternalAccess\Razor\Features\Microsoft.CodeAnalysis.ExternalAccess.Razor.Features.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Workspaces\Remote\ServiceHub\Microsoft.CodeAnalysis.Remote.ServiceHub.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Compilers\Core\Portable\Microsoft.CodeAnalysis.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Compilers\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Features\Core\Portable\Microsoft.CodeAnalysis.Features.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Features\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.Features.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Workspaces\Core\Portable\Microsoft.CodeAnalysis.Workspaces.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Workspaces\CSharp\Portable\Microsoft.CodeAnalysis.CSharp.Workspaces.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\LanguageServer\Protocol\Microsoft.CodeAnalysis.LanguageServer.Protocol.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Workspaces\Remote\Core\Microsoft.CodeAnalysis.Remote.Workspaces.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Scripting\Core\Microsoft.CodeAnalysis.Scripting.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Features\ExternalAccess\AspNetCore\Microsoft.CodeAnalysis.ExternalAccess.AspNetCore.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Features\ExternalAccess\Copilot\Microsoft.CodeAnalysis.ExternalAccess.Copilot.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Tools\ExternalAccess\Extensions\Microsoft.CodeAnalysis.ExternalAccess.Extensions.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+    <ProjectReference Update="..\..\..\..\..\Tools\ExternalAccess\RazorCompiler\Microsoft.CodeAnalysis.ExternalAccess.RazorCompiler.csproj">
       <Private>true</Private>
     </ProjectReference>
   </ItemGroup>
