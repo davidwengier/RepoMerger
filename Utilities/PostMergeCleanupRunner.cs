@@ -278,7 +278,7 @@ internal static class PostMergeCleanupRunner
             "restore-razor-versioning-props",
             "Restore Razor's local package, assembly, and VSIX versioning props in the merged root Directory.Build.props.",
             "Restore Razor versioning props",
-            @"Standalone Razor defines both its package version line and its VSIX tooling version line in eng\Versions.props, but the merged Roslyn tree eagerly computes package and assembly version defaults before src\Razor\Directory.Build.props is imported. The merged Razor subtree should therefore restore both the raw Razor version inputs and the derived version outputs locally instead of inheriting Roslyn's 5.7 version line.",
+            @"Standalone Razor defines both its package version line and its VSIX tooling version line in eng\Versions.props, but the merged Roslyn tree eagerly computes package and assembly version defaults before src\Razor\Directory.Build.props is imported. The merged Razor subtree should therefore restore both the raw Razor version inputs and the derived version outputs locally instead of inheriting Roslyn's 5.8 version line.",
             RestoreRazorVersioningPropsAsync),
         new(
             "restore-razor-vsix-dev-assets",
@@ -5465,8 +5465,8 @@ internal static class PostMergeCleanupRunner
             Environment.NewLine,
             [
                 "  <PropertyGroup Label=\"Razor Tooling Versioning\">",
-                "    <VsixVersionPrefix>18.7.1</VsixVersionPrefix>",
-                "    <AddinMajorVersion>18.7</AddinMajorVersion>",
+                "    <VsixVersionPrefix>18.8.1</VsixVersionPrefix>",
+                "    <AddinMajorVersion>18.8</AddinMajorVersion>",
                 "    <AddinVersion>$(AddinMajorVersion)</AddinVersion>",
                 "    <AddinVersion Condition=\"'$(OfficialBuildId)' != ''\">$(AddinVersion).$(OfficialBuildId)</AddinVersion>",
                 "    <AddinVersion Condition=\"'$(OfficialBuildId)' == ''\">$(AddinVersion).42424242.42</AddinVersion>",
